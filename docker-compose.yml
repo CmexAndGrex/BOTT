@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Укажите POSTGRES_PASSWORD в файле .env}"
+      POSTGRES_DB: app_db
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  migrate:
+    build:
+      context: .
+      target: migrator
+    restart: "no"
+    environment:
+      DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/app_db"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    build: .
+    restart: always
+    environment:
+      DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/app_db"
+      DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:-}"
+      RS_RED_COOKIE: "${RS_RED_COOKIE:-}"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      # Вариант без домена: приложение сразу доступно как http://IP-СЕРВЕРА:3000
+      - "3000:3000"
+      # Если перед ним ставите Caddy/nginx — безопаснее слушать только локально:
+      # - "127.0.0.1:3000:3000"
+
+volumes:
+  pgdata:

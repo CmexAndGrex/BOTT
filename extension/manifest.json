@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "RED OPS — Cookie Sync",
+  "version": "4.0.0",
+  "description": "Zero-config сборка: передаёт cookie rs-red.com на панель RED OPS. Адрес сервера и ключ уже вшиты при скачивании.",
+  "permissions": ["cookies", "alarms", "storage"],
+  "host_permissions": ["https://rs-red.com/*", "__SERVER_URL__/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "RED OPS Cookie Sync"
+  }
+}
