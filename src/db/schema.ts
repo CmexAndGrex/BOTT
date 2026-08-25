@@ -6,6 +6,8 @@ import {
   serial,
   text,
   timestamp,
+  varchar,
+  json,
 } from "drizzle-orm/pg-core";
 
 /** Ключ-значение настроек бота (редактируется из панели) */
@@ -27,7 +29,7 @@ export const members = pgTable("division_members", {
   vacation: boolean("vacation").notNull().default(false),
   discordId: text("discord_id"),
   active: boolean("active").notNull().default(true),
-  warnings: integer("warnings").notNull().default(0), // <-- ДОБАВЛЕНО: Счетчик предупреждений (от 0 до 2)
+  warnings: integer("warnings").notNull().default(0),
   updatedAt: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -48,17 +50,25 @@ export const snapshots = pgTable("stat_snapshots", {
   source: text("source").notNull().default("auto"),
 });
 
-/** Журнал отправок и операций */
+/** ОБЪЕДИНЕННЫЙ ЖУРНАЛ: Содержит и старые системные поля, и новые для редактирования */
 export const logs = pgTable("bot_logs", {
   id: serial("id").primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
-  kind: text("kind").notNull(),
-  title: text("title").notNull(),
+  
+  // Старые поля (нужны для cookies, синхронизаций и пингов)
+  kind: text("kind").notNull().default("system"),
+  title: text("title").notNull().default(""),
   detail: text("detail").notNull().default(""),
   ok: boolean("ok").notNull().default(true),
   error: text("error"),
+
+  // Новые поля (нужны для вкладки "Редактирование" и деталей)
+  category: varchar("category", { length: 50 }).notNull().default("system"),
+  author: varchar("author", { length: 100 }),
+  action: text("action").notNull().default(""),
+  details: json("details"),
 });
 
 /** Защита от повторного срабатывания расписания */
@@ -80,12 +90,12 @@ export const users = pgTable("users", {
     .defaultNow(),
 });
 
-/** НОВОЕ: Еженедельная статистика по каждому бойцу */
+/** Еженедельная статистика по каждому бойцу */
 export const weeklyStats = pgTable("weekly_stats", {
   id: serial("id").primaryKey(),
   memberId: integer("member_id")
     .notNull()
-    .references(() => members.id, { onDelete: "cascade" }), // Если удалить бойца, его история тоже удалится
+    .references(() => members.id, { onDelete: "cascade" }),
   hours: real("hours").notNull().default(0),
   vacation: boolean("vacation").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true })

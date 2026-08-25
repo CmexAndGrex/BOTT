@@ -100,9 +100,15 @@ export default function DashboardPage() {
     <div className="flex flex-col gap-5">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <div className="eyebrow mb-2">пульт управления // танковые войска</div>
-          <h1 className="display text-[34px] font-black leading-tight sm:text-[40px]">Оперативный свод</h1>
-          <p className="mt-2 text-sm" style={{ color: "var(--muted)" }}>Автопинги в 14:45 и 19:45 · контроль онлайна пт–вс в 12:00</p>
+          <h1 className="display text-[28px] font-black leading-tight sm:text-[34px] tracking-wide text-white">
+            Артиллерийско-Танковый Корпус
+          </h1>
+          <div className="mt-2 text-[16px] font-bold uppercase tracking-[0.15em]" style={{ color: "var(--red)" }}>
+            Оперативный свод
+          </div>
+          <p className="mt-2.5 text-sm" style={{ color: "var(--muted)" }}>
+            Автопинги в 14:45 и 19:45 · контроль онлайна пт–вс в 12:00
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="chip"><AlarmClock size={13} style={{ color: "var(--red)" }} /> Операция: <b style={{ color: "var(--text)" }}>{status?.nextRuns?.operation ?? "—"}</b></span>
@@ -110,7 +116,7 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      {/* Показываем панель кнопок только офицерам и админам22 */}
+      {/* Показываем панель кнопок только офицерам и админам */}
       {role !== "guest" && (
         <Section glow>
           <div className="flex flex-wrap items-center gap-3 px-5 py-4">
@@ -146,7 +152,7 @@ export default function DashboardPage() {
         <div className="grid gap-5 sm:grid-cols-2 lg:col-span-7">
           {[
             { key: "total", label: "Всего бойцов", value: stats?.live.total, icon: Users, tint: "#7c9aff", hint: "в подразделении" },
-            { key: "zero", label: "С 0 часов", value: stats?.live.zeroHours, icon: Hourglass, tint: "#ff3d3d", hint: "отображаемый онлайн" },
+            { key: "zero", label: "С 0 часов", value: stats?.live.zeroHours, icon: Hourglass, tint: "#ff3d3d", hint: "людей в подразделении" },
             { key: "passed", label: `Норма ≥ ${norm} ч`, value: stats?.live.passed, icon: Target, tint: "#3ddc84", hint: "выполнили норму" },
             { key: "vacation", label: "В отпуске", value: stats?.live.onVacation, icon: Palmtree, tint: "#ffb020", hint: "не пингуются" },
           ].map((s, i) => (

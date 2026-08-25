@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import React, { useEffect, useState } from "react";
 import {
-  Activity, Bot, Clock3, Globe, LayoutDashboard, Radar,
+  Activity, Bot, Clock3, Globe, LayoutDashboard,
   ScrollText, Settings2, Users, LogIn, LogOut, ShieldAlert
 } from "lucide-react";
 
@@ -75,7 +75,6 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [role, setRole] = useState("guest");
 
-  // Безопасно получаем реальную роль из базы/токена
   useEffect(() => {
     fetch("/api/me", { cache: "no-store" })
       .then(r => r.json())
@@ -116,13 +115,24 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       <div className="fx-bg fx-noise" />
 
       <aside className="sidebar">
-        <Link href="/" className="flex items-center gap-3 px-2 pb-6">
-          <div className="floaty flex items-center justify-center" style={{ width: 42, height: 42, borderRadius: 14, background: "linear-gradient(135deg, #ff5148, #b41d1d 70%)", boxShadow: "0 12px 28px -10px rgba(255,61,61,.65), inset 0 1px 0 rgba(255,255,255,.3)" }}>
-            <Radar size={20} color="#fff" />
+        <Link href="/" className="flex items-center gap-4 px-2 pb-8 pt-2">
+          {/* Идеально круглый логотип (убраны черные углы квадрата) */}
+          <div
+            className="floaty relative flex items-center justify-center shrink-0 ml-1 rounded-full"
+            style={{
+              width: 68,
+              height: 68,
+              boxShadow: "0 0 35px 10px rgba(255,61,61,0.18)",
+            }}
+          >
+            <img 
+              src="/atk-logo.png" 
+              alt="АТК" 
+              className="w-full h-full object-cover rounded-full" 
+            />
           </div>
-          <div>
-            <div className="display text-[15px] font-bold tracking-wide">RED&nbsp;OPS</div>
-            <div className="text-[10px] uppercase" style={{ color: "var(--dim)", letterSpacing: "0.22em" }}>division&nbsp;05</div>
+          <div className="flex-1 text-center pr-3">
+            <div className="display text-[20px] font-bold tracking-widest text-white">ATK&nbsp;RED</div>
           </div>
         </Link>
 
@@ -145,11 +155,11 @@ export default function Shell({ children }: { children: React.ReactNode }) {
         <div className="mt-4 px-2">
           {role === "guest" ? (
             <Link href="/login" className="btn btn-sm w-full" style={{ background: "rgba(255,255,255,0.05)", borderColor: "transparent", color: "var(--text)" }}>
-              <LogIn size={14} /> Вход для командиров
+              <LogIn size={14} /> Вход
             </Link>
           ) : (
             <button onClick={handleLogout} className="btn btn-sm w-full" style={{ background: "rgba(255,61,61,0.1)", borderColor: "transparent", color: "var(--red)" }}>
-              <LogOut size={14} /> Выйти из пульта
+              <LogOut size={14} /> Выйти
             </button>
           )}
         </div>
@@ -159,7 +169,8 @@ export default function Shell({ children }: { children: React.ReactNode }) {
 
       <div className="mobile-bar">
         <Link href="/" className="flex items-center gap-2 pr-2">
-          <Radar size={16} style={{ color: "var(--red)" }} />
+          {/* Обрезанный мобильный логотип */}
+          <img src="/atk-logo.png" alt="АТК" className="w-[28px] h-[28px] object-cover rounded-full" />
         </Link>
         {filteredNav.map((item) => {
           const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);

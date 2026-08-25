@@ -1,5 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { eq } from "drizzle-orm";
+import { db } from "@/db";
+import { logs, users } from "@/db/schema";
+import { jwtVerify } from "jose";
 import {
   DEFAULT_SETTINGS,
   ensureCookieSyncKey,
@@ -12,7 +16,27 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const SECRET = new TextEncoder().encode(process.env.POSTGRES_PASSWORD || "super-secret");
 const SECRET_KEYS = new Set(["rs_cookie", "discord_token"]);
+
+// Словарь понятных названий для журнала
+const SETTING_NAMES: Record<string, string> = {
+  norm_hours: "норму часов",
+  weekly_time: "время проверки онлайн",
+  timezone: "часовой пояс",
+  discord_channel_id: "ID канала Discord",
+  discord_role_id: "ID роли Discord",
+  rs_base_url: "адрес rs-red",
+  rs_subdiv_id: "ID подразделения",
+  op_enabled: "статус задачи пингов",
+  weekly_enabled: "статус проверки онлайн",
+  op_times: "время пингов",
+  weekly_days: "дни проверки онлайн",
+  op_texts: "тексты для операций",
+  op_gifs: "гифки для операций",
+  rs_cookie: "куки rs-red",
+  discord_token: "токен Discord бота",
+};
 
 export async function GET() {
   const map = await getSettings(true);
@@ -41,38 +65,108 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "Некорректный JSON" }, { status: 400 });
   }
 
-  // Перегенерация ключа для расширения
   if (String(body.regenerate_key) === "true") {
     const cookieSyncKey = randomBytes(18).toString("hex");
     await setSettingQuiet("_cookie_sync_key", cookieSyncKey);
     return NextResponse.json({ ok: true, cookieSyncKey });
   }
 
+  const oldMap = await getSettings(true);
   const patch: Record<string, string> = {};
+  const changedKeys: string[] = [];
+  const detailsObj: Record<string, string> = {};
+
   for (const key of Object.keys(DEFAULT_SETTINGS)) {
     const raw = body[key];
     if (typeof raw !== "string") continue;
     const value = raw.trim();
+    const humanName = SETTING_NAMES[key] || `настройку "${key}"`;
+
     if (SECRET_KEYS.has(key)) {
-      // Пустое или замаскированное значение = не менять
       if (!value || value.includes("••")) continue;
-      patch[key] = value;
-      continue;
-    }
-    if (key === "op_enabled" || key === "weekly_enabled") {
-      patch[key] = value === "true" ? "true" : "false";
-      continue;
-    }
-    if (key === "weekly_time") {
-      if (/^\d{1,2}:\d{2}$/.test(value)) {
-        const [h, m] = value.split(":");
-        patch[key] = `${h.padStart(2, "0")}:${m}`;
+      const oldValue = oldMap.get(key) ?? "";
+      if (value !== oldValue) {
+        patch[key] = value;
+        changedKeys.push(humanName);
+        detailsObj[humanName] = "Обновлено (скрыто)";
       }
       continue;
     }
-    patch[key] = value;
+
+    if (key === "op_enabled" || key === "weekly_enabled") {
+      const valBool = value === "true" ? "true" : "false";
+      const oldValue = oldMap.get(key) ?? "false";
+      if (valBool !== oldValue) {
+        patch[key] = valBool;
+        changedKeys.push(humanName);
+        const oldText = oldValue === "true" ? "Включено" : "Выключено";
+        const newText = valBool === "true" ? "Включено" : "Выключено";
+        detailsObj[humanName] = `было: "${oldText}" ➔ стало: "${newText}"`;
+      }
+      continue;
+    }
+
+    if (key === "weekly_time") {
+      if (/^\d{1,2}:\d{2}$/.test(value)) {
+        const [h, m] = value.split(":");
+        const formattedTime = `${h.padStart(2, "0")}:${m}`;
+        const oldValue = oldMap.get(key) ?? "";
+        if (formattedTime !== oldValue) {
+          patch[key] = formattedTime;
+          changedKeys.push(humanName);
+          detailsObj[humanName] = `было: "${oldValue || "пусто"}" ➔ стало: "${formattedTime}"`;
+        }
+      }
+      continue;
+    }
+
+    const oldValue = oldMap.get(key) ?? "";
+    if (value !== oldValue) {
+      patch[key] = value;
+      changedKeys.push(humanName);
+      detailsObj[humanName] = `было: "${oldValue || "пусто"}" ➔ стало: "${value}"`;
+    }
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return NextResponse.json({ ok: true });
   }
 
   await setSettings(patch);
+
+  let authorFormatted = "Командир";
+  try {
+    const token = req.cookies.get("auth_token")?.value;
+    if (token) {
+      const verified = await jwtVerify(token, SECRET);
+      const payload = verified.payload as any;
+      const username = payload.username || payload.sub || payload.name;
+      
+      if (username) {
+        const [dbUser] = await db.select().from(users).where(eq(users.username, username));
+        if (dbUser) {
+          const roleRu = dbUser.role === "admin" ? "Администратор" : "Командир";
+          authorFormatted = `${roleRu} ${dbUser.username}`;
+        } else {
+          const roleRu = payload.role === "admin" ? "Администратор" : "Командир";
+          authorFormatted = `${roleRu} ${username}`;
+        }
+      }
+    }
+  } catch {
+    // Игнорируем
+  }
+
+  await db.insert(logs).values({
+    category: "edit",
+    author: authorFormatted,
+    action: `изменил ${changedKeys.join(", ")}`,
+    details: detailsObj,
+    kind: "system",
+    title: "Изменение настроек",
+    detail: "Обновлены конфигурации системы",
+    ok: true,
+  });
+
   return NextResponse.json({ ok: true });
 }

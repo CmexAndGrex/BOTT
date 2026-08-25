@@ -392,7 +392,7 @@ export default function SettingsPage() {
                 />
               </div>
               <div>
-                <div className="label mb-1.5">Норма, часов</div>
+                <div className="label mb-1.5">Норма в часах</div>
                 <input
                   className="input input-mono"
                   type="number"
