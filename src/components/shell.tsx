@@ -144,7 +144,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
         <div className="mt-4 px-2">
           {role === "guest" ? (
             <Link href="/login" className="btn btn-sm w-full" style={{ background: "rgba(255,255,255,0.05)", borderColor: "transparent", color: "var(--text)" }}>
-              <LogIn size={14} /> Вход для офицеров
+              <LogIn size={14} /> Вход для командиров
             </Link>
           ) : (
             <button onClick={handleLogout} className="btn btn-sm w-full" style={{ background: "rgba(255,61,61,0.1)", borderColor: "transparent", color: "var(--red)" }}>
