@@ -110,7 +110,7 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      {/* Показываем панель кнопок только офицерам и админам */}
+      {/* Показываем панель кнопок только офицерам и админам22 */}
       {role !== "guest" && (
         <Section glow>
           <div className="flex flex-wrap items-center gap-3 px-5 py-4">
