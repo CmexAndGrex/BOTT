@@ -6,7 +6,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import React, { useEffect, useState } from "react";
 import {
   Activity, Bot, Clock3, Globe, LayoutDashboard, Radar,
-  ScrollText, Settings2, Users, LogIn, LogOut
+  ScrollText, Settings2, Users, LogIn, LogOut, ShieldAlert
 } from "lucide-react";
 
 type StatusResponse = {
@@ -91,6 +91,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   const NAV = [
     { href: "/", label: "Обзор", icon: LayoutDashboard, roles: ["guest", "officer", "admin"] },
     { href: "/members", label: "Состав", icon: Users, roles: ["guest", "officer", "admin"] },
+    { href: "/control", label: "Контроль", icon: ShieldAlert, roles: ["officer", "admin"] },
     { href: "/logs", label: "Журнал", icon: ScrollText, roles: ["officer", "admin"] },
     { href: "/settings", label: "Настройки", icon: Settings2, roles: ["admin"] },
   ];

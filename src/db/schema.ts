@@ -27,6 +27,7 @@ export const members = pgTable("division_members", {
   vacation: boolean("vacation").notNull().default(false),
   discordId: text("discord_id"),
   active: boolean("active").notNull().default(true),
+  warnings: integer("warnings").notNull().default(0), // <-- ДОБАВЛЕНО: Счетчик предупреждений (от 0 до 2)
   updatedAt: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -67,12 +68,26 @@ export const cronRuns = pgTable("cron_runs", {
     .notNull()
     .defaultNow(),
 });
+
 /** Учетные записи пользователей для доступа к панели */
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
   username: text("username").unique().notNull(),
   passwordHash: text("password_hash").notNull(),
   role: text("role").notNull().default("officer"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+/** НОВОЕ: Еженедельная статистика по каждому бойцу */
+export const weeklyStats = pgTable("weekly_stats", {
+  id: serial("id").primaryKey(),
+  memberId: integer("member_id")
+    .notNull()
+    .references(() => members.id, { onDelete: "cascade" }), // Если удалить бойца, его история тоже удалится
+  hours: real("hours").notNull().default(0),
+  vacation: boolean("vacation").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
