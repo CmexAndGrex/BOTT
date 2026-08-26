@@ -133,14 +133,16 @@ export default function DashboardPage() {
 
       <div className="grid gap-5 lg:grid-cols-12">
         <Section className="lg:col-span-5 card-hover" title="Выполнение нормы" eyebrow="Текущая неделя">
-          <div className="px-5 py-6">
+          <div className="px-5 py-6 flex flex-col items-center justify-center text-center" style={{ overflow: "visible" }}>
             {stats ? (
               <>
-                <Ring percent={stats.live.percent} color={colorCss}>
-                  <CountUp value={stats.live.percent} decimals={1} className="display text-[34px] font-black" />
-                  <span className="text-[10px] uppercase" style={{ color: "var(--dim)", letterSpacing: "0.2em" }}>нормы</span>
-                </Ring>
-                <div className="mt-4 flex items-center justify-center gap-2">
+                <div className="flex justify-center" style={{ overflow: "visible" }}>
+                  <Ring percent={stats.live.percent} color={colorCss}>
+                    <CountUp value={stats.live.percent} decimals={1} className="display text-[34px] font-black" />
+                    <span className="text-[10px] uppercase" style={{ color: "var(--dim)", letterSpacing: "0.2em" }}>нормы</span>
+                  </Ring>
+                </div>
+                <div className="mt-4 flex flex-col items-center justify-center gap-2">
                   <PctBadge percent={stats.live.percent} />
                   <span className="text-[12px]" style={{ color: "var(--muted)" }}>{stats.live.passed} из {stats.live.total} бойцов · пороги: 50% / 60%</span>
                 </div>
