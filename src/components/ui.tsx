@@ -122,8 +122,8 @@ export function Ring({
   const clamped = Math.max(0, Math.min(100, percent));
   const offset = c - (clamped / 100) * c;
   return (
-    <div className="ring-wrap mx-auto" style={{ width: size, height: size }}>
-      <svg width={size} height={size} className="ring-svg">
+    <div className="ring-wrap mx-auto" style={{ width: size, height: size, overflow: "visible" }}>
+      <svg width={size} height={size} className="ring-svg" style={{ overflow: "visible" }}>
         <defs>
           <linearGradient id="ringFade" x1="0" y1="0" x2="1" y2="1">
             <stop offset="0%" stopColor="#fff" stopOpacity="0.9" />

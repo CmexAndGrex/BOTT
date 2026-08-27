@@ -116,19 +116,21 @@ export default function Shell({ children }: { children: React.ReactNode }) {
 
       <aside className="sidebar">
         <Link href="/" className="flex items-center gap-4 px-2 pb-8 pt-2">
-          {/* Идеально круглый логотип (убраны черные углы квадрата) */}
+          {/* Идеально круглый логотип (с жесткой обрезкой) */}
           <div
-            className="floaty relative flex items-center justify-center shrink-0 ml-1 rounded-full"
+            className="floaty relative flex items-center justify-center shrink-0 ml-1"
             style={{
               width: 68,
               height: 68,
               boxShadow: "0 0 35px 10px rgba(255,61,61,0.18)",
+              borderRadius: "50%",
+              overflow: "hidden"
             }}
           >
             <img 
               src="/atk-logo.png" 
               alt="АТК" 
-              className="w-full h-full object-cover rounded-full" 
+              className="w-full h-full object-cover" 
             />
           </div>
           <div className="flex-1 text-center pr-3">
@@ -170,7 +172,9 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       <div className="mobile-bar">
         <Link href="/" className="flex items-center gap-2 pr-2">
           {/* Обрезанный мобильный логотип */}
-          <img src="/atk-logo.png" alt="АТК" className="w-[28px] h-[28px] object-cover rounded-full" />
+          <div style={{ width: 28, height: 28, borderRadius: "50%", overflow: "hidden" }}>
+            <img src="/atk-logo.png" alt="АТК" className="w-full h-full object-cover" />
+          </div>
         </Link>
         {filteredNav.map((item) => {
           const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
