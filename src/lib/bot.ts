@@ -65,7 +65,8 @@ export function initBot() {
       }
     }
 
-    const actionMatch = commandLine.match(/^(Выдать|Снять)\s+(.+)$/i);
+    // Регулярка теперь опционально "съедает" слово "роль", если оно есть (игнорируя регистр)
+    const actionMatch = commandLine.match(/^(Выдать|Снять)\s+(?:роль\s+)?(.+)$/i);
     if (!actionMatch) {
       const thread = await message.startThread({ name: "Ошибка формата", autoArchiveDuration: 60 });
       await thread.send(`<@&${ROLE_IDS.MODERATOR}> <@${recipientId}> создал заявку несоответствующую форме, закончите операцию вручную.`);
@@ -74,11 +75,12 @@ export function initBot() {
       return;
     }
 
-    const action = actionMatch[1].toLowerCase(); // "выдать" или "снять"
+    const action = actionMatch[1].toLowerCase(); 
     const actionTitle = action === "выдать" ? "Выдача" : "Снятие";
-    const roleName = actionMatch[2].trim();
+    const roleNameInput = actionMatch[2].trim();
+    const normalizedRoleName = roleNameInput.toLowerCase(); // Для поиска без учета регистра
 
-    if (roleName.includes("Модератор") || roleName.includes(ROLE_IDS.MODERATOR)) {
+    if (normalizedRoleName.includes("модератор") || roleNameInput.includes(ROLE_IDS.MODERATOR)) {
       const thread = await message.startThread({ name: "Нарушение прав", autoArchiveDuration: 60 });
       await thread.send(`<@&${ROLE_IDS.MODERATOR}> <@${recipientId}> попытался запросить выдачу/снятие модераторской роли, что запрещено!`);
       await thread.setLocked(true);
@@ -87,17 +89,22 @@ export function initBot() {
     }
 
     let targetRole = null;
-    const isComplex = roleName === "Рядовой ТР" || roleName === "Рядовой АД";
+    let displayRoleName = roleNameInput;
+    const isComplex = normalizedRoleName === "рядовой тр" || normalizedRoleName === "рядовой ад";
 
     if (!isComplex) {
-      targetRole = message.guild?.roles.cache.find(r => r.name === roleName);
+      // Ищем роль на сервере без учета регистра
+      targetRole = message.guild?.roles.cache.find(r => r.name.toLowerCase() === normalizedRoleName);
       if (!targetRole) {
         const thread = await message.startThread({ name: "Роль не найдена", autoArchiveDuration: 60 });
-        await thread.send(`<@&${ROLE_IDS.MODERATOR}> <@${recipientId}> создал заявку на несуществующую роль "${roleName}", закончите операцию вручную.`);
+        await thread.send(`<@&${ROLE_IDS.MODERATOR}> <@${recipientId}> создал заявку на несуществующую роль "${roleNameInput}", закончите операцию вручную.`);
         await thread.setLocked(true);
         await thread.setArchived(true);
         return;
       }
+      displayRoleName = targetRole.name; // Берем правильное имя прямо из Discord
+    } else {
+      displayRoleName = normalizedRoleName === "рядовой тр" ? "Рядовой ТР" : "Рядовой АД";
     }
 
     const displayName = targetMember?.displayName || "бойца";
@@ -107,13 +114,13 @@ export function initBot() {
       autoArchiveDuration: 1440
     });
 
-    const roleDisplay = isComplex ? roleName : `${targetRole?.name} (ID: ${targetRole?.id})`;
+    const roleDisplay = isComplex ? displayRoleName : `${displayRoleName} (ID: ${targetRole?.id})`;
 
-    await thread.send(`🔴 **Ожидание подтверждения операции!**\n\n**Пользователь:** <@${recipientId}>\n**Команда:** ${commandLine}\n**Экзаменатор:** <@${examinerId}>\n**Роль:** ${roleDisplay}\n\nОжидается реакция :ATK: от <@${examinerId}> на исходном сообщении.`);
+    await thread.send(`🔴 **Ожидание подтверждения операции!**\n\n**Пользователь:** <@${recipientId}>\n**Команда:** ${commandLine}\n**Экзаменатор:** <@${examinerId}>\n**Роль:** ${roleDisplay}\n\nОжидается реакция :ATK: от <@${examinerId}> для подтверждения или ❌ для отмены.`);
     await message.react("⏳");
   });
 
-  // === 2. ОБРАБОТЧИК РЕАКЦИЙ (ВЫДАЧА РОЛЕЙ) ===
+  // === 2. ОБРАБОТЧИК РЕАКЦИЙ (ВЫДАЧА ИЛИ ОТМЕНА) ===
   client.on("messageReactionAdd", async (reaction, user) => {
     if (user.bot) return;
 
@@ -133,14 +140,15 @@ export function initBot() {
 
     const recipientMatch = cleanLine1.match(/<@!?(\d+)>/);
     const examinerMatch = cleanLine2.match(/<@!?(\d+)>/);
-    const actionMatch = cleanLine3.match(/^(Выдать|Снять)\s+(.+)$/i);
+    const actionMatch = cleanLine3.match(/^(Выдать|Снять)\s+(?:роль\s+)?(.+)$/i);
     
     if (!recipientMatch || !examinerMatch || !actionMatch) return;
 
     const recipientId = recipientMatch[1];
     const examinerId = examinerMatch[1];
     const action = actionMatch[1].toLowerCase();
-    const roleName = actionMatch[2].trim();
+    const roleNameInput = actionMatch[2].trim();
+    const normalizedRoleName = roleNameInput.toLowerCase();
 
     const thread = message.thread;
     if (!thread) return;
@@ -156,29 +164,46 @@ export function initBot() {
     const isExaminer = user.id === examinerId;
     const isModerator = reactorMember.roles.cache.has(ROLE_IDS.MODERATOR);
     const isAtkReaction = reaction.emoji.name === "ATK";
+    const isCancelReaction = reaction.emoji.name === "❌";
 
-    if (!isAtkReaction) {
+    // Проверка, правильная ли реакция поставлена
+    if (!isAtkReaction && !isCancelReaction) {
       if (isExaminer) {
         await reaction.users.remove(user.id);
-        await thread.send(`⚠️ <@${examinerId}>, пожалуйста, используйте реакцию :ATK: для подтверждения!`);
+        await thread.send(`⚠️ <@${examinerId}>, пожалуйста, используйте реакцию :ATK: для подтверждения или ❌ для отмены!`);
       }
       return;
     }
 
     if (!isExaminer && !isModerator) {
       await reaction.users.remove(user.id);
-      await thread.send(`⚠️ <@${user.id}>, только экзаменатор может подтвердить операцию!`);
+      await thread.send(`⚠️ <@${user.id}>, только экзаменатор может управлять этой операцией!`);
       return;
     }
 
-    const isComplex = roleName === "Рядовой ТР" || roleName === "Рядовой АД";
+    // Если экзаменатор нажал крестик - отменяем операцию
+    if (isCancelReaction) {
+      await message.reactions.cache.get("⏳")?.remove();
+      await message.react("❌");
+      await thread.send(`🛑 Операция была **отменена** экзаменатором <@${user.id}>.`);
+      await thread.setLocked(true);
+      await thread.setArchived(true);
+      return;
+    }
+
+    const isComplex = normalizedRoleName === "рядовой тр" || normalizedRoleName === "рядовой ад";
     let checkRoleId = null;
+    let displayRoleName = roleNameInput;
     
     if (isComplex) {
       checkRoleId = ROLE_IDS.PRIVATE;
+      displayRoleName = normalizedRoleName === "рядовой тр" ? "Рядовой ТР" : "Рядовой АД";
     } else {
-      const targetRole = guild.roles.cache.find(r => r.name === roleName);
-      if (targetRole) checkRoleId = targetRole.id;
+      const targetRole = guild.roles.cache.find(r => r.name.toLowerCase() === normalizedRoleName);
+      if (targetRole) {
+        checkRoleId = targetRole.id;
+        displayRoleName = targetRole.name;
+      }
     }
 
     const hasRole = checkRoleId ? recipientMember.roles.cache.has(checkRoleId) : false;
@@ -186,7 +211,7 @@ export function initBot() {
     if (action === "выдать" && hasRole) {
       await message.reactions.cache.get("⏳")?.remove();
       await message.react("❌");
-      await thread.send(`❌ Пользователь <@${recipientId}> уже имеет роль ${roleName}`);
+      await thread.send(`❌ Пользователь <@${recipientId}> уже имеет роль ${displayRoleName}`);
       await thread.setLocked(true);
       await thread.setArchived(true);
       return;
@@ -195,7 +220,7 @@ export function initBot() {
     if (action === "снять" && !hasRole) {
       await message.reactions.cache.get("⏳")?.remove();
       await message.react("❌");
-      await thread.send(`❌ У пользователя <@${recipientId}> нет роли ${roleName}`);
+      await thread.send(`❌ У пользователя <@${recipientId}> нет роли ${displayRoleName}`);
       await thread.setLocked(true);
       await thread.setArchived(true);
       return;
@@ -208,12 +233,12 @@ export function initBot() {
           if (recipientMember.roles.cache.has(ROLE_IDS.RECRUIT)) await recipientMember.roles.remove(ROLE_IDS.RECRUIT);
           
           await recipientMember.roles.add([ROLE_IDS.ATK_CORPS, ROLE_IDS.RANKS_CATEGORY, ROLE_IDS.PRIVATE]);
-          if (roleName === "Рядовой ТР") await recipientMember.roles.add(ROLE_IDS.TANK_COMP);
-          if (roleName === "Рядовой АД") await recipientMember.roles.add(ROLE_IDS.ARTILLERY_DIV);
+          if (normalizedRoleName === "рядовой тр") await recipientMember.roles.add(ROLE_IDS.TANK_COMP);
+          if (normalizedRoleName === "рядовой ад") await recipientMember.roles.add(ROLE_IDS.ARTILLERY_DIV);
         } else { 
           await recipientMember.roles.remove([ROLE_IDS.ATK_CORPS, ROLE_IDS.RANKS_CATEGORY, ROLE_IDS.PRIVATE]);
-          if (roleName === "Рядовой ТР") await recipientMember.roles.remove(ROLE_IDS.TANK_COMP);
-          if (roleName === "Рядовой АД") await recipientMember.roles.remove(ROLE_IDS.ARTILLERY_DIV);
+          if (normalizedRoleName === "рядовой тр") await recipientMember.roles.remove(ROLE_IDS.TANK_COMP);
+          if (normalizedRoleName === "рядовой ад") await recipientMember.roles.remove(ROLE_IDS.ARTILLERY_DIV);
 
           const hasTank = recipientMember.roles.cache.has(ROLE_IDS.TANK_COMP);
           const hasArt = recipientMember.roles.cache.has(ROLE_IDS.ARTILLERY_DIV);
@@ -225,7 +250,7 @@ export function initBot() {
       }
 
       const approverTitle = isExaminer ? `экзаменатором <@${examinerId}>` : `модератором <@${user.id}>`;
-      await thread.send(`<@${recipientId}> ${approverTitle} была одобрена запрашиваемая вами операция!\n\n✅ **Операция успешно выполнена!**\nРоль: ${roleName} - ${action === "выдать" ? "Выдана" : "Снята"}`);
+      await thread.send(`<@${recipientId}> ${approverTitle} была одобрена запрашиваемая вами операция!\n\n✅ **Операция успешно выполнена!**\nРоль: ${displayRoleName} - ${action === "выдать" ? "Выдана" : "Снята"}`);
       
       await message.reactions.cache.get("⏳")?.remove();
       await message.react("✅");
