@@ -16,6 +16,11 @@ const TEMPLATE_FILES = [
   "README.md",
 ];
 
+// Добавляем отдельный список для бинарных файлов, которые нельзя читать как текст
+const BINARY_FILES = [
+  "icon.png",
+];
+
 /**
  * Персональная сборка расширения «скачал и работает»:
  * адрес панели берётся из самого запроса, ключ синхронизации — из базы.
@@ -58,12 +63,27 @@ export async function GET(req: NextRequest) {
   const zip = new JSZip();
   const dir = path.join(process.cwd(), "extension");
 
+  // 1. Упаковываем текстовые файлы, заменяя плейсхолдеры на реальный домен
   for (const name of TEMPLATE_FILES) {
-    let content = readFileSync(path.join(dir, name), "utf8");
-    content = content.split("__SERVER_URL__").join(origin);
-    content = content.split("__SYNC_KEY__").join(key);
-    content = content.split("__SYNC_KEY_MASKED__").join(keyMasked);
-    zip.file(name, content);
+    try {
+      let content = readFileSync(path.join(dir, name), "utf8");
+      content = content.split("__SERVER_URL__").join(origin);
+      content = content.split("__SYNC_KEY__").join(key);
+      content = content.split("__SYNC_KEY_MASKED__").join(keyMasked);
+      zip.file(name, content);
+    } catch (e) {
+      console.error(`Ошибка чтения текстового файла ${name}:`, e);
+    }
+  }
+
+  // 2. Упаковываем картинки как чистые бинарные данные
+  for (const name of BINARY_FILES) {
+    try {
+      const buffer = readFileSync(path.join(dir, name)); // Читаем без "utf8"
+      zip.file(name, buffer);
+    } catch (e) {
+      console.error(`Не удалось найти или прочитать картинку ${name}:`, e);
+    }
   }
 
   const buffer = await zip.generateAsync({
@@ -75,7 +95,7 @@ export async function GET(req: NextRequest) {
   return new NextResponse(new Uint8Array(buffer), {
     headers: {
       "Content-Type": "application/zip",
-      "Content-Disposition": 'attachment; filename="red-ops-cookie-sync.zip"',
+      "Content-Disposition": 'attachment; filename="red-atk-cookie-sync.zip"', // Заодно поменял название самого архива на новое
       "Cache-Control": "no-store",
     },
   });
