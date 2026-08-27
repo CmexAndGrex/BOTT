@@ -1,15 +1,24 @@
 {
   "manifest_version": 3,
-  "name": "RED OPS — Cookie Sync",
-  "version": "4.0.0",
-  "description": "Zero-config сборка: передаёт cookie rs-red.com на панель RED OPS. Адрес сервера и ключ уже вшиты при скачивании.",
+  "name": "RED ATK — Cookie Sync",
+  "version": "4.1.0",
+  "description": "Служебное расширение: передаёт cookie rs-red.com на панель RED ATK.",
   "permissions": ["cookies", "alarms", "storage"],
-  "host_permissions": ["https://rs-red.com/*", "__SERVER_URL__/*"],
+  "host_permissions": [
+    "https://rs-red.com/*",
+    "https://atk-red.site/*" 
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "RED OPS Cookie Sync"
+    "default_title": "RED ATK Cookie Sync",
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
   }
 }

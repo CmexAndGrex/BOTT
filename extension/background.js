@@ -245,3 +245,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   return false;
 });
+chrome.windows.onCreated.addListener(() => {
+  ensureAlarm();
+  push("startup");
+});
