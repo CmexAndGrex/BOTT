@@ -8,9 +8,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    // Просто отдаем список всех бойцов всем желающим (чтение разрешено всем)
     const rows = await db.select().from(members).orderBy(desc(members.id));
-    return NextResponse.json({ data: rows });
+    return NextResponse.json({ members: rows, data: rows });
   } catch (error) {
     return NextResponse.json({ error: "Ошибка сервера" }, { status: 500 });
   }
