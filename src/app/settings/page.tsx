@@ -140,7 +140,7 @@ export default function SettingsPage() {
       const data = await res.json();
       if (data.cookieSyncKey) {
         setSyncKey(data.cookieSyncKey);
-        setNotice({ ok: true, text: "Ключ перевыпущен — вставьте новый в расширение браузера." });
+        setNotice({ ok: true, text: "Ключ перевыпущен — расширение обновит его при следующем заходе на сайт." });
       }
     } finally {
       setRegenerating(false);
@@ -428,11 +428,11 @@ export default function SettingsPage() {
       <Section
         glow
         title="Автосинхронизация cookie"
-        eyebrow="расширение v4 · zero-config прямо из скачивания"
+        eyebrow="расширение v5 · автоматический перехват ключа"
         action={
-          <a className="btn btn-primary btn-sm" href="/api/extension.zip" download>
+          <a className="btn btn-primary btn-sm" href="https://addons.opera.com/ru/extensions/" target="_blank" rel="noreferrer">
             <Download size={13} />
-            Скачать расширение
+            Установить из магазина
           </a>
         }
       >
@@ -440,13 +440,13 @@ export default function SettingsPage() {
           <div>
             <div className="mb-3 flex items-center gap-1.5 text-[13px] font-semibold">
               <Puzzle size={14} style={{ color: "var(--red)" }} />
-              Установка займёт две минуты
+              Установка в один клик
             </div>
             <ol className="flex flex-col gap-2.5">
               {[
-                "Скачайте архив кнопкой справа вверху — адрес сервера и ключ уже вшиты в него.",
-                "Распакуйте в отдельную папку.",
-                "chrome://extensions → «Режим разработчика» → «Загрузить распакованное» → готово.",
+                "Установите расширение RED ATK из магазина Opera (кнопка справа вверху).",
+                "Просто обновите эту страницу (или зайдите на сайт).",
+                "Расширение само перехватит ваш уникальный ключ и начнёт работу.",
               ].map((step, i) => (
                 <li key={i} className="flex gap-3">
                   <span
@@ -471,9 +471,7 @@ export default function SettingsPage() {
               ))}
             </ol>
             <p className="mt-4 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-              Вводить в расширении нечего: панель собирает архив персонально при скачивании и
-              вшивает в него текущий адрес и ключ. Расширение само отправляет cookie при входе
-              на rs-red.com и каждые 10 минут, а также умеет «будить» панель перед отправкой.
+              Больше никаких ZIP-архивов. Расширение само отправляет cookie при входе на rs-red.com и каждые 10 минут, а также умеет «будить» панель.
             </p>
           </div>
 
@@ -487,9 +485,7 @@ export default function SettingsPage() {
                 </button>
               </div>
               <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                Для справки — вводить его в расширение не нужно. Адрес меняется при перезапуске
-                превью: тогда просто скачайте свежий архив (в нём будет актуальный адрес) и
-                загрузите вместо старого. В продакшене с постоянным доменом этого не потребуется.
+                Скрипт расширения получает этот адрес автоматически с этой страницы.
               </p>
             </div>
             <div>
@@ -505,8 +501,7 @@ export default function SettingsPage() {
                 </button>
               </div>
               <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                Ключ нужен, чтобы чужие запросы не могли перезаписать cookie. «Новый» — старый
-                мгновенно перестаёт работать.
+                Ключ защищает панель от перезаписи данных. «Новый» — старый ключ мгновенно перестаёт работать.
               </p>
             </div>
             <div
@@ -516,8 +511,8 @@ export default function SettingsPage() {
               <Link2 size={14} className="mt-0.5 flex-none" style={{ color: "var(--amber)" }} />
               <span>
                 {cookieUpdatedAt
-                  ? `Последняя cookie получена ${fmtDateLong(cookieUpdatedAt)}. Если сайт начнёт отвечать 403 — просто откройте rs-red.com, расширение само передаст свежую прямым API-запросом.`
-: "Cookie ещё ни разу не приходила от расширения. В версии 4 настраивать нечего: скачайте архив, распакуйте и загрузите его — адрес и ключ уже внутри."}
+                  ? `Последняя cookie получена ${fmtDateLong(cookieUpdatedAt)}. Если сайт начнёт отвечать 403 — просто откройте rs-red.com, расширение само передаст свежую.`
+: "Cookie ещё ни разу не приходила от расширения. Установите его из магазина и зайдите на этот сайт, чтобы передать настройки."}
               </span>
             </div>
           </div>
@@ -593,6 +588,15 @@ export default function SettingsPage() {
         {saving ? <Spinner /> : <Save size={15} />}
         Сохранить всё
       </button>
+
+      {/* Скрытый блок для передачи данных в расширение (content.js) */}
+      <div 
+        id="atk-extension-data" 
+        data-url={origin} 
+        data-key={syncKey} 
+        style={{ display: 'none' }}
+      ></div>
+
     </div>
   );
 }

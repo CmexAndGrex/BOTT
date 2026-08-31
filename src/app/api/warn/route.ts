@@ -2,69 +2,63 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { members, settings } from "@/db/schema";
 import { eq } from "drizzle-orm";
+import { jwtVerify } from "jose";
+
+const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
+const discordRateLimit = new Map<string, number>();
 
 export async function POST(req: NextRequest) {
+  const token = req.cookies.get("auth_token")?.value;
+  if (!token) return NextResponse.json({ error: "Нет доступа" }, { status: 401 });
+  
+  try { await jwtVerify(token, SECRET); } 
+  catch (err) { return NextResponse.json({ error: "Сессия устарела" }, { status: 403 }); }
+
   try {
-    const body = await req.json();
+    let body;
+    try { body = await req.json(); } 
+    catch { return NextResponse.json({ error: "Некорректный формат данных" }, { status: 400 }); }
+
     const { memberId, type, norm } = body;
 
-    // 1. Находим бойца
+    if (typeof memberId !== "number" || !Number.isFinite(memberId)) return NextResponse.json({ error: "Неверный ID" }, { status: 400 });
+    if (type !== 1 && type !== 2) return NextResponse.json({ error: "Тип 1 или 2" }, { status: 400 });
+    if (typeof norm !== "number" || norm < 1 || norm > 168) return NextResponse.json({ error: "Некорректная норма" }, { status: 400 });
+
+    const now = Date.now();
+    const lastWarningTime = discordRateLimit.get("last_warn") || 0;
+    if (now - lastWarningTime < 3000) return NextResponse.json({ error: "Слишком часто" }, { status: 429 });
+    discordRateLimit.set("last_warn", now);
+
     const fighterRecord = await db.select().from(members).where(eq(members.id, memberId));
-    if (!fighterRecord || fighterRecord.length === 0) {
-      return NextResponse.json({ error: "Боец не найден" }, { status: 404 });
-    }
+    if (!fighterRecord || fighterRecord.length === 0) return NextResponse.json({ error: "Боец не найден" }, { status: 404 });
+    
     const fighter = fighterRecord[0];
-
-    // 2. Обновляем ТОЛЬКО счетчик предупреждений (бойца не исключаем, ждем синхронизации с сайтом)
     const newWarnings = type === 1 ? 1 : 2;
+    await db.update(members).set({ warnings: newWarnings }).where(eq(members.id, memberId));
 
-    await db.update(members)
-      .set({ warnings: newWarnings })
-      .where(eq(members.id, memberId));
-
-    // 3. ДОСТАЕМ НАСТРОЙКИ ИЗ ПАНЕЛИ
     const settingsData = await db.select().from(settings);
     const config = Object.fromEntries(settingsData.map((s) => [s.key, s.value]));
 
-    // Расширенный поиск ключей (на случай, если в базе они названы иначе)
-    const botToken = config["discord_bot_token"] || config["discordToken"] || config["discord_token"] || process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN;
-    const channelId = config["discord_ping_channel"] || config["discord_channel_id"] || config["discordChannel"] || config["discord_channel"] || process.env.DISCORD_CHANNEL_ID;
+    const botToken = config["discord_bot_token"] || process.env.DISCORD_BOT_TOKEN;
+    const channelId = config["discord_channel_id"] || process.env.DISCORD_CHANNEL_ID;
 
-    if (!botToken || !channelId) {
-      return NextResponse.json({ error: "Токен или ID канала пусты. Проверьте настройки!" }, { status: 400 });
-    }
+    if (!botToken || !channelId) return NextResponse.json({ error: "Настройте Discord" }, { status: 400 });
 
-    // 4. Формируем сообщение
     const ping = fighter.discordId ? `<@${fighter.discordId}>` : fighter.name;
-    let messageContent = "";
+    const messageContent = type === 1 
+      ? `⚠️ ${ping} 1/2 предупреждение, онлайн ${fighter.hours.toFixed(1)}ч, ниже нормы ${norm}ч. Добить онлайн, иначе исключение ⚠️`
+      : `⛔ ${ping} 2/2 предупреждение, онлайн ${fighter.hours.toFixed(1)}ч, повторно ниже нормы. Исключён! ⛔`;
 
-    if (type === 1) {
-      messageContent = `⚠️ ${ping} 1/2 предупреждение, онлайн за прошлую неделю ${fighter.hours.toFixed(1)} часов, ниже нормы ${norm}ч. Добить онлайн на новой недели, иначе исключение ⚠️`;
-    } else {
-      messageContent = `⛔ ${ping} 2/2 предупреждение, онлайн за эту неделю ${fighter.hours.toFixed(1)} часов, повторно ниже нормы. Исключён! ⛔`;
-    }
-
-    // 5. Отправляем в Discord
     const discordRes = await fetch(`https://discord.com/api/v10/channels/${channelId.trim()}/messages`, {
       method: "POST",
-      headers: {
-        "Authorization": `Bot ${botToken.trim()}`,
-        "Content-Type": "application/json",
-      },
+      headers: { "Authorization": `Bot ${botToken.trim()}`, "Content-Type": "application/json" },
       body: JSON.stringify({ content: messageContent }),
     });
 
-    // Если Discord ругается, отправляем точную причину на экран
-    if (!discordRes.ok) {
-      const errText = await discordRes.text();
-      console.error("Ошибка Discord API:", errText);
-      return NextResponse.json({ error: `Discord ответил отказом: ${errText}` }, { status: 400 });
-    }
-
+    if (!discordRes.ok) return NextResponse.json({ error: `Ошибка Discord` }, { status: 400 });
     return NextResponse.json({ ok: true });
-
   } catch (error) {
-    console.error("Ошибка выдачи предупреждения:", error);
     return NextResponse.json({ error: "Ошибка сервера" }, { status: 500 });
   }
 }

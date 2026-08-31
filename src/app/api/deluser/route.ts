@@ -4,9 +4,9 @@ import { users } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { jwtVerify } from "jose";
 
-const SECRET = new TextEncoder().encode(process.env.POSTGRES_PASSWORD || "super-secret");
+const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
 
-export async function GET(req: NextRequest) {
+export async function DELETE(req: NextRequest) {
   const token = req.cookies.get('auth_token')?.value;
   const login = req.nextUrl.searchParams.get("login");
 
@@ -15,7 +15,7 @@ export async function GET(req: NextRequest) {
 
   try {
     const { payload } = await jwtVerify(token, SECRET);
-    if (payload.role !== 'admin') return Res.json({ error: "Только для админов" }, { status: 403 });
+    if ((payload as any).role !== 'admin') return Res.json({ error: "Только для админов" }, { status: 403 });
 
     await db.delete(users).where(eq(users.username, login));
     return Res.json({ ok: true, message: `Аккаунт '${login}' навсегда удален.` });

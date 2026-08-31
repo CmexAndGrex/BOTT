@@ -1,4 +1,7 @@
 import { Client, GatewayIntentBits, Partials } from "discord.js";
+import { eq, and, isNotNull } from "drizzle-orm";
+import { db } from "@/db";
+import { members } from "@/db/schema";
 
 const ROLE_IDS = {
   MODERATOR: "1089254387488145550",
@@ -9,7 +12,16 @@ const ROLE_IDS = {
   ARTILLERY_DIV: "1084414055088922634",
   TANK_COMP: "1084414184600633345",
   PRIVATE: "1090320507288699020",
+  
+  // 1. Впишите ID роли "Отпуск" ниже:
+  LEAVE_ROLE: "1166476218791645256", 
 };
+
+// 2. Впишите ID канала "#запрос-в-отпуск" ниже:
+const LEAVE_CHANNEL_ID = "1085141850966458519"; 
+
+// 3. Впишите ID канала "#запрос-роли" ниже:
+const ROLE_REQUEST_CHANNEL_ID = "1090516508725215253";
 
 export function initBot() {
   const client = new Client({
@@ -25,14 +37,55 @@ export function initBot() {
 
   client.once("ready", () => {
     console.log(`🤖 Бот-слушатель АТК успешно запущен как ${client.user?.tag}`);
+
+    // === ФОНОВАЯ ПРОВЕРКА ОТПУСКОВ (РАЗ В МИНУТУ) ===
+    setInterval(async () => {
+      try {
+        const activeLeaves = await db.select().from(members)
+          .where(and(eq(members.vacation, true), isNotNull(members.vacationUntil)));
+        
+        if (activeLeaves.length === 0) return;
+
+        const nowMs = Date.now();
+        const twelveHoursMs = 12 * 60 * 60 * 1000;
+        const guild = client.guilds.cache.first(); 
+        if (!guild) return;
+        const leaveChannel = guild.channels.cache.get(LEAVE_CHANNEL_ID);
+
+        for (const u of activeLeaves) {
+          if (!u.discordId || !u.vacationUntil) continue; 
+          
+          const untilMs = u.vacationUntil.getTime();
+          const member = await guild.members.fetch(u.discordId).catch(() => null);
+
+          if (nowMs >= untilMs) {
+            await db.update(members).set({ vacation: false, vacationUntil: null, vacationNotified: false }).where(eq(members.id, u.id));
+            if (member) await member.roles.remove(ROLE_IDS.LEAVE_ROLE).catch(() => {});
+            
+            if (leaveChannel && leaveChannel.isTextBased()) { 
+              await leaveChannel.send(`👋 <@${u.discordId}>, твой отпуск подошел к концу. Роль автоматически снята, ждем в строю!`);
+            }
+          } 
+          else if (untilMs - nowMs <= twelveHoursMs && !u.vacationNotified) {
+            await db.update(members).set({ vacationNotified: true }).where(eq(members.id, u.id));
+            if (leaveChannel && leaveChannel.isTextBased()) {
+              await leaveChannel.send(`⚠️ <@${u.discordId}>, твой отпуск заканчивается **завтра**! Если нет возможности вернуться, запроси продление.`);
+            }
+          }
+        }
+      } catch (e) {
+        console.error("Ошибка проверки отпусков:", e);
+      }
+    }, 60 * 1000);
   });
 
-  // === 1. ОБРАБОТЧИК СООБЩЕНИЙ (ЧТЕНИЕ ЗАЯВОК) ===
+  // === 1. ОБРАБОТЧИК СООБЩЕНИЙ ===
   client.on("messageCreate", async (message) => {
     if (message.author.bot) return;
     if (!message.content) return;
     
-    // if (message.channelId !== "ВСТАВЬТЕ_ID_КАНАЛА_СЮДА") return;
+    // Блокировка: бот читает заявки только в канале #запрос-роли
+    if (message.channelId !== ROLE_REQUEST_CHANNEL_ID) return;
 
     const lines = message.content.split("\n").map(l => l.trim()).filter(l => l.length > 0);
     if (lines.length < 3) return;
@@ -51,7 +104,6 @@ export function initBot() {
 
     const targetMember = message.guild?.members.cache.get(recipientId);
 
-    // Исключение для тестирования: разрешаем делать заявку на себя Администраторам Бота и Модераторам
     if (recipientId === examinerId) {
       const isBotAdmin = targetMember?.roles.cache.some(r => r.name === "Администратор Бота") || targetMember?.roles.cache.has(ROLE_IDS.MODERATOR);
       
@@ -65,7 +117,6 @@ export function initBot() {
       }
     }
 
-    // Регулярка теперь опционально "съедает" слово "роль", если оно есть (игнорируя регистр)
     const actionMatch = commandLine.match(/^(Выдать|Снять)\s+(?:роль\s+)?(.+)$/i);
     if (!actionMatch) {
       const thread = await message.startThread({ name: "Ошибка формата", autoArchiveDuration: 60 });
@@ -78,22 +129,27 @@ export function initBot() {
     const action = actionMatch[1].toLowerCase(); 
     const actionTitle = action === "выдать" ? "Выдача" : "Снятие";
     const roleNameInput = actionMatch[2].trim();
-    const normalizedRoleName = roleNameInput.toLowerCase(); // Для поиска без учета регистра
+    const normalizedRoleName = roleNameInput.toLowerCase();
 
-    if (normalizedRoleName.includes("модератор") || roleNameInput.includes(ROLE_IDS.MODERATOR)) {
+    // === БРОНЯ: ЗАПРЕТ ВЫДАЧИ СИСТЕМНЫХ РОЛЕЙ ===
+    if (
+      normalizedRoleName.includes("модератор") || 
+      normalizedRoleName.includes("администратор") || 
+      roleNameInput.includes(ROLE_IDS.MODERATOR)
+    ) {
       const thread = await message.startThread({ name: "Нарушение прав", autoArchiveDuration: 60 });
-      await thread.send(`<@&${ROLE_IDS.MODERATOR}> <@${recipientId}> попытался запросить выдачу/снятие модераторской роли, что запрещено!`);
+      await thread.send(`<@&${ROLE_IDS.MODERATOR}> <@${recipientId}> попытался запросить выдачу/снятие системной роли, что запрещено!`);
       await thread.setLocked(true);
       await thread.setArchived(true);
       return;
     }
+    // ============================================
 
     let targetRole = null;
     let displayRoleName = roleNameInput;
     const isComplex = normalizedRoleName === "рядовой тр" || normalizedRoleName === "рядовой ад";
 
     if (!isComplex) {
-      // Ищем роль на сервере без учета регистра
       targetRole = message.guild?.roles.cache.find(r => r.name.toLowerCase() === normalizedRoleName);
       if (!targetRole) {
         const thread = await message.startThread({ name: "Роль не найдена", autoArchiveDuration: 60 });
@@ -102,7 +158,7 @@ export function initBot() {
         await thread.setArchived(true);
         return;
       }
-      displayRoleName = targetRole.name; // Берем правильное имя прямо из Discord
+      displayRoleName = targetRole.name;
     } else {
       displayRoleName = normalizedRoleName === "рядовой тр" ? "Рядовой ТР" : "Рядовой АД";
     }
@@ -120,7 +176,7 @@ export function initBot() {
     await message.react("⏳");
   });
 
-  // === 2. ОБРАБОТЧИК РЕАКЦИЙ (ВЫДАЧА ИЛИ ОТМЕНА) ===
+  // === 2. ОБРАБОТЧИК РЕАКЦИЙ ===
   client.on("messageReactionAdd", async (reaction, user) => {
     if (user.bot) return;
 
@@ -128,8 +184,69 @@ export function initBot() {
     if (reaction.message.partial) await reaction.message.fetch();
 
     const message = reaction.message;
+    const guild = message.guild;
+    if (!guild) return;
+
+    // --- ЛОГИКА ОТПУСКОВ ---
+    if (message.channelId === LEAVE_CHANNEL_ID && reaction.emoji.name === "✅") {
+      console.log(`[Отпуск] Получена реакция от ${user.tag} в сообщении ${message.id}`);
+      
+      const reactorMember = await guild.members.fetch(user.id);
+      const isMod = reactorMember.roles.cache.has(ROLE_IDS.MODERATOR) || reactorMember.roles.cache.some(r => r.name === "Администратор Бота");
+      
+      if (!isMod) {
+        console.log(`[Отпуск] Отмена: у ${user.tag} нет нужных прав.`);
+        return;
+      }
+
+      const mentionMatch = message.content?.match(/<@!?(\d+)>/);
+      if (!mentionMatch) {
+        console.log(`[Отпуск] Отмена: в тексте не найден пинг бойца.`);
+        return;
+      }
+      
+      const targetId = mentionMatch[1];
+      const targetMember = await guild.members.fetch(targetId).catch(() => null);
+      if (!targetMember) return;
+
+      const content = (message.content || "").toLowerCase(); 
+      const isRevoke = content.includes("снять");
+      
+      let thread = message.thread;
+
+      if (isRevoke) {
+        await targetMember.roles.remove(ROLE_IDS.LEAVE_ROLE).catch(console.error);
+        await db.update(members).set({ vacation: false, vacationUntil: null, vacationNotified: false }).where(eq(members.discordId, targetMember.id));
+        
+        if (!thread) thread = await message.startThread({ name: "Отпуск снят", autoArchiveDuration: 60 });
+        await thread.send(`Отпуск досрочно снят у <@${targetMember.id}> модератором <@${user.id}>. База синхронизирована.`);
+        return;
+      } else {
+        let leaveUntilDate = null;
+        const dateMatch = (message.content || "").match(/\d{2}\.\d{2}\.\d{4}\s*-\s*(\d{2})\.(\d{2})\.(\d{4})/);
+        if (dateMatch) {
+          leaveUntilDate = new Date(`${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}T00:01:00+03:00`);
+        }
+
+        await targetMember.roles.add(ROLE_IDS.LEAVE_ROLE).catch(console.error);
+        await db.update(members).set({ vacation: true, vacationUntil: leaveUntilDate, vacationNotified: false }).where(eq(members.discordId, targetMember.id));
+        
+        if (!thread) thread = await message.startThread({ name: "Отпуск одобрен", autoArchiveDuration: 60 });
+        let reply = `Отпуск одобрен для <@${targetMember.id}> модератором <@${user.id}>. Роль выдана.`;
+        
+        if (leaveUntilDate && dateMatch) { 
+          reply += `\n📅 Дата автоматического возвращения: **${dateMatch[1]}.${dateMatch[2]}.${dateMatch[3]}** в 00:01 МСК`;
+        }
+        await thread.send(reply);
+        return;
+      }
+    }
+    // --- КОНЕЦ ЛОГИКИ ОТПУСКОВ ---
+
     if (!message.content) return;
     if (!message.reactions.cache.has("⏳")) return;
+    
+    if (message.channelId !== ROLE_REQUEST_CHANNEL_ID) return;
 
     const lines = message.content.split("\n").map(l => l.trim()).filter(l => l.length > 0);
     if (lines.length < 3) return;
@@ -153,9 +270,6 @@ export function initBot() {
     const thread = message.thread;
     if (!thread) return;
 
-    const guild = message.guild;
-    if (!guild) return;
-
     const reactorMember = await guild.members.fetch(user.id);
     const recipientMember = await guild.members.fetch(recipientId).catch(() => null);
 
@@ -166,7 +280,6 @@ export function initBot() {
     const isAtkReaction = reaction.emoji.name === "ATK";
     const isCancelReaction = reaction.emoji.name === "❌";
 
-    // Проверка, правильная ли реакция поставлена
     if (!isAtkReaction && !isCancelReaction) {
       if (isExaminer) {
         await reaction.users.remove(user.id);
@@ -181,7 +294,6 @@ export function initBot() {
       return;
     }
 
-    // Если экзаменатор нажал крестик - отменяем операцию
     if (isCancelReaction) {
       await message.reactions.cache.get("⏳")?.remove();
       await message.react("❌");
@@ -265,6 +377,16 @@ export function initBot() {
       await thread.send(`❌ Произошла системная ошибка при попытке изменить роли. Проверьте иерархию прав бота.`);
       await thread.setLocked(true);
       await thread.setArchived(true);
+    }
+  });
+
+  // === АВТОВЫДАЧА РОЛЕЙ НОВИЧКАМ ===
+  client.on("guildMemberAdd", async (member) => {
+    try {
+      await member.roles.add(ROLE_IDS.FRIEND);
+      console.log(`[Автороль] Роль "Друг АТК" выдана новичку: ${member.user.tag}`);
+    } catch (error) {
+      console.error(`[Автороль] Ошибка выдачи роли для ${member.user.tag}:`, error);
     }
   });
 

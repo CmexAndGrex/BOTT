@@ -26,7 +26,9 @@ export const members = pgTable("division_members", {
   post: text("post"),
   minutes: integer("minutes").notNull().default(0),
   hours: real("hours").notNull().default(0),
-  vacation: boolean("vacation").notNull().default(false),
+  vacation: boolean("vacation").notNull().default(false), // Статус отпуска
+  vacationUntil: timestamp("vacation_until", { mode: 'date' }), // Дата выхода из отпуска
+  vacationNotified: boolean("vacation_notified").notNull().default(false), // Было ли напоминание за 24ч
   discordId: text("discord_id"),
   active: boolean("active").notNull().default(true),
   warnings: integer("warnings").notNull().default(0),
@@ -50,21 +52,17 @@ export const snapshots = pgTable("stat_snapshots", {
   source: text("source").notNull().default("auto"),
 });
 
-/** ОБЪЕДИНЕННЫЙ ЖУРНАЛ: Содержит и старые системные поля, и новые для редактирования */
+/** ОБЪЕДИНЕННЫЙ ЖУРНАЛ */
 export const logs = pgTable("bot_logs", {
   id: serial("id").primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
-  
-  // Старые поля (нужны для cookies, синхронизаций и пингов)
   kind: text("kind").notNull().default("system"),
   title: text("title").notNull().default(""),
   detail: text("detail").notNull().default(""),
   ok: boolean("ok").notNull().default(true),
   error: text("error"),
-
-  // Новые поля (нужны для вкладки "Редактирование" и деталей)
   category: varchar("category", { length: 50 }).notNull().default("system"),
   author: varchar("author", { length: 100 }),
   action: text("action").notNull().default(""),

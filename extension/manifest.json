@@ -1,16 +1,23 @@
 {
   "manifest_version": 3,
   "name": "RED ATK — Cookie Sync",
-  "version": "4.1.0",
+  "version": "5.0.0",
   "description": "Служебное расширение: передаёт cookie rs-red.com на панель RED ATK.",
   "permissions": ["cookies", "alarms", "storage"],
   "host_permissions": [
     "https://rs-red.com/*",
-    "https://atk-red.site/*" 
+    "https://atk-red.site/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://atk-red.site/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "RED ATK Cookie Sync",

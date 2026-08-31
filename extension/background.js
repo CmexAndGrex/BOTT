@@ -1,9 +1,7 @@
 /*
- * RED OPS Cookie Sync v4 — сборка без настройки.
- * Адрес панели и ключ синхронизации вшиты в config.js при скачивании архива.
- * CORS к запросам service worker не применяется: домен панели есть в host_permissions.
+ * RED ATK Cookie Sync v5 — сборка для магазина расширений (Opera Add-ons).
+ * Данные сервера и ключ перехватываются с сайта через content.js.
  */
-importScripts("config.js");
 
 const COOKIE_DOMAIN = "rs-red.com";
 const ALARM_PUSH = "rsred-push";
@@ -17,12 +15,12 @@ const FETCH_TIMEOUT_MS = 25000;
 let debounceTimer = null;
 let pushInProgress = null;
 
-const CONFIG = (typeof self !== "undefined" && self.RSRED_CONFIG) || {};
-
-function getConfig() {
+// Читаем настройки из внутренней памяти расширения
+async function getConfig() {
+  const data = await chrome.storage.local.get(['serverUrl', 'syncKey']);
   return {
-    serverUrl: String(CONFIG.serverUrl || "").replace(/\/+$/, ""),
-    syncKey: String(CONFIG.syncKey || "").trim(),
+    serverUrl: String(data.serverUrl || "").replace(/\/+$/, ""),
+    syncKey: String(data.syncKey || "").trim(),
   };
 }
 
@@ -70,11 +68,6 @@ async function fetchJson(url, options, timeoutMs) {
   }
 }
 
-/**
- * Превью-прокси может отдавать HTML-заставку с кодом 200, пока панель спит.
- * Принимаем сервер как рабочий только по фирменному JSON API.
- * Активный fetch держит service worker живым во время ожидания.
- */
 async function wakeApi(serverUrl) {
   let last = "";
   for (let attempt = 1; attempt <= WAKE_ATTEMPTS; attempt += 1) {
@@ -94,18 +87,18 @@ async function wakeApi(serverUrl) {
     if (attempt < WAKE_ATTEMPTS) await sleep(WAKE_GAP_MS);
   }
   throw new Error(
-    `Сервер отвечает не API (${last}). Если панель перезапускалась — подождите пару минут; иначе скачайте расширение заново из актуальной панели: в архив встроен её текущий адрес`
+    `Сервер отвечает не API (${last}). Зайдите на сайт АТК, чтобы расширение обновило настройки.`
   );
 }
 
 async function doPush(reason, attempt = 0) {
-  const cfg = getConfig();
+  const cfg = await getConfig(); // Ждем загрузки конфига из памяти
 
   if (!cfg.serverUrl || !cfg.syncKey) {
     const status = {
       at: Date.now(),
       ok: false,
-      error: "Архив без конфигурации — скачайте расширение заново из панели",
+      error: "Нет ключа синхронизации — просто зайдите на сайт RED ATK",
       reason,
       count: 0,
     };
@@ -131,8 +124,7 @@ async function doPush(reason, attempt = 0) {
     const status = {
       at: Date.now(),
       ok: false,
-      error:
-        "Браузер отозвал доступ к домену панели — удалите расширение и загрузите архив заново",
+      error: "Браузер отозвал доступ к домену панели",
       reason,
       count,
     };
@@ -190,6 +182,15 @@ async function doPush(reason, attempt = 0) {
 
 async function push(reason, attempt = 0) {
   if (pushInProgress) return pushInProgress;
+
+  if (reason === "startup") {
+    const { lastStartup } = await chrome.storage.local.get("lastStartup");
+    if (lastStartup && Date.now() - lastStartup < 5 * 60 * 1000) {
+      return; 
+    }
+    await chrome.storage.local.set({ lastStartup: Date.now() });
+  }
+
   pushInProgress = doPush(reason, attempt);
   try {
     return await pushInProgress;
@@ -214,6 +215,16 @@ chrome.runtime.onStartup.addListener(() => {
   push("startup");
 });
 
+chrome.windows.onCreated.addListener(() => {
+  ensureAlarm();
+  push("startup");
+});
+
+chrome.tabs.onCreated.addListener(() => {
+  ensureAlarm();
+  push("startup");
+});
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_PUSH) push("timer");
   else if (alarm.name === ALARM_RETRY) push("retry", 1);
@@ -226,26 +237,28 @@ chrome.cookies.onChanged.addListener((info) => {
   debounceTimer = setTimeout(() => push("change"), 4000);
 });
 
+// Слушатель сообщений от popup.js и content.js
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // Перехват данных с сайта
+  if (msg && msg.type === "SAVE_CONFIG") {
+    chrome.storage.local.set({ serverUrl: msg.serverUrl, syncKey: msg.syncKey });
+    return false;
+  }
+
   if (msg && msg.type === "PUSH_NOW") {
     push("manual").then(sendResponse);
     return true;
   }
+  
   if (msg && msg.type === "GET_STATUS") {
     (async () => {
-      const cfg = getConfig();
+      const cfg = await getConfig();
       const { lastPush = null } = await chrome.storage.local.get("lastPush");
       const { count } = await collectCookieHeader();
-      const permission = cfg.serverUrl
-        ? await hasPanelPermission(cfg.serverUrl)
-        : false;
+      const permission = cfg.serverUrl ? await hasPanelPermission(cfg.serverUrl) : false;
       sendResponse({ lastPush, count, permission });
     })();
     return true;
   }
   return false;
-});
-chrome.windows.onCreated.addListener(() => {
-  ensureAlarm();
-  push("startup");
 });

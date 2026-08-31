@@ -1,5 +1,4 @@
 const $ = (id) => document.getElementById(id);
-const CONFIG = (typeof self !== "undefined" && self.RSRED_CONFIG) || {};
 
 const REASONS = {
   manual: "вручную",
@@ -57,9 +56,13 @@ async function refreshStatus() {
   });
 }
 
-function init() {
-  $("server").textContent = CONFIG.serverUrl || "не сгенерирован";
-  $("key").textContent = CONFIG.syncKeyMasked || "не сгенерирован";
+async function init() {
+  // Читаем данные из внутренней памяти, куда их положил content.js
+  const cfg = await chrome.storage.local.get(['serverUrl', 'syncKey']);
+  
+  $("server").textContent = cfg.serverUrl || "Ожидание...";
+  $("key").textContent = cfg.syncKey ? `${cfg.syncKey.slice(0, 6)}…` : "Зайдите на сайт АТК";
+  
   refreshStatus();
 }
 

@@ -1,51 +1,38 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { users } from "@/db/schema";
-import { eq, count } from "drizzle-orm";
-import { hash } from "bcryptjs";
+import bcrypt from "bcryptjs";
 import { jwtVerify } from "jose";
 
-const SECRET = new TextEncoder().encode(process.env.POSTGRES_PASSWORD || "super-secret");
+const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
 
-export async function GET(req: NextRequest) {
-  const login = req.nextUrl.searchParams.get("login");
-  const pass = req.nextUrl.searchParams.get("pass");
-  const role = req.nextUrl.searchParams.get("role") || "officer";
+export async function POST(req: NextRequest) {
+  const token = req.cookies.get('auth_token')?.value;
+  if (!token) return NextResponse.json({ error: "Нет доступа: авторизуйтесь" }, { status: 401 });
 
-  if (!login || !pass) {
-    return NextResponse.json({ error: "Укажите ?login=ИМЯ&pass=ПАРОЛЬ" }, { status: 400 });
+  try {
+    const { payload } = await jwtVerify(token, SECRET);
+    if ((payload as any).role !== 'admin') {
+      return NextResponse.json({ error: "Только для админов" }, { status: 403 });
+    }
+  } catch (err) {
+    return NextResponse.json({ error: "Сессия устарела или недействительна" }, { status: 403 });
   }
 
   try {
-    // Проверяем, есть ли вообще пользователи в базе
-    const [{ value: totalUsers }] = await db.select({ value: count() }).from(users);
+    const { username, password, role } = await req.json();
+    if (!username || !password) return NextResponse.json({ error: "Укажите логин и пароль" }, { status: 400 });
 
-    // Если пользователи уже есть, требуем права админа через куку
-    if (totalUsers > 0) {
-      const token = req.cookies.get('auth_token')?.value;
-      if (!token) return NextResponse.json({ error: "Нет доступа. Сначала войдите как администратор." }, { status: 401 });
-      
-      const verified = await jwtVerify(token, SECRET);
-      if ((verified.payload as any).role !== 'admin') {
-        return NextResponse.json({ error: "Только администраторы могут создавать аккаунты" }, { status: 403 });
-      }
-    }
-
-    // Проверяем, существует ли уже такой юзер
-    const existing = await db.select().from(users).where(eq(users.username, login));
-    const passwordHash = await hash(pass, 10);
-
-    if (existing.length > 0) {
-      // Обновляем пароль и роль, если пользователь уже есть
-      await db.update(users).set({ passwordHash, role }).where(eq(users.username, login));
-      return NextResponse.json({ ok: true, message: `Пароль и роль для '${login}' успешно обновлены!` });
-    }
-
-    // Создаем нового
-    await db.insert(users).values({ username: login, passwordHash, role });
-    return NextResponse.json({ ok: true, message: `Успех! Аккаунт '${login}' с ролью '${role}' создан.` });
-
-  } catch (e) {
-    return NextResponse.json({ error: "Ошибка сервера при создании пользователя" }, { status: 500 });
+    const passwordHash = await bcrypt.hash(password, 10);
+    
+    await db.insert(users).values({ 
+      username, 
+      passwordHash, 
+      role: role || 'officer' 
+    });
+    
+    return NextResponse.json({ ok: true, message: `Аккаунт '${username}' успешно создан.` });
+  } catch (err) {
+    return NextResponse.json({ error: "Ошибка сервера (возможно логин уже занят)" }, { status: 500 });
   }
 }
