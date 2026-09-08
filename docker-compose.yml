@@ -17,10 +17,8 @@ services:
   migrate:
     build:
       context: .
-      target: builder
-    # Тот же образ, что и app-builder: миграции запускаются командой поверх него.
-    # Экономит отдельную копию node_modules (~700 МБ) на диске сервера.
-    command: ["sh", "scripts/docker-migrate.sh"]
+      target: migrator
+    # Лёгкий образ: node_modules без dev-пакетов, без сборки Next (~300 МБ вместо ~1.2 ГБ)
     restart: "no"
     environment:
       DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/app_db"

@@ -9,9 +9,16 @@ COPY package.json package-lock.json* ./
 # npm ci строго по lock-файлу; кэш npm чистим сразу, чтобы он не раздувал слой
 RUN npm ci --no-audit --no-fund && npm cache clean --force
 
+# ---------- Лёгкие зависимости для миграций (без dev-пакетов) ----------
+# drizzle-kit перенесён в dependencies, поэтому мигратору хватает --omit=dev:
+# ~250 МБ вместо полной копии node_modules (~700 МБ)
+FROM base AS deps-prod
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+
 # ---------- Сборка Next.js ----------
-# Этот же образ (target: builder) используется сервисом `migrate` из
-# docker-compose.yml — экономит полную копию node_modules на диске сервера.
+# Из этого образа runner забирает standalone; сервис `migrate` его не использует.
 FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
@@ -21,6 +28,14 @@ ENV DATABASE_URL="postgresql://postgres:postgres@db:5432/app_db"
 # Кэш инкрементальной сборки в рантайме не нужен (runner берёт standalone/static) —
 # удаляем, чтобы слой builder не раздувался на диске сервера
 RUN npm run build && rm -rf .next/cache
+
+# ---------- Разовый сервис миграций (лёгкий) ----------
+FROM base AS migrator
+WORKDIR /app
+COPY --from=deps-prod /app/node_modules ./node_modules
+COPY . .
+ENV NEXT_TELEMETRY_DISABLED=1
+CMD ["sh", "scripts/docker-migrate.sh"]
 
 # ---------- Продакшен (standalone) ----------
 FROM base AS runner
