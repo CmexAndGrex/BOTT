@@ -6,8 +6,8 @@ WORKDIR /app
 FROM base AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
-# Устанавливаем зависимости внутри контейнера
-RUN npm install --no-audit --no-fund
+# npm ci строго по lock-файлу; кэш npm чистим сразу, чтобы он не раздувал слой
+RUN npm ci --no-audit --no-fund && npm cache clean --force
 
 # ---------- Сборка Next.js ----------
 FROM base AS builder
@@ -16,7 +16,9 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV DATABASE_URL="postgresql://postgres:postgres@db:5432/app_db"
-RUN npm run build
+# Кэш инкрементальной сборки в рантайме не нужен (runner берёт standalone/static) —
+# удаляем, чтобы слой builder не раздувался на диске сервера
+RUN npm run build && rm -rf .next/cache
 
 # ---------- Разовый сервис миграций ----------
 FROM base AS migrator
