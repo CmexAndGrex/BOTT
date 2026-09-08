@@ -10,6 +10,8 @@ COPY package.json package-lock.json* ./
 RUN npm ci --no-audit --no-fund && npm cache clean --force
 
 # ---------- Сборка Next.js ----------
+# Этот же образ (target: builder) используется сервисом `migrate` из
+# docker-compose.yml — экономит полную копию node_modules на диске сервера.
 FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
@@ -19,13 +21,6 @@ ENV DATABASE_URL="postgresql://postgres:postgres@db:5432/app_db"
 # Кэш инкрементальной сборки в рантайме не нужен (runner берёт standalone/static) —
 # удаляем, чтобы слой builder не раздувался на диске сервера
 RUN npm run build && rm -rf .next/cache
-
-# ---------- Разовый сервис миграций ----------
-FROM base AS migrator
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
-ENV NEXT_TELEMETRY_DISABLED=1
-CMD ["sh", "scripts/docker-migrate.sh"]
 
 # ---------- Продакшен (standalone) ----------
 FROM base AS runner
