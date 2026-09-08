@@ -197,7 +197,7 @@ export default function LogsPage() {
                         className="mt-3 ml-7 rounded-lg border px-4 py-3.5"
                         style={{
                           borderColor: "rgba(255,255,255,0.08)",
-                          background: "rgba(0,0,0,0.3)",
+                          background: "rgba(0,0,0,0.55)",
                           color: "var(--muted)",
                         }}
                       >

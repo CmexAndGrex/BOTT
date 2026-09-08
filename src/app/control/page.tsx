@@ -9,6 +9,25 @@ type Stat = { id: number; hours: number; vacation: boolean; createdAt: string };
 type Fighter = { id: number; name: string; rankName: string | null; hours: number; vacation: boolean; discordId: string | null; warnings: number; active: boolean; stats: Stat[] };
 type Notice = { ok: boolean; text: string } | null;
 
+// Функция для получения дат недели (0 = текущая, 1 = прошлая, 2 = позапрошлая и т.д.)
+function getWeekRange(offsetWeeks: number) {
+  const now = new Date();
+  now.setHours(0, 0, 0, 0); 
+  
+  const day = now.getDay();
+  // Находим понедельник (если сегодня воскресенье, то отнимаем 6 дней)
+  const diffToMonday = now.getDate() - day + (day === 0 ? -6 : 1);
+  
+  const startOfWeek = new Date(now);
+  startOfWeek.setDate(diffToMonday - (offsetWeeks * 7));
+  
+  const endOfWeek = new Date(startOfWeek);
+  endOfWeek.setDate(startOfWeek.getDate() + 6);
+
+  const fmt = (d: Date) => d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+  return `${fmt(startOfWeek)} — ${fmt(endOfWeek)}`;
+}
+
 export default function ControlPage() {
   const [fighters, setFighters] = useState<Fighter[] | null>(null);
   const [norm, setNorm] = useState(10);
@@ -108,10 +127,10 @@ export default function ControlPage() {
               <thead>
                 <tr>
                   <th>Боец</th>
-                  <th style={{ textAlign: "center" }}>Неделя 1</th>
-                  <th style={{ textAlign: "center" }}>Неделя 2</th>
-                  <th style={{ textAlign: "center" }}>Неделя 3</th>
-                  <th style={{ textAlign: "center", background: "rgba(255,255,255,0.03)" }}>Неделя 4 (Текущая)</th>
+                  <th style={{ textAlign: "center" }}>{getWeekRange(3)}</th>
+                  <th style={{ textAlign: "center" }}>{getWeekRange(2)}</th>
+                  <th style={{ textAlign: "center" }}>{getWeekRange(1)}</th>
+                  <th style={{ textAlign: "center", background: "rgba(255,255,255,0.03)" }}>ТЕКУЩАЯ ({getWeekRange(0)})</th>
                   <th style={{ textAlign: "center" }}>Статус</th>
                   <th style={{ textAlign: "right" }}>Управление</th>
                 </tr>

@@ -22,3 +22,8 @@ node -e "
 echo "[migrate] Применяю схему базы данных..."
 npx drizzle-kit push --force --config drizzle.docker.config.json
 echo "[migrate] Схема применена."
+
+echo "[migrate] Создаю/обновляю администратора (seed-admin)..."
+node scripts/seed-admin.mjs
+echo "[migrate] Готово."
+

@@ -6,6 +6,15 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   discord_token: "",
   discord_channel_id: "",
   discord_role_id: "",
+  // Каналы Discord-бота (ШДС / отпуск / запросы ролей)
+  shds_channel_id: "",
+  vacation_channel_id: "",
+  roles_channel_id: "1090516508725215253",
+  moderator_role_id: "1089254387488145550",
+  leave_role_id: "1166476218791645256",
+  // Google Таблица (ШДС)
+  gsheet_spreadsheet_id: "",
+  gsheet_service_account: "",
   // RS RED
   rs_base_url: "https://rs-red.com",
   rs_subdiv_id: "5",
@@ -232,3 +241,4 @@ export function nextRuns(map: Map<string, string>): {
 
   return result;
 }
+

@@ -58,3 +58,4 @@ export async function GET() {
     timezone: map.get("timezone") || "Europe/Moscow",
   });
 }
+

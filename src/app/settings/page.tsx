@@ -269,6 +269,117 @@ export default function SettingsPage() {
           </div>
         </Section>
 
+        {/* Бот заявок: ШДС / отпуск + Google Таблица */}
+        <Section
+          title="Бот заявок и Google Таблица"
+          eyebrow="ШДС · отпуск · gsheets"
+          action={
+            <span className="chip">
+              <Bot size={12} />
+              заявки: {settings.shds_channel_id ? "ШДС" : "—"}
+              {settings.vacation_channel_id ? " + отпуск" : ""}
+            </span>
+          }
+        >
+          <div className="flex flex-col gap-4 px-5 py-5">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <div className="label mb-1.5">ID канала заявок ШДС (SHDS_CHANNEL_ID)</div>
+                <input
+                  className="input input-mono"
+                  placeholder="например 1085141850966458519"
+                  value={settings.shds_channel_id}
+                  onChange={(e) => set("shds_channel_id", e.target.value.replace(/[^\d]/g, ""))}
+                />
+              </div>
+              <div>
+                <div className="label mb-1.5">ID канала заявок на отпуск (VACATION_CHANNEL_ID)</div>
+                <input
+                  className="input input-mono"
+                  placeholder="например 1085141850966458519"
+                  value={settings.vacation_channel_id}
+                  onChange={(e) => set("vacation_channel_id", e.target.value.replace(/[^\d]/g, ""))}
+                />
+              </div>
+            </div>
+            <div>
+              <div className="label mb-1.5">ID канала запросов ролей (ROLES_CHANNEL_ID)</div>
+              <input
+                className="input input-mono"
+                placeholder="например 1090516508725215253"
+                value={settings.roles_channel_id}
+                onChange={(e) => set("roles_channel_id", e.target.value.replace(/[^\d]/g, ""))}
+              />
+              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
+                В этом канале бот принимает команды вида <b>«Выдать Капитан ТР, снять Друг АТК»</b>.
+                Формат сообщения: <span className="kbd">@получатель</span>,{" "}
+                <span className="kbd">@экзаменатор</span>, затем команда со списком ролей
+                (несколько через запятую, «Выдать …» и «Снять …» в одном сообщении).
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <div className="label mb-1.5">ID роли модератора заявок</div>
+                <input
+                  className="input input-mono"
+                  value={settings.moderator_role_id}
+                  onChange={(e) => set("moderator_role_id", e.target.value.replace(/[^\d]/g, ""))}
+                />
+                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                  Всегда может подтверждать/отклонять заявки.
+                </p>
+              </div>
+              <div>
+                <div className="label mb-1.5">ID роли «Отпуск»</div>
+                <input
+                  className="input input-mono"
+                  value={settings.leave_role_id}
+                  onChange={(e) => set("leave_role_id", e.target.value.replace(/[^\d]/g, ""))}
+                />
+              </div>
+            </div>
+            <hr className="divider" />
+            <div>
+              <div className="label mb-1.5">ID Google-таблицы (ШДС)</div>
+              <input
+                className="input input-mono"
+                placeholder="строка из URL между /d/ и /edit"
+                value={settings.gsheet_spreadsheet_id}
+                onChange={(e) => set("gsheet_spreadsheet_id", e.target.value.trim())}
+              />
+              <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                Из ссылки: <span className="kbd">docs.google.com/spreadsheets/d/ВОТ_ЭТО_ID/edit</span>
+              </p>
+            </div>
+            <div>
+              <div className="label mb-1.5">Паспорт сервисного аккаунта Google (JSON)</div>
+              <textarea
+                className="textarea"
+                style={{ minHeight: 110 }}
+                placeholder='{"type": "service_account", "project_id": "…", "private_key": "…", "client_email": "…"}'
+                value={settings.gsheet_service_account}
+                onChange={(e) => set("gsheet_service_account", e.target.value)}
+                spellCheck={false}
+              />
+              <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                Содержимое JSON-файла сервисного аккаунта (Google Cloud → IAM → Service Accounts → Keys).
+                Хранится скрыто; замаскированное значение при сохранении не затирает старое. Если пусто —
+                используется файл <span className="kbd">src/lib/google-service-account.json</span>.
+              </p>
+            </div>
+            <hr className="divider" />
+            <div className="flex items-start gap-2.5 text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
+              <Bot size={14} className="mt-0.5 flex-none" style={{ color: "var(--red)" }} />
+              <span>
+                Бот ждёт ручную реакцию ❌ или зелёного круга / :ATK: под заявкой от пользователя
+                с упомянутой в заявке ролью (или от модератора). Отказ → [ОТКАЗАНО] + ЛС для отпуска,
+                одобрение → [ОДОБРЕНО И ВНЕСЕНО] и запись в Google Таблицу (лист = «Подразделение»).
+                В ветке под заявкой публикуется, кто подтвердил или отказал.
+              </span>
+            </div>
+          </div>
+        </Section>
+
         {/* RS-RED */}
         <Section
           title="RS-RED"

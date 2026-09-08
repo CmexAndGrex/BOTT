@@ -13,6 +13,9 @@ build/
 .env.test.local
 .env.production.local
 
+# Паспорт сервисного аккаунта Google (ОЧЕНЬ ВАЖНО не публиковать!)
+src/lib/google-service-account.json
+
 # Логи и ошибки
 npm-debug.log*
 yarn-debug.log*

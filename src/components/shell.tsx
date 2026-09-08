@@ -4,8 +4,9 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import React, { useEffect, useState } from "react";
+import BackgroundSlideshow from "@/components/background";
 import {
-  Activity, Bot, Clock3, Globe, LayoutDashboard,
+  Activity, BookOpen, Bot, Clock3, Globe, LayoutDashboard,
   ScrollText, Settings2, Users, LogIn, LogOut, ShieldAlert
 } from "lucide-react";
 
@@ -62,7 +63,7 @@ function StatusBlock() {
   );
 
   return (
-    <div className="card mt-auto" style={{ padding: "12px 12px 8px", background: "rgba(255,255,255,0.025)" }}>
+    <div className="card mt-auto" style={{ padding: "12px 12px 8px", background: "rgba(13,15,24,0.85)" }}>
       <div className="label px-1 pb-1.5">Система</div>
       <Row icon={Bot} label="Discord-бот" state={status ? (status.bot.ok ? "ok" : "err") : "dim"} hint={status ? (status.bot.ok ? `@${status.bot.user?.username ?? "онлайн"}` : "ошибка") : "…"} />
       <Row icon={Globe} label="rs-red.com" state={status ? (status.site.ok ? "ok" : "err") : "dim"} hint={status ? (status.site.ok ? "доступен" : "нет доступа") : "…"} />
@@ -90,6 +91,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   const NAV = [
     { href: "/", label: "Обзор", icon: LayoutDashboard, roles: ["guest", "officer", "admin"] },
     { href: "/members", label: "Состав", icon: Users, roles: ["guest", "officer", "admin"] },
+    { href: "/docs", label: "Документация", icon: BookOpen, roles: ["guest", "officer", "admin"] },
     { href: "/control", label: "Контроль", icon: ShieldAlert, roles: ["officer", "admin"] },
     { href: "/logs", label: "Журнал", icon: ScrollText, roles: ["officer", "admin"] },
     { href: "/settings", label: "Настройки", icon: Settings2, roles: ["admin"] },
@@ -109,6 +111,8 @@ export default function Shell({ children }: { children: React.ReactNode }) {
 
   return (
     <>
+      {/* Фоновое слайд-шоу — поддерживает зацикливание и кроссфейд */}
+      <BackgroundSlideshow />
       <div className="fx-bg fx-grid" />
       <div className="fx-bg fx-glow-red" />
       <div className="fx-bg fx-glow-blue" />

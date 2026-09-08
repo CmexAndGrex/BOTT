@@ -10,7 +10,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
-const SECRET_KEYS = new Set(["rs_cookie", "discord_token"]);
+const SECRET_KEYS = new Set(["rs_cookie", "discord_token", "gsheet_service_account"]);
 
 const SETTING_NAMES: Record<string, string> = {
   norm_hours: "норму часов", weekly_time: "время проверки онлайн", timezone: "часовой пояс",
@@ -18,6 +18,10 @@ const SETTING_NAMES: Record<string, string> = {
   rs_subdiv_id: "ID подразделения", op_enabled: "статус задачи пингов", weekly_enabled: "статус проверки онлайн",
   op_times: "время пингов", weekly_days: "дни проверки онлайн", op_texts: "тексты для операций",
   op_gifs: "гифки для операций", rs_cookie: "куки rs-red", discord_token: "токен Discord бота",
+  shds_channel_id: "ID канала заявок ШДС", vacation_channel_id: "ID канала заявок на отпуск",
+  roles_channel_id: "ID канала запросов ролей",
+  moderator_role_id: "ID роли модератора заявок", leave_role_id: "ID роли «Отпуск»",
+  gsheet_spreadsheet_id: "ID Google-таблицы (ШДС)", gsheet_service_account: "паспорт сервисного аккаунта Google",
 };
 
 export async function GET() {
