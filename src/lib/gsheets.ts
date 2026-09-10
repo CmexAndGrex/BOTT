@@ -141,7 +141,7 @@ export async function getSheet(unit: string): Promise<GoogleSpreadsheetWorksheet
 /* Константы раскладки ШДС (по ТЗ)                                     */
 /* ------------------------------------------------------------------ */
 
-type UnitLayout = {
+export type UnitLayout = {
   key: "TR" | "AD";
   nameCol: string;                              // колонка имени / «Вакант»
   overall: { top: number; bottom: number };     // общий диапазон поиска имени
@@ -244,7 +244,7 @@ async function loadArea(sheet: GoogleSpreadsheetWorksheet, top: number, bottom: 
 }
 
 /** Первая строка со значением «Вакант» в диапазоне колонки имени */
-function findVacantRow(
+export function findVacantRow(
   sheet: GoogleSpreadsheetWorksheet,
   layout: UnitLayout,
   top: number,
@@ -259,7 +259,7 @@ function findVacantRow(
 }
 
 /** Строка бойца по имени в общем диапазоне подразделения */
-function findNameRow(
+export function findNameRow(
   sheet: GoogleSpreadsheetWorksheet,
   layout: UnitLayout,
   name: string,
@@ -275,7 +275,7 @@ function findNameRow(
 }
 
 /** Копирование строки целиком: значения + шрифты + заливки + выравнивание */
-function copyRow(sheet: GoogleSpreadsheetWorksheet, srcRow: number, destRow: number) {
+export function copyRow(sheet: GoogleSpreadsheetWorksheet, srcRow: number, destRow: number) {
   const start = colIndex(ROW_START_COL);
   const end = colIndex(ROW_END_COL);
   for (let c = start; c <= end; c++) {

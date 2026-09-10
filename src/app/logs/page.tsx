@@ -44,7 +44,8 @@ export default function LogsPage() {
     let cancelled = false;
     const load = async () => {
       try {
-        const res = await fetch("/api/logs", { cache: "no-store" });
+        const qs = mainTab === "edit" ? "?category=edit" : "";
+        const res = await fetch(`/api/logs${qs}`, { cache: "no-store" });
         const data = await res.json();
         if (!cancelled) setLogs(data.logs ?? []);
       } catch {
@@ -57,7 +58,7 @@ export default function LogsPage() {
       cancelled = true;
       clearInterval(t);
     };
-  }, []);
+  }, [mainTab]);
 
   const filtered = (logs ?? []).filter((l) => {
     const cat = l.category || "system";

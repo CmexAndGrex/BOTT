@@ -27,7 +27,7 @@ declare module "google-spreadsheet" {
 
   export type GoogleSpreadsheetCell = {
     value: CellValue;
-    textFormat: TextFormat;
+    textFormat: TextFormat | undefined;
     backgroundColor: Color | undefined;
     horizontalAlignment: CellAlignment;
     verticalAlignment: CellAlignment;
@@ -60,6 +60,7 @@ declare module "google-spreadsheet" {
     useServiceAccountAuth(creds: unknown): Promise<void>;
     loadInfo(): Promise<void>;
     getTitle(): Promise<string>;
+    addSheet(properties: { title: string; headerValues?: string[] }): Promise<GoogleSpreadsheetWorksheet>;
   }
 }
 

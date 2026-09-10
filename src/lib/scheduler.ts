@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { cronRuns } from "@/db/schema";
-import { runCleanup, runDailySnapshot, runOperationPing, runWeeklyCheck, runWeeklyRecord, syncRoster } from "@/lib/tasks";
+import { runCleanup, runDailySnapshot, runOperationPing, runWeeklyCheck, runWeeklyRecord, runGoogleFormPoll, syncRoster } from "@/lib/tasks";
 import {
   getSettings,
   nowInTz,
@@ -91,6 +91,15 @@ async function tick() {
         const r = await runDailySnapshot("schedule");
         console.log(`[scheduler] daily snapshot @ ${slot}: ${r.ok ? "ok" : r.error}`);
       }
+    }
+  }
+
+  // Задача: опрос Google-формы заявок (раз в минуту)
+  if (map.get("form_enabled") === "true") {
+    const formSlot = `${now.dateStr} ${hhmm}`;
+    if (await claim(`form-poll:${formSlot}`)) {
+      const r = await runGoogleFormPoll("schedule");
+      console.log(`[scheduler] form poll @ ${formSlot}: ${r.ok ? r.detail : r.error}`);
     }
   }
 

@@ -380,6 +380,82 @@ export default function SettingsPage() {
           </div>
         </Section>
 
+        {/* Google-форма и запас */}
+        <Section
+          title="Google-форма и запас"
+          eyebrow="заявки от бойцов"
+          action={
+            <span className="chip">
+              <Bot size={12} />
+              форма: {settings.form_enabled === "true" ? "вкл" : "выкл"}
+            </span>
+          }
+        >
+          <div className="flex flex-col gap-4 px-5 py-5">
+            <div className="flex items-center justify-between gap-3 rounded-xl border p-3" style={{ borderColor: "var(--stroke-soft)", background: "rgba(255,255,255,.02)" }}>
+              <div>
+                <div className="text-[13px] font-bold">Опрос Google-формы</div>
+                <div className="mt-0.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                  Раз в минуту бот забирает новые ответы и публикует их как заявки в Discord
+                </div>
+              </div>
+              <Toggle
+                on={settings.form_enabled === "true"}
+                onChange={(v) => set("form_enabled", v ? "true" : "false")}
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <div className="label mb-1.5">Лист с ответами формы</div>
+                <input
+                  className="input input-mono"
+                  placeholder="Ответы на форму 1"
+                  value={settings.form_response_sheet}
+                  onChange={(e) => set("form_response_sheet", e.target.value)}
+                />
+                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                  Лист внутри Google-таблицы ШДС, куда форма пишет ответы.
+                </p>
+              </div>
+              <div>
+                <div className="label mb-1.5">ID роли «Запас»</div>
+                <input
+                  className="input input-mono"
+                  placeholder="например 1166476218791645256"
+                  value={settings.reserve_role_id}
+                  onChange={(e) => set("reserve_role_id", e.target.value.replace(/[^\d]/g, ""))}
+                />
+                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                  Выдаётся при уходе в запас и снимается при возврате.
+                </p>
+              </div>
+              <div>
+                <div className="label mb-1.5">Название листа «Запас»</div>
+                <input
+                  className="input input-mono"
+                  placeholder="Запас"
+                  value={settings.reserve_sheet_name}
+                  onChange={(e) => set("reserve_sheet_name", e.target.value)}
+                />
+                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                  Создаётся автоматически, если не существует.
+                </p>
+              </div>
+            </div>
+
+            <hr className="divider" />
+            <div className="flex items-start gap-2.5 text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
+              <Bot size={14} className="mt-0.5 flex-none" style={{ color: "var(--red)" }} />
+              <span>
+                Бот публикует заявки из формы в каналы (роли / отпуск / ШДС) — модератор подтверждает реакцией.
+                Для «запаса» строка бойца переносится на отдельный лист, роли меняются автоматически.
+                Подробная инструкция — в файле <span className="kbd">FORMS_SETUP.md</span> в репозитории.
+              </span>
+            </div>
+          </div>
+        </Section>
+
         {/* RS-RED */}
         <Section
           title="RS-RED"

@@ -533,3 +533,20 @@ export async function checkSite(): Promise<{ ok: boolean; error?: string }> {
 
 
 
+/** ---------- Задача: опрос Google-формы заявок ---------- */
+export async function runGoogleFormPoll(source = "schedule"): Promise<TaskResult> {
+  try {
+    const { pollGoogleForm } = await import("@/lib/forms");
+    const r = await pollGoogleForm();
+    return {
+      ok: r.ok,
+      title: "Опрос Google-формы",
+      detail: r.detail,
+      error: r.ok ? undefined : r.detail,
+    };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return { ok: false, title: "Опрос Google-формы", detail: message, error: message };
+  }
+}
+

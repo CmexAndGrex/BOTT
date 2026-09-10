@@ -25,6 +25,9 @@ const SETTING_NAMES: Record<string, string> = {
   gsheet_spreadsheet_id: "ID Google-таблицы (ШДС)", gsheet_service_account: "паспорт сервисного аккаунта Google",
   snapshot_enabled: "статус задачи снимка статистики", snapshot_time: "время снимка статистики",
   logs_retention_days: "срок хранения логов (дней)",
+  form_enabled: "опрос Google-формы", form_response_sheet: "лист с ответами формы",
+  reserve_role_id: "ID роли «Запас»", reserve_sheet_name: "название листа «Запас»",
+  guild_id: "ID сервера Discord",
 };
 
 export async function GET() {

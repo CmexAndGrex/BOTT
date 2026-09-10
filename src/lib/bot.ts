@@ -27,10 +27,8 @@ import { db } from "@/db";
 import { members } from "@/db/schema";
 import { getSettings } from "@/lib/settings";
 import { applyShdsRequest, parseRequestText, type ParsedRequest } from "@/lib/gsheets";
-import {
-  applyRoleCommand,
-  parseRoleRequest,
-} from "@/lib/roles";
+import { applyRoleCommand, parseRoleRequest } from "@/lib/roles";
+import { moveToReserve, returnFromReserve } from "@/lib/reserve";
 
 declare global {
   var __redopsBotClient: Client | undefined;
@@ -47,6 +45,7 @@ type BotConfig = {
   rolesChannelId: string;
   moderatorRoleId: string;
   leaveRoleId: string;
+  reserveRoleId: string;
 };
 
 /** Значения по умолчанию — используются, если настройка в базе пустая */
@@ -67,6 +66,7 @@ async function loadBotConfig(): Promise<BotConfig> {
     moderatorRoleId:
       (map.get("moderator_role_id") || "").trim() || BOT_DEFAULTS.moderatorRoleId,
     leaveRoleId: (map.get("leave_role_id") || "").trim() || BOT_DEFAULTS.leaveRoleId,
+    reserveRoleId: (map.get("reserve_role_id") || "").trim(),
   };
 }
 
@@ -490,7 +490,9 @@ export function initBot() {
         const reactorMention = `<@${user.id}>`;
         const kindLabel = req.isVacation
           ? "Заявка на отпуск"
-          : `Заявка «${req.shdsAction}»`;
+          : isReserveRequest(req)
+            ? `Заявка «${req.shdsAction}»`
+            : `Заявка «${req.shdsAction}»`;
 
         /* ---------- ОТКАЗ ---------- */
         if (deny) {
@@ -562,6 +564,12 @@ export function initBot() {
           outcome = target
             ? "роль выдана, БД синхронизирована, ЛС отправлено"
             : "участник Discord не найден — роль не выдана";
+        } else if (isReserveRequest(req)) {
+          // Запас: работа с Google Таблицей + роли Discord
+          const reserveResult = await applyReserveRequest(req, guild, config);
+          outcome = reserveResult.ok
+            ? reserveResult.message
+            : `ошибка: ${reserveResult.error}`;
         } else {
           // ШДС: выполняем сценарий в Google Таблице
           const result = await applyShdsRequest(req);
@@ -631,5 +639,78 @@ export function parseVacationUntil(raw: string): Date | null {
 export function formatDate(d: Date | null): string {
   if (!d || Number.isNaN(d.getTime())) return "—";
   return new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", year: "numeric" }).format(d);
+}
+
+/** Признак заявки на запас (уйти / вернуться) */
+function isReserveRequest(req: ParsedRequest): boolean {
+  const action = (req.shdsAction || "").toLowerCase();
+  return action.includes("запас");
+}
+
+/** Обработка одобренной заявки на запас: таблица + роли Discord */
+async function applyReserveRequest(
+  req: ParsedRequest,
+  guild: NonNullable<Message["guild"]>,
+  config: BotConfig
+): Promise<{ ok: true; message: string } | { ok: false; error: string }> {
+  const isGoing = (req.shdsAction || "").toLowerCase().includes("возврат") === false;
+  const target = req.discordId
+    ? await guild.members.fetch(req.discordId).catch(() => null)
+    : null;
+
+  try {
+    if (isGoing) {
+      // Уходим в запас: собираем роли для сохранения, затем меняем
+      const rolesToSave = target
+        ? [...target.roles.cache.keys()].filter((id) => id !== guild.roles.everyone.id)
+        : [];
+
+      const result = await moveToReserve({
+        userName: req.userName,
+        unit: req.unit,
+        rank: req.rank,
+        steamId: req.steamId,
+        discordId: req.discordId,
+        post: req.должность,
+        roles: rolesToSave,
+      });
+
+      if (!result.ok) return { ok: false, error: result.error };
+
+      // Снимаем все роли клана и выдаём «Запас»
+      if (target) {
+        const removable = [...target.roles.cache.keys()].filter(
+          (id) => id !== guild.roles.everyone.id && id !== config.reserveRoleId
+        );
+        if (removable.length) await target.roles.remove(removable).catch(() => {});
+        if (config.reserveRoleId) await target.roles.add(config.reserveRoleId).catch(() => {});
+      }
+      return { ok: true, message: result.message };
+    } else {
+      // Возвращаемся из запаса
+      const result = await returnFromReserve({
+        userName: req.userName,
+        unit: req.unit,
+        rank: req.rank,
+        steamId: req.steamId,
+        discordId: req.discordId,
+        post: req.должность,
+      });
+
+      if (!result.ok) return { ok: false, error: result.error };
+
+      // Снимаем «Запас» и восстанавливаем сохранённые роли
+      if (target) {
+        if (config.reserveRoleId) await target.roles.remove(config.reserveRoleId).catch(() => {});
+        if (result.roles?.length) {
+          const validRoles = result.roles.filter((id) => guild.roles.cache.has(id));
+          if (validRoles.length) await target.roles.add(validRoles).catch(() => {});
+        }
+      }
+      return { ok: true, message: result.message };
+    }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 

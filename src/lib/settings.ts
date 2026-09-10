@@ -32,6 +32,14 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   snapshot_time: "21:00",
   // Срок хранения журнала (дней) — автоочистка в планировщике
   logs_retention_days: "30",
+  // Google-форма (заявки от бойцов)
+  form_enabled: "false",
+  form_response_sheet: "Ответы на форму 1",
+  // Запас
+  reserve_role_id: "",
+  reserve_sheet_name: "Запас",
+  // Discord сервер (для списка ролей в форме)
+  guild_id: "",
   // Контент
   op_texts: [
     "Бойцы, на операцию! Сбор через 15 минут. Отметьтесь реакцией под сообщением.",
