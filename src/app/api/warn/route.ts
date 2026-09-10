@@ -1,18 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { members, settings } from "@/db/schema";
+import { members, settings, users, logs } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { jwtVerify } from "jose";
+import { getJwtSecret } from "@/lib/auth";
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
+const SECRET = getJwtSecret();
 const discordRateLimit = new Map<string, number>();
 
 export async function POST(req: NextRequest) {
   const token = req.cookies.get("auth_token")?.value;
   if (!token) return NextResponse.json({ error: "Нет доступа" }, { status: 401 });
   
-  try { await jwtVerify(token, SECRET); } 
-  catch (err) { return NextResponse.json({ error: "Сессия устарела" }, { status: 403 }); }
+  let authUsername: string | null = null;
+  try {
+    const verified = await jwtVerify(token, SECRET);
+    authUsername = ((verified.payload as any).username as string) || null;
+  } catch (err) { return NextResponse.json({ error: "Сессия устарела" }, { status: 403 }); }
 
   try {
     let body;
@@ -40,7 +44,7 @@ export async function POST(req: NextRequest) {
     const settingsData = await db.select().from(settings);
     const config = Object.fromEntries(settingsData.map((s) => [s.key, s.value]));
 
-    const botToken = config["discord_bot_token"] || process.env.DISCORD_BOT_TOKEN;
+    const botToken = config["discord_token"] || process.env.DISCORD_BOT_TOKEN;
     const channelId = config["discord_channel_id"] || process.env.DISCORD_CHANNEL_ID;
 
     if (!botToken || !channelId) return NextResponse.json({ error: "Настройте Discord" }, { status: 400 });
@@ -57,6 +61,32 @@ export async function POST(req: NextRequest) {
     });
 
     if (!discordRes.ok) return NextResponse.json({ error: `Ошибка Discord` }, { status: 400 });
+
+    // Пишем в журнал редактирования
+    try {
+      let authorFormatted = "Командир";
+      if (authUsername) {
+        const [dbUser] = await db.select().from(users).where(eq(users.username, authUsername));
+        authorFormatted = `${dbUser?.role === "admin" ? "Администратор" : "Командир"} ${authUsername}`;
+      }
+      await db.insert(logs).values({
+        category: "edit",
+        author: authorFormatted,
+        action: `выдал предупреждение ${type}/2 бойцу ${fighter.name}`,
+        details: {
+          "Боец": fighter.name,
+          "Онлайн": `${fighter.hours.toFixed(1)} ч`,
+          "Норма": `${norm} ч`,
+          "Тип": `${type}/2`,
+        },
+        kind: "system",
+        title: "Предупреждение выдано",
+        detail: `Бойцу ${fighter.name} выдано предупреждение ${type}/2`,
+        ok: true,
+      });
+    } catch (e) {
+      // Журнал не критичен для ответа
+    }
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ error: "Ошибка сервера" }, { status: 500 });

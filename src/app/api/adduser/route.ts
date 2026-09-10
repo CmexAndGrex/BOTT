@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { users } from "@/db/schema";
+import { users, logs } from "@/db/schema";
 import bcrypt from "bcryptjs";
 import { jwtVerify } from "jose";
+import { eq } from "drizzle-orm";
+import { getJwtSecret } from "@/lib/auth";
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
+const SECRET = getJwtSecret();
 
 export async function POST(req: NextRequest) {
   const token = req.cookies.get('auth_token')?.value;
@@ -30,7 +32,27 @@ export async function POST(req: NextRequest) {
       passwordHash, 
       role: role || 'officer' 
     });
-    
+
+    let authorFormatted = "Администратор";
+    try {
+      const verified = await jwtVerify(token, SECRET);
+      const payload = verified.payload as any;
+      if (payload.username) {
+        const [dbUser] = await db.select().from(users).where(eq(users.username, payload.username));
+        authorFormatted = `${dbUser?.role === "admin" ? "Администратор" : "Командир"} ${payload.username}`;
+      }
+    } catch {}
+    await db.insert(logs).values({
+      category: "edit",
+      author: authorFormatted,
+      action: `создал аккаунт ${username}`,
+      details: { "Логин": username, "Роль": role || "officer" },
+      kind: "system",
+      title: "Создание аккаунта",
+      detail: `Создан аккаунт ${username}`,
+      ok: true,
+    });
+
     return NextResponse.json({ ok: true, message: `Аккаунт '${username}' успешно создан.` });
   } catch (err) {
     return NextResponse.json({ error: "Ошибка сервера (возможно логин уже занят)" }, { status: 500 });

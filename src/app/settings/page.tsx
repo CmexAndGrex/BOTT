@@ -533,6 +533,39 @@ export default function SettingsPage() {
             </div>
           </div>
         </Section>
+
+        {/* Снимок статистики */}
+        <Section title="Снимок статистики" eyebrow="задача №3 · график"
+          action={
+            <div className="flex items-center gap-2">
+              <span className="label">вкл</span>
+              <Toggle
+                on={settings.snapshot_enabled === "true"}
+                onChange={(v) => set("snapshot_enabled", v ? "true" : "false")}
+              />
+            </div>
+          }
+        >
+          <div className="flex flex-col gap-4 px-5 py-5">
+            <div>
+              <div className="label mb-1.5">Время снимка</div>
+              <input
+                className="input input-mono"
+                placeholder="21:00"
+                value={settings.snapshot_time}
+                onChange={(e) => set("snapshot_time", e.target.value)}
+              />
+              <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                Ежедневно. Сохраняет точку онлайн-статистики в таблицу графика на главной странице,
+                запись об этом появляется в журнале (вкладка «Сайт»).
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-[12px]" style={{ color: "var(--muted)" }}>
+              <CalendarClock size={14} style={{ color: "var(--green)" }} />
+              Часовой пояс — из настройки выше (по умолчанию Europe/Moscow).
+            </div>
+          </div>
+        </Section>
       </div>
 
       {/* Автосинхронизация cookie */}

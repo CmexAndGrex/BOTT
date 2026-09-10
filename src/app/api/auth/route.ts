@@ -4,16 +4,41 @@ import { users, logs } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import { SignJWT } from "jose";
+import { getJwtSecret } from "@/lib/auth";
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
-const rateLimitMap = new Map<string, { attempts: number; lockUntil: number }>();
+const SECRET = getJwtSecret();
+type RateRecord = { attempts: number; lockUntil: number; at: number };
+const rateLimitMap = new Map<string, RateRecord>();
 const MAX_ATTEMPTS = 5; 
+const MAX_REMEMBERED_IPS = 5000;
+const RATE_RECORD_TTL_MS = 24 * 60 * 60 * 1000;
 const LOCK_TIME_MS = 15 * 60 * 1000; 
 
 export async function POST(req: NextRequest) {
   try {
-    const ip = req.headers.get("x-real-ip") || req.headers.get("x-forwarded-for")?.split(',')[0].trim() || "unknown_ip";
+    const ip =
+      (req.headers.get("x-real-ip") || "").trim() ||
+      (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() ||
+      "unknown_ip";
     const now = Date.now();
+
+    // Удерживаем in-memory карту от бесконечного роста
+    if (rateLimitMap.size > MAX_REMEMBERED_IPS) {
+      for (const [key, rec] of rateLimitMap) {
+        if (now - rec.at > RATE_RECORD_TTL_MS) rateLimitMap.delete(key);
+      }
+      let overflow = rateLimitMap.size - MAX_REMEMBERED_IPS;
+      if (overflow > 0) {
+        for (const [key, rec] of rateLimitMap) {
+          if (overflow <= 0) break;
+          if (rec.lockUntil <= now) {
+            rateLimitMap.delete(key);
+            overflow--;
+          }
+        }
+      }
+    }
+
     const record = rateLimitMap.get(ip);
 
     if (record && record.lockUntil > now) {
@@ -32,7 +57,7 @@ export async function POST(req: NextRequest) {
     if (!user || !isValid) {
       const attempts = (record?.attempts || 0) + 1;
       const lockUntil = attempts >= MAX_ATTEMPTS ? now + LOCK_TIME_MS : 0;
-      rateLimitMap.set(ip, { attempts, lockUntil });
+      rateLimitMap.set(ip, { attempts, lockUntil, at: now });
       return NextResponse.json({ error: "Неверный логин или пароль" }, { status: 401 });
     }
 

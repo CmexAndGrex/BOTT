@@ -19,7 +19,7 @@ type Stats = {
 };
 type Member = { id: number; name: string; rankName: string | null; post: string | null; hours: number; vacation: boolean; discordId: string | null; active: boolean; };
 type LogRow = { id: number; createdAt: string; kind: string; title: string; detail: string; ok: boolean; error: string | null; };
-type Status = { bot: { configured: boolean; ok: boolean }; site: { ok: boolean }; schedulerAlive: boolean; nextRuns: { operation: string | null; weekly: string | null }; };
+type Status = { bot: { configured: boolean; ok: boolean }; site: { ok: boolean }; schedulerAlive: boolean; nextRuns: { operation: string | null; weekly: string | null; snapshot: string | null }; };
 type Toast = { id: number; ok: boolean; title: string; detail?: string };
 
 function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: { value: number }[]; label?: string }) {
@@ -107,12 +107,13 @@ export default function DashboardPage() {
             Оперативный свод
           </div>
           <p className="mt-2.5 text-sm" style={{ color: "var(--muted)" }}>
-            Автопинги в 14:45 и 19:45 · контроль онлайна пт–вс в 12:00
+            Автопинги в 14:45 и 19:45 · контроль онлайна пт–вс в 12:00 · снимок графика в 21:00
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="chip"><AlarmClock size={13} style={{ color: "var(--red)" }} /> Операция: <b style={{ color: "var(--text)" }}>{status?.nextRuns?.operation ?? "—"}</b></span>
           <span className="chip"><Activity size={13} style={{ color: "var(--amber)" }} /> Проверка: <b style={{ color: "var(--text)" }}>{status?.nextRuns?.weekly ?? "—"}</b></span>
+          <span className="chip"><Activity size={13} style={{ color: "var(--green)" }} /> Снимок: <b style={{ color: "var(--text)" }}>{status?.nextRuns?.snapshot ?? "—"}</b></span>
         </div>
       </header>
 

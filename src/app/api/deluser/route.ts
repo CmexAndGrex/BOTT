@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse as Res } from "next/server";
 import { db } from "@/db";
-import { users } from "@/db/schema";
+import { users, logs } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { jwtVerify } from "jose";
+import { getJwtSecret } from "@/lib/auth";
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
+const SECRET = getJwtSecret();
 
 export async function DELETE(req: NextRequest) {
   const token = req.cookies.get('auth_token')?.value;
@@ -18,6 +19,27 @@ export async function DELETE(req: NextRequest) {
     if ((payload as any).role !== 'admin') return Res.json({ error: "Только для админов" }, { status: 403 });
 
     await db.delete(users).where(eq(users.username, login));
+
+    let authorFormatted = "Администратор";
+    try {
+      const verified = await jwtVerify(token, SECRET);
+      const payload = verified.payload as any;
+      if (payload.username) {
+        const [dbUser] = await db.select().from(users).where(eq(users.username, payload.username));
+        authorFormatted = `${dbUser?.role === "admin" ? "Администратор" : "Командир"} ${payload.username}`;
+      }
+    } catch {}
+    await db.insert(logs).values({
+      category: "edit",
+      author: authorFormatted,
+      action: `удалил аккаунт ${login}`,
+      details: { "Логин": login },
+      kind: "system",
+      title: "Удаление аккаунта",
+      detail: `Аккаунт ${login} удалён`,
+      ok: true,
+    });
+
     return Res.json({ ok: true, message: `Аккаунт '${login}' навсегда удален.` });
   } catch {
     return Res.json({ error: "Ошибка сервера или неверный токен" }, { status: 500 });

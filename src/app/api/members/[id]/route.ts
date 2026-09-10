@@ -3,11 +3,12 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { members, logs, users } from "@/db/schema";
 import { jwtVerify } from "jose";
+import { getJwtSecret } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
+const SECRET = getJwtSecret();
 
 type Params = { params: Promise<{ id: string }> };
 

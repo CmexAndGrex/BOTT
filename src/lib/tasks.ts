@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
+import { eq, lt } from "drizzle-orm";
 import { db } from "@/db";
-import { logs, members as membersTable, snapshots } from "@/db/schema";
+import { cronRuns, logs, members as membersTable, snapshots, weeklyStats } from "@/db/schema";
 import {
   REACTIONS,
   addReaction,
@@ -413,6 +413,109 @@ export async function runWeeklyCheck(source = "schedule"): Promise<TaskResult> {
     await addLog("weekly", r.title, r.detail, false, message);
     return r;
   }
+}
+
+/** ---------- Задача 3: ежедневный снимок статистики для графика ---------- */
+
+export async function runDailySnapshot(source = "schedule"): Promise<TaskResult> {
+  const map = await getSettings(true);
+  const norm = normHours(map);
+  const rows = await db
+    .select()
+    .from(membersTable)
+    .where(eq(membersTable.active, true));
+  const stats = computeStats(rows, norm);
+  await takeSnapshot(stats, source === "schedule" ? "daily" : source);
+
+  const r: TaskResult = {
+    ok: true,
+    title: "Снимок статистики создан",
+    detail: `Всего: ${stats.total}, норма: ${stats.passed} (${stats.percent}%), 0 ч: ${stats.zeroHours}, отпуск: ${stats.onVacation}.`,
+  };
+  await addLog("system", r.title, r.detail, true);
+  return r;
+}
+
+/** ---------- Недельный персональный срез (weekly_stats + предупреждения) ---------- */
+// Раньше это делал только внешний cron через /api/weekly-snapshot — теперь задача
+// встроена в планировщик, чтобы crontab можно было удалить полностью.
+
+export async function runWeeklyRecord(source = "schedule"): Promise<TaskResult> {
+  const map = await getSettings(true);
+  const norm = normHours(map);
+  const allMembers = await db
+    .select()
+    .from(membersTable)
+    .where(eq(membersTable.active, true));
+
+  let newWarningsTotal = 0;
+  for (const fighter of allMembers) {
+    await db.insert(weeklyStats).values({
+      memberId: fighter.id,
+      hours: fighter.hours,
+      vacation: fighter.vacation,
+    });
+
+    let newWarnings = fighter.warnings;
+    if (!fighter.vacation) {
+      newWarnings = fighter.hours < norm ? fighter.warnings + 1 : 0;
+      if (newWarnings > fighter.warnings) newWarningsTotal++;
+    }
+    if (newWarnings > 2) newWarnings = 2;
+
+    await db
+      .update(membersTable)
+      .set({ warnings: newWarnings })
+      .where(eq(membersTable.id, fighter.id));
+  }
+
+  // Дополнительная точка графика, как это делал недельный cron
+  const stats = computeStats(allMembers, norm);
+  await db.insert(snapshots).values({
+    total: stats.total,
+    zeroHours: stats.zeroHours,
+    passed: stats.passed,
+    failed: stats.failed,
+    onVacation: stats.onVacation,
+    percent: stats.percent,
+    source: source === "schedule" ? "weekly-planner" : source,
+  });
+
+  const r: TaskResult = {
+    ok: true,
+    title: "Недельный срез составлен",
+    detail: `Бойцов: ${allMembers.length}. Норма: ${stats.passed} (${stats.percent}%), 0 ч: ${stats.zeroHours}, новые предупреждения: ${newWarningsTotal}.`,
+  };
+  await addLog("weekly", r.title, r.detail, true);
+  return r;
+}
+
+/** Автоочистка журнала и cron-слотов по срокам хранения (default: 30 дней) */
+export async function runCleanup(): Promise<TaskResult> {
+  const map = await getSettings();
+  const retentionDays = Math.max(
+    1,
+    parseInt(map.get("logs_retention_days") || "30", 10) || 30
+  );
+  const logsCutoff = new Date(Date.now() - retentionDays * 86_400_000);
+  const cronCutoff = new Date(Date.now() - 7 * 86_400_000);
+
+  const removedLogs = await db
+    .delete(logs)
+    .where(lt(logs.createdAt, logsCutoff))
+    .returning({ id: logs.id });
+  const removedCron = await db
+    .delete(cronRuns)
+    .where(lt(cronRuns.createdAt, cronCutoff))
+    .returning({ key: cronRuns.key });
+
+  const r: TaskResult = {
+    ok: true,
+    title: "Автоочистка логов",
+    detail: `Удалено строк журнала: ${removedLogs.length}, cron-слотов: ${removedCron.length}. Хранение журнала: ${retentionDays} дн.`,
+  };
+  await addLog("system", r.title, r.detail, true);
+  return r;
 }
 
 /** Лёгкая проверка связи с сайтом для статуса панели */

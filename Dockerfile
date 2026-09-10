@@ -25,6 +25,11 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV DATABASE_URL="postgresql://postgres:postgres@db:5432/app_db"
+# На этапе сборки .env не попадает в контекст (.dockerignore), и настоящий
+# JWT_SECRET придёт в рантайм-контейнер через docker-compose (environment).
+# Плейсхолдер (непустой, длиннее 32 символов) нужен только чтобы next build
+# прошёл проверку getJwtSecret(); в runner-образ он не наследуется.
+ENV JWT_SECRET="docker-build-placeholder-secret-1234567890"
 # Кэш инкрементальной сборки в рантайме не нужен (runner берёт standalone/static) —
 # удаляем, чтобы слой builder не раздувался на диске сервера
 RUN npm run build && rm -rf .next/cache

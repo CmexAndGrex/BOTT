@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { cronRuns } from "@/db/schema";
-import { runOperationPing, runWeeklyCheck, syncRoster } from "@/lib/tasks";
+import { runCleanup, runDailySnapshot, runOperationPing, runWeeklyCheck, runWeeklyRecord, syncRoster } from "@/lib/tasks";
 import {
   getSettings,
   nowInTz,
@@ -23,6 +23,17 @@ async function claim(key: string): Promise<boolean> {
     .onConflictDoNothing()
     .returning({ key: cronRuns.key });
   return rows.length > 0;
+}
+
+/** Календарно последний включённый день недели (воскресенье идёт после субботы) */
+function lastScheduleDay(days: number[]): number | null {
+  if (!days.length) return null;
+  let best = -1;
+  for (const d of days) {
+    const ordered = d === 0 ? 7 : d;
+    if (ordered > best) best = ordered;
+  }
+  return best === 7 ? 0 : best;
 }
 
 async function tick() {
@@ -58,6 +69,31 @@ async function tick() {
     }
   }
 
+  // Недельный персональный срез (weekly_stats + предупреждения) — в последний
+  // включённый день недели. Заменяет внешний cron /api/weekly-snapshot.
+  if (map.get("weekly_enabled") === "true") {
+    const wkDays = parseDays(map.get("weekly_days") || "");
+    const weekDay = lastScheduleDay(wkDays);
+    const recordTime = (map.get("weekly_time") || "12:00").trim();
+    if (weekDay !== null && weekDay === now.weekday && recordTime === hhmm) {
+      if (await claim(`week-record:${now.dateStr}`)) {
+        const r = await runWeeklyRecord("schedule");
+        console.log(`[scheduler] weekly record @ ${slot}: ${r.ok ? "ok" : r.error}`);
+      }
+    }
+  }
+
+  // Задача 3: ежедневный снимок статистики для графика (по умолчанию 21:00)
+  if (map.get("snapshot_enabled") === "true") {
+    const time = (map.get("snapshot_time") || "21:00").trim();
+    if (time === hhmm) {
+      if (await claim(`snapshot:${slot}`)) {
+        const r = await runDailySnapshot("schedule");
+        console.log(`[scheduler] daily snapshot @ ${slot}: ${r.ok ? "ok" : r.error}`);
+      }
+    }
+  }
+
   // Автосинхронизация состава раз в 30 минут, чтобы панель была актуальной
   if (resolveCookie(map)) {
     const last = Date.parse(map.get("_last_auto_sync") || "") || 0;
@@ -70,6 +106,15 @@ async function tick() {
         );
       }
     }
+  }
+
+  // Автоочистка: журнал (default 30 дней) и устаревшие cron-слоты (раз в 6 часов)
+  const cleanSlot = new Date(
+    Math.floor(Date.now() / (6 * 60 * 60 * 1000)) * (6 * 60 * 60 * 1000)
+  ).toISOString();
+  if (await claim(`cleanup:${cleanSlot}`)) {
+    const r = await runCleanup();
+    console.log(`[scheduler] cleanup: ${r.ok ? r.detail : r.error}`);
   }
 }
 

@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { members, weeklyStats } from "@/db/schema";
+import { members, snapshots, weeklyStats } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { jwtVerify } from "jose";
+import { computeStats } from "@/lib/tasks";
+import { getSettings, normHours } from "@/lib/settings";
+import { getJwtSecret } from "@/lib/auth";
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const SECRET = getJwtSecret();
 
 export async function GET(req: NextRequest) {
   const key = req.nextUrl.searchParams.get("key");
@@ -44,6 +50,24 @@ export async function GET(req: NextRequest) {
 
       await db.update(members).set({ warnings: newWarnings }).where(eq(members.id, fighter.id));
       processedCount++;
+    }
+
+    // Создаём точку в истории графика (stat_snapshots)
+    try {
+      const map = await getSettings();
+      const norm = normHours(map);
+      const stats = computeStats(allMembers, norm);
+      await db.insert(snapshots).values({
+        total: stats.total,
+        zeroHours: stats.zeroHours,
+        passed: stats.passed,
+        failed: stats.failed,
+        onVacation: stats.onVacation,
+        percent: stats.percent,
+        source: "weekly-cron",
+      });
+    } catch (e) {
+      // Точка графика не критична для среза
     }
 
     return NextResponse.json({ ok: true, message: `Срез выполнен. Бойцов: ${processedCount}` });

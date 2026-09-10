@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { jwtVerify } from "jose";
+import { getJwtSecret } from "@/lib/auth";
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
+const SECRET = getJwtSecret();
 
 const protectedPaths = [
   "/settings", "/logs", "/users",
@@ -26,7 +27,15 @@ export async function middleware(req: NextRequest) {
     const verified = await jwtVerify(token, SECRET);
     const role = (verified.payload as any).role;
 
-    if ((pathname.startsWith("/settings") || pathname.startsWith("/users")) && role !== "admin") {
+    const isAdminArea =
+      pathname.startsWith("/settings") ||
+      pathname.startsWith("/users") ||
+      pathname.startsWith("/api/extension.zip");
+
+    if (isAdminArea && role !== "admin") {
+      if (pathname.startsWith("/api/")) {
+        return NextResponse.json({ error: "Только для администратора" }, { status: 403 });
+      }
       return NextResponse.redirect(new URL("/", req.url));
     }
     return NextResponse.next();

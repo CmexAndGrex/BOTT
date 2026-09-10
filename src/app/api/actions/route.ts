@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runOperationPing, runWeeklyCheck } from "@/lib/tasks";
 import { jwtVerify } from "jose";
+import { getJwtSecret } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
+const SECRET = getJwtSecret();
 
 export async function POST(req: NextRequest) {
   const token = req.cookies.get("auth_token")?.value;

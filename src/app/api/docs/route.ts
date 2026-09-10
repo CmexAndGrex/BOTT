@@ -5,11 +5,12 @@ import { jwtVerify } from "jose";
 import { db } from "@/db";
 import { logs, users } from "@/db/schema";
 import { getSettings, invalidateSettingsCache, setSettingQuiet } from "@/lib/settings";
+import { getJwtSecret } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
+const SECRET = getJwtSecret();
 
 type DocTag = { id: string; name: string };
 type DocLink = { id: string; title: string; url: string; tagIds: string[] };

@@ -142,7 +142,7 @@ export default function UsersPage() {
             </div>
             <div>
               <label className="text-[12px] mb-1.5 block" style={{ color: "var(--dim)" }}>Пароль</label>
-              <input required minLength={5} type="text" className="input input-mono w-full" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="НадёжныйПароль123" />
+              <input required minLength={5} type="password" autoComplete="new-password" className="input input-mono w-full" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="НадёжныйПароль123" />
             </div>
             <div>
               <label className="text-[12px] mb-1.5 block" style={{ color: "var(--dim)" }}>Роль</label>

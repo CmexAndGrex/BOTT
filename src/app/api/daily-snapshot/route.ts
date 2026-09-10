@@ -19,15 +19,16 @@ export async function GET(req: NextRequest) {
   const rows = await db.select().from(members).where(eq(members.active, true));
   const live = computeStats(rows, norm);
 
-  const stats = live as any;
-
   // Делаем тихий снимок для графика
   await db.insert(snapshots).values({
     total: live.total,
-    ok: stats.ok || stats.passed || stats.success || stats.okCount || 0,
-    vacation: live.onVacation,
+    zeroHours: live.zeroHours,
+    passed: live.passed,
+    failed: live.failed,
+    onVacation: live.onVacation,
     percent: live.percent,
-  } as any);
+    source: "daily-cron",
+  });
 
   return NextResponse.json({ ok: true, message: "Точка графика добавлена тихо" });
 }

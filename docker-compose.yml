@@ -33,6 +33,9 @@ services:
       DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/app_db"
       DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:-}"
       RS_RED_COOKIE: "${RS_RED_COOKIE:-}"
+      CRON_SECRET: "${CRON_SECRET:?Укажите CRON_SECRET в файле .env}"
+      JWT_SECRET: "${JWT_SECRET:?Укажите JWT_SECRET в файле .env}"
+      TZ: "${TZ:-Europe/Moscow}"
     depends_on:
       db:
         condition: service_healthy
@@ -40,9 +43,9 @@ services:
         condition: service_completed_successfully
     ports:
       # Вариант без домена: приложение сразу доступно как http://IP-СЕРВЕРА:3000
-      - "8080:3000"
+      - "3000:3000"
       # Если перед ним ставите Caddy/nginx — безопаснее слушать только локально:
-      # - "127.0.0.1:8080:3000"
+      # - "127.0.0.1:3000:3000"
 
 volumes:
   pgdata:

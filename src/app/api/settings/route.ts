@@ -5,11 +5,12 @@ import { db } from "@/db";
 import { logs, users } from "@/db/schema";
 import { jwtVerify } from "jose";
 import { DEFAULT_SETTINGS, ensureCookieSyncKey, getSettings, maskCookie, setSettingQuiet, setSettings } from "@/lib/settings";
+import { getJwtSecret } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "temp-secret-key");
+const SECRET = getJwtSecret();
 const SECRET_KEYS = new Set(["rs_cookie", "discord_token", "gsheet_service_account"]);
 
 const SETTING_NAMES: Record<string, string> = {
@@ -22,6 +23,8 @@ const SETTING_NAMES: Record<string, string> = {
   roles_channel_id: "ID канала запросов ролей",
   moderator_role_id: "ID роли модератора заявок", leave_role_id: "ID роли «Отпуск»",
   gsheet_spreadsheet_id: "ID Google-таблицы (ШДС)", gsheet_service_account: "паспорт сервисного аккаунта Google",
+  snapshot_enabled: "статус задачи снимка статистики", snapshot_time: "время снимка статистики",
+  logs_retention_days: "срок хранения логов (дней)",
 };
 
 export async function GET() {
@@ -80,7 +83,7 @@ export async function PUT(req: NextRequest) {
       }
       continue;
     }
-    if (key === "op_enabled" || key === "weekly_enabled") {
+    if (key === "op_enabled" || key === "weekly_enabled" || key === "snapshot_enabled") {
       const valBool = value === "true" ? "true" : "false";
       const oldValue = oldMap.get(key) ?? "false";
       if (valBool !== oldValue) {
@@ -89,7 +92,7 @@ export async function PUT(req: NextRequest) {
       }
       continue;
     }
-    if (key === "weekly_time" && /^\d{1,2}:\d{2}$/.test(value)) {
+    if ((key === "weekly_time" || key === "snapshot_time") && /^\d{1,2}:\d{2}$/.test(value)) {
       const [h, m] = value.split(":");
       const formattedTime = `${h.padStart(2, "0")}:${m}`;
       const oldValue = oldMap.get(key) ?? "";

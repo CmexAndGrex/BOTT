@@ -27,6 +27,11 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   weekly_days: "5,6,0", // пт, сб, вс
   weekly_time: "12:00",
   norm_hours: "10",
+  // Ежедневный снимок статистики для графика
+  snapshot_enabled: "true",
+  snapshot_time: "21:00",
+  // Срок хранения журнала (дней) — автоочистка в планировщике
+  logs_retention_days: "30",
   // Контент
   op_texts: [
     "Бойцы, на операцию! Сбор через 15 минут. Отметьтесь реакцией под сообщением.",
@@ -195,14 +200,20 @@ export function nowInTz(tz: string): {
 export function nextRuns(map: Map<string, string>): {
   operation: string | null;
   weekly: string | null;
+  snapshot: string | null;
 } {
   const tz = map.get("timezone") || "Europe/Moscow";
   const now = nowInTz(tz);
   const wdNames = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
 
-  const result: { operation: string | null; weekly: string | null } = {
+  const result: {
+    operation: string | null;
+    weekly: string | null;
+    snapshot: string | null;
+  } = {
     operation: null,
     weekly: null,
+    snapshot: null,
   };
 
   if (map.get("op_enabled") === "true") {
@@ -236,6 +247,23 @@ export function nextRuns(map: Map<string, string>): {
           : off === 1
             ? `завтра в ${time}`
             : `${wdNames[wd]} в ${time}`;
+    }
+  }
+
+  // Ежедневный снимок статистики (точка графика)
+  if (map.get("snapshot_enabled") === "true") {
+    const time = (map.get("snapshot_time") || "21:00").trim();
+    const [h, m] = (time.includes(":") ? time : "21:00").split(":").map((x) => parseInt(x, 10));
+    const mins = h * 60 + m;
+    const nowMin = parseInt(now.hh, 10) * 60 + parseInt(now.mm, 10);
+    for (let off = 0; off <= 7 && !result.snapshot; off++) {
+      if (off === 0 && mins < nowMin) continue;
+      result.snapshot =
+        off === 0
+          ? `сегодня в ${time}`
+          : off === 1
+            ? `завтра в ${time}`
+            : `через ${off} дн. в ${time}`;
     }
   }
 
