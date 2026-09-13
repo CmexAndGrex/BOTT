@@ -575,13 +575,21 @@ export async function runLeftMembersCheck(source = "schedule"): Promise<TaskResu
     return { ok: true, title: "Контроль вышедших", detail: "Проверка выключена" };
   }
 
-  const channelId = (map.get("left_check_channel_id") || "").trim();
-  const commandRoleId = (map.get("command_role_id") || "").trim();
-  if (!channelId || !commandRoleId) {
+  // Канал пинга: отдельный (left_check_channel_id), иначе основной канал пингов
+  const channelId = (
+    map.get("left_check_channel_id") ||
+    map.get("discord_channel_id") ||
+    ""
+  ).trim();
+  const commandRoleId = (
+    map.get("command_role_id") || "1392552505162072264"
+  ).trim();
+  if (!channelId) {
     return {
       ok: false,
       title: "Контроль вышедших",
-      detail: "Не задан канал пинга (left_check_channel_id) или роль Командирского состава",
+      detail:
+        "Не задан канал пинга: укажите left_check_channel_id или discord_channel_id в настройках",
       error: "NO_CONFIG",
     };
   }

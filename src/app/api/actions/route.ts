@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runOperationPing, runWeeklyCheck } from "@/lib/tasks";
+import { runLeftMembersCheck, runOperationPing, runWeeklyCheck } from "@/lib/tasks";
 import { jwtVerify } from "jose";
 import { getJwtSecret } from "@/lib/auth";
 
@@ -32,6 +32,10 @@ export async function POST(req: NextRequest) {
   }
   if (body.action === "weekly") {
     const r = await runWeeklyCheck("manual");
+    return NextResponse.json(r, { status: r.ok ? 200 : 502 });
+  }
+  if (body.action === "left-check") {
+    const r = await runLeftMembersCheck("manual");
     return NextResponse.json(r, { status: r.ok ? 200 : 502 });
   }
   return NextResponse.json({ ok: false, error: "Неизвестное действие" }, { status: 400 });
