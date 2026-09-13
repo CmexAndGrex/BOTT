@@ -658,7 +658,7 @@ export default function SettingsPage() {
           <div className="flex flex-col gap-4 px-5 py-5">
             <div className="grid grid-cols-2 items-start gap-3">
               <div className="flex min-w-0 flex-col items-start">
-                <div className="label mb-1.5 w-full">ID канала проверок</div>
+                <div className="label mb-1.5 flex min-h-[3rem] w-full items-end">ID канала проверок</div>
                 <input
                   className="input input-mono w-full"
                   placeholder="например 1185432109876543210"
