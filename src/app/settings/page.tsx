@@ -670,7 +670,7 @@ export default function SettingsPage() {
                 </p>
               </div>
               <div className="flex min-w-0 flex-col items-start">
-                <div className="label mb-1.5 w-full">ID роли «Командирский состав»</div>
+                <div className="label mb-1.5 flex min-h-[3rem] w-full items-end">ID роли «Командирский состав»</div>
                 <input
                   className="input input-mono w-full"
                   placeholder="например 1392552505162072264"
