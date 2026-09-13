@@ -16,6 +16,8 @@ export const SHDS_ACTIONS = {
   POST: "Перенос и зачистка (должность)",
   EXAM: "Получение подтверждения об экзаменации",
   REMOVE: "Убрать из таблицы",
+  RESERVE_GO: "Уход в запас",
+  RESERVE_BACK: "Возврат из запаса",
 } as const;
 
 export type ShdsAction = (typeof SHDS_ACTIONS)[keyof typeof SHDS_ACTIONS];
@@ -24,6 +26,7 @@ export type ShdsAction = (typeof SHDS_ACTIONS)[keyof typeof SHDS_ACTIONS];
 export type ParsedRequest = {
   raw: string;
   isVacation: boolean;
+  vacationRemove: boolean; // «Снять отпуск» вместо выдачи
   shdsAction: ShdsAction | null;
   unit: string;          // «Подразделение» — имя листа
   userName: string;      // «Имя пользователя»
@@ -33,6 +36,10 @@ export type ParsedRequest = {
   отделение: string;     // «Отделение» (Артиллерийский дивизион)
   должность: string;     // «Должность»
   exams: string[];       // «Сданные экзамены»
+  grade: string;         // «Оценка» (КМБТ — без оценки)
+  examiner: string;      // «Экзаменатор» (Фамилия И.О.)
+  rolesGive: string;     // «Роли выдать» (через запятую)
+  rolesRemove: string;   // «Роли снять» (через запятую)
   vacationDates: string; // «Даты отпуска»
   reason: string;        // «Причина»
 };
@@ -45,23 +52,32 @@ export function parseRequestText(text: string): ParsedRequest | null {
     return m ? clean(m[1]) : "";
   };
 
-  const unit = field("Подразделение");
   const userName = field("Имя пользователя");
-  if (!unit || !userName) return null;
+  if (!userName) return null;
 
+  const unit = field("Подразделение");
   const shdsRaw = field("Редакция ШДС");
   const vacationRaw = field("Тип заявки");
-  const isVacation = !shdsRaw && /отпуск/i.test(vacationRaw);
+  const vacationAll = `${shdsRaw} ${vacationRaw}`;
+  const isVacation = /отпуск/i.test(vacationAll) && !/запас/i.test(shdsRaw);
+  // «Снять отпуск» / «Окончание отпуска» / «Выход из отпуска» — снятие статуса
+  const vacationRemove =
+    isVacation && /снять|снятие|отмен|окончан|выход|заверш/i.test(vacationAll);
 
   let shdsAction: ShdsAction | null = null;
   if (shdsRaw) {
     const low = shdsRaw.toLowerCase();
-    if (low.includes("добавление")) shdsAction = SHDS_ACTIONS.ADD;
+    if (/возврат|вернуться|вернуть/i.test(low) && /запас/.test(low)) shdsAction = SHDS_ACTIONS.RESERVE_BACK;
+    else if (low.includes("запас")) shdsAction = SHDS_ACTIONS.RESERVE_GO;
+    else if (low.includes("добавление")) shdsAction = SHDS_ACTIONS.ADD;
     else if (low.includes("звание")) shdsAction = SHDS_ACTIONS.RANK;
     else if (low.includes("должность")) shdsAction = SHDS_ACTIONS.POST;
     else if (low.includes("экзамен")) shdsAction = SHDS_ACTIONS.EXAM;
     else if (low.includes("убрать")) shdsAction = SHDS_ACTIONS.REMOVE;
   }
+
+  // Для операций с таблицей подразделение обязательно (это имя листа)
+  if (shdsAction && !unit) return null;
 
   const examsRaw = field("Сданные экзамены");
   const exams = examsRaw
@@ -71,6 +87,7 @@ export function parseRequestText(text: string): ParsedRequest | null {
   return {
     raw: text,
     isVacation,
+    vacationRemove,
     shdsAction,
     unit,
     userName,
@@ -80,6 +97,10 @@ export function parseRequestText(text: string): ParsedRequest | null {
     отделение: field("Отделение"),
     должность: field("Должность"),
     exams,
+    grade: field("Оценка"),
+    examiner: field("Экзаменатор"),
+    rolesGive: field("Роли выдать"),
+    rolesRemove: field("Роли снять"),
     vacationDates: field("Даты отпуска"),
     reason: field("Причина"),
   };
@@ -430,13 +451,19 @@ async function scenarioExam(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayou
   const row = findNameRow(sheet, layout, req.userName);
   if (!row) throw new Error(`Боец ${req.userName} не найден на листе «${sheet.title}»`);
 
+  const isKmbt = req.exams.some((e) => /кмбт/i.test(e));
   for (const c of examCols) {
-    sheet.getCell(row - 1, c).backgroundColor = { ...EXAM_GREEN };
+    const cell = sheet.getCell(row - 1, c);
+    cell.backgroundColor = { ...EXAM_GREEN };
+    // Оценка записывается в ячейку (КМБТ — базовый экзамен, без оценки)
+    if (req.grade && !isKmbt) cell.value = req.grade;
   }
 
   await sheet.saveUpdatedCells();
   const titles = examCols.map((c) => String(sheet.getCell(headerRow - 1, c).value ?? "").trim());
-  return `Отмечены экзамены (${titles.join(", ")}) для ${req.userName} (строка ${row})`;
+  const gradeStr = req.grade && !isKmbt ? `, оценка «${req.grade}»` : "";
+  const examinerStr = req.examiner ? `, экзаменатор: ${req.examiner}` : "";
+  return `Отмечены экзамены (${titles.join(", ")}) для ${req.userName} (строка ${row})${gradeStr}${examinerStr}`;
 }
 
 /** Сценарий Д: «Убрать из таблицы» */
@@ -472,6 +499,15 @@ export async function applyShdsRequest(req: ParsedRequest): Promise<ShdsResult> 
     }
     if (!req.shdsAction) {
       return { ok: false, error: "Неизвестный тип «Редакция ШДС»" };
+    }
+    if (
+      req.shdsAction === SHDS_ACTIONS.RESERVE_GO ||
+      req.shdsAction === SHDS_ACTIONS.RESERVE_BACK
+    ) {
+      return {
+        ok: false,
+        error: "Заявки запаса обрабатываются в модуле reserve.ts (бот вызывает их напрямую)",
+      };
     }
 
     const sheet = await getSheet(req.unit);

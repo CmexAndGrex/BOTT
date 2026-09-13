@@ -29,6 +29,7 @@ export const members = pgTable("division_members", {
   vacation: boolean("vacation").notNull().default(false), // Статус отпуска
   vacationUntil: timestamp("vacation_until", { mode: 'date' }), // Дата выхода из отпуска
   vacationNotified: boolean("vacation_notified").notNull().default(false), // Было ли напоминание за 24ч
+  leftNotified: boolean("left_notified").notNull().default(false), // Пинг Командирскому составу о выходе из подразделения уже отправлен
   discordId: text("discord_id"),
   active: boolean("active").notNull().default(true),
   warnings: integer("warnings").notNull().default(0),

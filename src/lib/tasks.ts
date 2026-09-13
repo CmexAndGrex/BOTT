@@ -1,4 +1,4 @@
-import { eq, lt } from "drizzle-orm";
+import { and, eq, isNotNull, lt } from "drizzle-orm";
 import { db } from "@/db";
 import { cronRuns, logs, members as membersTable, snapshots, weeklyStats } from "@/db/schema";
 import {
@@ -114,7 +114,14 @@ export async function syncRoster(source = "manual"): Promise<
     const { members: roster } = await fetchRoster(cookie, base, subdivId);
     const existing = await db.select().from(membersTable);
     const byPid = new Map(existing.filter((e) => e.pid).map((e) => [e.pid as string, e]));
-    const byName = new Map(existing.map((e) => [e.name.toLowerCase(), e]));
+    // По имени сопоставляем только ОДИН уникальный кандидат: если в БД две
+    // строки с одним именем (дубль после прошлых сбоев), берём первую — иначе
+    // «лишняя» строка деактивировалась бы и локальные правки терялись.
+    const byName = new Map<string, typeof existing[number]>();
+    for (const e of existing) {
+      const key = e.name.toLowerCase();
+      if (!byName.has(key)) byName.set(key, e);
+    }
     const seenIds = new Set<number>();
 
     let added = 0;
@@ -125,17 +132,21 @@ export async function syncRoster(source = "manual"): Promise<
         (p.pid && byPid.get(p.pid)) || byName.get(p.name.toLowerCase()) || null;
       if (match) {
         seenIds.add(match.id);
+        // ВАЖНО: локальные поля панели (discordId, vacation, vacationUntil,
+        // vacationNotified, warnings) НЕ трогаем — они имеют приоритет над
+        // данными сайта. Обновляем только то, что приходит с rs-red.com.
         await db
           .update(membersTable)
           .set({
             pid: p.pid ?? match.pid,
             handle: p.handle ?? match.handle,
             name: p.name,
-            rankName: p.rankName,
-            post: p.post,
+            rankName: p.rankName ?? match.rankName,
+            post: p.post ?? match.post,
             minutes: p.minutes,
             hours: p.hours,
             active: true,
+            leftNotified: false, // вернулся в состав — сбрасываем флаг пинга
             updatedAt: new Date(),
           })
           .where(eq(membersTable.id, match.id));
@@ -160,13 +171,14 @@ export async function syncRoster(source = "manual"): Promise<
       }
     }
 
-    // Бойцы, исчезнувшие из состава, помечаются неактивными
+    // Бойцы, исчезнувшие из состава, помечаются неактивными.
+    // updatedAt фиксирует момент выхода — по нему считается «сутки без снятия ролей».
     if (roster.length > 0) {
       const stale = existing.filter((e) => e.active && !seenIds.has(e.id));
       for (const s of stale) {
         await db
           .update(membersTable)
-          .set({ active: false })
+          .set({ active: false, updatedAt: new Date() })
           .where(eq(membersTable.id, s.id));
       }
     }
@@ -547,6 +559,113 @@ export async function runGoogleFormPoll(source = "schedule"): Promise<TaskResult
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     return { ok: false, title: "Опрос Google-формы", detail: message, error: message };
+  }
+}
+
+/** ---------- Задача: контроль вышедших из подразделения ----------
+ *
+ * Боец пропал из состава rs-red.com (active=false после синхронизации) и
+ * с него НЕ сняли роли клана в Discord в течение суток → пинг
+ * «Командирскому составу» в указанный канал. Пинг однократный (флаг
+ * leftNotified), сбрасывается при возвращении бойца в состав.
+ */
+export async function runLeftMembersCheck(source = "schedule"): Promise<TaskResult> {
+  const map = await getSettings(true);
+  if (map.get("left_members_check") !== "true") {
+    return { ok: true, title: "Контроль вышедших", detail: "Проверка выключена" };
+  }
+
+  const channelId = (map.get("left_check_channel_id") || "").trim();
+  const commandRoleId = (map.get("command_role_id") || "").trim();
+  if (!channelId || !commandRoleId) {
+    return {
+      ok: false,
+      title: "Контроль вышедших",
+      detail: "Не задан канал пинга (left_check_channel_id) или роль Командирского состава",
+      error: "NO_CONFIG",
+    };
+  }
+
+  let guildId = (map.get("guild_id") || "").trim();
+
+  // Кандидаты: неактивные, с Discord ID, без отправленного пинга,
+  // пропавшие из состава больше суток назад
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const candidates = await db
+    .select()
+    .from(membersTable)
+    .where(
+      and(
+        eq(membersTable.active, false),
+        eq(membersTable.leftNotified, false),
+        lt(membersTable.updatedAt, cutoff),
+        isNotNull(membersTable.discordId)
+      )
+    );
+
+  if (!guildId) {
+    // Автоопределение сервера: берём единственный сервер бота
+    try {
+      const { getBotGuildIds } = await import("@/lib/discord");
+      const ids = await getBotGuildIds();
+      if (ids.length === 1) guildId = ids[0];
+    } catch {
+      /* оставим пустым — задача отчитается ниже */
+    }
+  }
+  if (!guildId) {
+    return {
+      ok: false,
+      title: "Контроль вышедших",
+      detail: "Не задан guild_id и бот состоит на нескольких серверах — укажите ID сервера в настройках",
+      error: "NO_GUILD",
+    };
+  }
+
+  const { getGuildMemberRoles, sendChannelMessage } = await import("@/lib/discord");
+  const { CLAN_ROLE_IDS } = await import("@/lib/roles");
+
+  const notStripped: string[] = [];
+  for (const m of candidates) {
+    if (!m.discordId) continue;
+    const roles = await getGuildMemberRoles(guildId, m.discordId);
+    if (roles === null) continue; // участник не найден на сервере — роли уже неактуальны
+    if (roles.some((id) => CLAN_ROLE_IDS.has(id))) notStripped.push(m.name);
+    // Пингуем только один раз — даже если роли снимут позже
+    await db
+      .update(membersTable)
+      .set({ leftNotified: true })
+      .where(eq(membersTable.id, m.id));
+  }
+
+  if (!notStripped.length) {
+    return {
+      ok: true,
+      title: "Контроль вышедших",
+      detail: `Проверено бойцов: ${candidates.length}. Все роли сняты — пинг не требуется.`,
+    };
+  }
+
+  try {
+    await sendChannelMessage(channelId, {
+      content:
+        `⚠️ <@&${commandRoleId}> Контроль состава!\n` +
+        `Бойцы вышли из подразделения более суток назад, но роли клана с них НЕ сняты:\n` +
+        notStripped.map((n) => `• ${n}`).join("\n") +
+        `\nПроверьте: возможно, кто-то вышел без уведомления командира.`,
+      allowed_mentions: { parse: [], roles: [commandRoleId] },
+    });
+    const r: TaskResult = {
+      ok: true,
+      title: "Контроль вышедших: пинг отправлен",
+      detail: `Роли не сняты у ${notStripped.length}: ${notStripped.join(", ")}. Пинг Командирскому составу отправлен.`,
+    };
+    await addLog("system", r.title, r.detail, true);
+    return r;
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    await addLog("system", "Контроль вышедших: ошибка пинга", message, false, message);
+    return { ok: false, title: "Контроль вышедших", detail: message, error: message };
   }
 }
 

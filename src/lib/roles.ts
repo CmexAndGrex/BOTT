@@ -52,6 +52,18 @@ export const COMMON_ROLE_IDS = {
   RANKS_CATEGORY: "1089255012460417066", // категория «Звания»
 } as const;
 
+/**
+ * Все роли клана (проверка «роли не сняты» для вышедших бойцов).
+ * «Друг АТК» сюда НЕ входит — это роль бывшего бойца.
+ */
+export const CLAN_ROLE_IDS: Set<string> = new Set([
+  ...Object.values(RANK_ROLE_IDS),
+  ...Object.values(SUBDIV_ROLE_IDS),
+  COMMON_ROLE_IDS.ATK_CORPS,
+  COMMON_ROLE_IDS.RANKS_CATEGORY,
+  COMMON_ROLE_IDS.RECRUIT,
+]);
+
 /** Роли, запрещённые к выдаче/снятию */
 const PROTECTED_ROLE_NAMES = ["модератор", "администратор"];
 /* ------------------------------------------------------------------ */
@@ -235,7 +247,8 @@ export async function applyRoleCommand(
 
 export type RoleRequest = {
   recipientId: string;
-  examinerId: string;
+  /** Экзаменатор может отсутствовать (заявки из Google-формы) */
+  examinerId: string | null;
   ops: RoleOp[];
   line: string;
 };
@@ -243,10 +256,12 @@ export type RoleRequest = {
 /**
  * Разбирает сообщение вида:
  *   <@получатель>
- *   <@экзаменатор>
+ *   <@экзаменатор>            ← необязательная строка
  *   Выдать Капитан ТР, Снять Друг АТК
  *
- * Лишние строки после третьей считаются продолжением команды.
+ * Лишние строки после команды считаются продолжением команды.
+ * Если строки с экзаменатором нет (заявка из Google-формы), moderator
+ * всё равно может подтвердить запрос.
  */
 export function parseRoleRequest(content: string): RoleRequest | null {
   if (!content) return null;
@@ -254,18 +269,29 @@ export function parseRoleRequest(content: string): RoleRequest | null {
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
-  if (lines.length < 3) return null;
+  if (lines.length < 2) return null;
 
   const recipientMatch = lines[0].match(/<@!?(\d+)>/);
-  const examinerMatch = lines[1].match(/<@!?(\d+)>/);
-  if (!recipientMatch || !examinerMatch) return null;
+  if (!recipientMatch) return null;
 
-  const commandLine = lines.slice(2).join(" | ");
-  if (!/^(Выдать|Снять)/i.test(commandLine.trim())) return null;
+  // Ищем строки-упоминания между получателем и командой — это экзаменатор
+  let examinerId: string | null = null;
+  let commandIdx = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (/^(Выдать|Снять)/i.test(lines[i])) {
+      commandIdx = i;
+      break;
+    }
+    const m = lines[i].match(/^<@!?(\d+)>$/);
+    if (m && !examinerId) examinerId = m[1];
+  }
+  if (commandIdx < 0) return null;
+
+  const commandLine = lines.slice(commandIdx).join(" | ");
 
   return {
     recipientId: recipientMatch[1],
-    examinerId: examinerMatch[1],
+    examinerId,
     ops: parseRoleCommand(commandLine),
     line: commandLine,
   };

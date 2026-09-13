@@ -22,6 +22,8 @@ const SETTING_NAMES: Record<string, string> = {
   shds_channel_id: "ID канала заявок ШДС", vacation_channel_id: "ID канала заявок на отпуск",
   roles_channel_id: "ID канала запросов ролей",
   moderator_role_id: "ID роли модератора заявок", leave_role_id: "ID роли «Отпуск»",
+  command_role_id: "ID роли «Командирский состав»",
+  left_members_check: "контроль вышедших из подразделения", left_check_channel_id: "канал пинга о вышедших",
   gsheet_spreadsheet_id: "ID Google-таблицы (ШДС)", gsheet_service_account: "паспорт сервисного аккаунта Google",
   snapshot_enabled: "статус задачи снимка статистики", snapshot_time: "время снимка статистики",
   logs_retention_days: "срок хранения логов (дней)",

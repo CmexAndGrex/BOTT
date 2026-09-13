@@ -26,8 +26,8 @@ import { eq, and, isNotNull } from "drizzle-orm";
 import { db } from "@/db";
 import { members } from "@/db/schema";
 import { getSettings } from "@/lib/settings";
-import { applyShdsRequest, parseRequestText, type ParsedRequest } from "@/lib/gsheets";
-import { applyRoleCommand, parseRoleRequest } from "@/lib/roles";
+import { applyShdsRequest, parseRequestText, SHDS_ACTIONS, type ParsedRequest } from "@/lib/gsheets";
+import { applyRoleCommand, parseRoleCommand, parseRoleRequest, COMMON_ROLE_IDS } from "@/lib/roles";
 import { moveToReserve, returnFromReserve } from "@/lib/reserve";
 
 declare global {
@@ -44,6 +44,7 @@ type BotConfig = {
   vacationChannelId: string;
   rolesChannelId: string;
   moderatorRoleId: string;
+  commandRoleId: string;
   leaveRoleId: string;
   reserveRoleId: string;
 };
@@ -51,6 +52,7 @@ type BotConfig = {
 /** Значения по умолчанию — используются, если настройка в базе пустая */
 const BOT_DEFAULTS = {
   moderatorRoleId: "1089254387488145550",
+  commandRoleId: "1392552505162072264",
   leaveRoleId: "1166476218791645256",
 };
 
@@ -65,6 +67,8 @@ async function loadBotConfig(): Promise<BotConfig> {
     rolesChannelId: (map.get("roles_channel_id") || "").trim(),
     moderatorRoleId:
       (map.get("moderator_role_id") || "").trim() || BOT_DEFAULTS.moderatorRoleId,
+    commandRoleId:
+      (map.get("command_role_id") || "").trim() || BOT_DEFAULTS.commandRoleId,
     leaveRoleId: (map.get("leave_role_id") || "").trim() || BOT_DEFAULTS.leaveRoleId,
     reserveRoleId: (map.get("reserve_role_id") || "").trim(),
   };
@@ -268,7 +272,7 @@ async function handleRolesReaction({
           action: `выдал/снял роли бойцу ${recipientMember.displayName || roleReq.recipientId}`,
           details: {
             "Получатель": `<@${roleReq.recipientId}>`,
-            "Экзаменатор": `<@${roleReq.examinerId}>`,
+            "Экзаменатор": roleReq.examinerId ? `<@${roleReq.examinerId}>` : "— (заявка из формы)",
             "Операции": roleReq.ops.map((o) => `${o.action} ${o.name}`).join(", "),
             "Итог": result.message,
           },
@@ -310,12 +314,23 @@ async function checkVacations(client: Client, config?: BotConfig) {
     if (activeLeaves.length === 0) return;
 
     const nowMs = Date.now();
-    const twelveHoursMs = 12 * 60 * 60 * 1000;
     const guild = client.guilds.cache.first();
     if (!guild) return;
     const leaveChannel = cfg.vacationChannelId
       ? guild.channels.cache.get(cfg.vacationChannelId)
       : undefined;
+
+    // Напоминание за день до конца отпуска — строго в 12:00 МСК (или позже
+    // в тот же день, если бот перезапускался): час в Европе/Москве >= 12.
+    const mskHour = parseInt(
+      new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Europe/Moscow",
+        hour: "2-digit",
+        hourCycle: "h23",
+      }).format(new Date()),
+      10
+    );
+    const oneDayMs = 24 * 60 * 60 * 1000;
 
     for (const u of activeLeaves) {
       if (!u.discordId || !u.vacationUntil) continue;
@@ -337,11 +352,16 @@ async function checkVacations(client: Client, config?: BotConfig) {
             `👋 <@${u.discordId}>, твой отпуск подошел к концу. Роль автоматически снята, ждем в строю!`
           );
         }
-      } else if (untilMs - nowMs <= twelveHoursMs && !u.vacationNotified) {
+      } else if (
+        untilMs - nowMs <= oneDayMs &&
+        Number.isFinite(mskHour) &&
+        mskHour >= 12 &&
+        !u.vacationNotified
+      ) {
         await db.update(members).set({ vacationNotified: true }).where(eq(members.id, u.id));
         if (leaveChannel && leaveChannel.isTextBased()) {
           await leaveChannel.send(
-            `⚠️ <@${u.discordId}>, твой отпуск заканчивается **завтра**! Если нет возможности вернуться, запроси продление.`
+            `⚠️ <@${u.discordId}>, твой отпуск заканчивается **завтра**! Не забудь зайти в игру. Если нет возможности вернуться — запроси продление через форму.`
           );
         }
       }
@@ -403,7 +423,7 @@ export function initBot() {
             .map((o) => `${o.action === "give" ? "выдать" : "снять"} ${o.name}`)
             .join(", ");
           console.log(
-            `[bot] Запрос ролей: <@${roleReq.recipientId}> ← ${targets} (экзаменатор <@${roleReq.examinerId}>)`
+            `[bot] Запрос ролей: <@${roleReq.recipientId}> ← ${targets}${roleReq.examinerId ? ` (экзаменатор <@${roleReq.examinerId}>)` : ""}`
           );
         }
         return;
@@ -471,20 +491,39 @@ export function initBot() {
 
         // Проверка прав реагирующего
         const reactor = await guild.members.fetch(user.id).catch(() => null);
-        const allowed = await reactorIsAllowed(
-          reactor ? new Set(reactor.roles.cache.keys()) : null,
-          config.moderatorRoleId,
-          message.content || ""
-        );
-        if (!allowed) {
-          await reaction.users.remove(user.id).catch(() => {});
-          const warnThread = await ensureThread(message, "Недостаточно прав");
-          if (warnThread) {
-            await warnThread.send(
-              `⚠️ <@${user.id}>, у вас нет роли, упомянутой в заявке — реакция снята.`
-            );
+
+        // «Убрать из таблицы» (удаление бойца) — одобряет ТОЛЬКО Командирский состав
+        if (req.shdsAction === SHDS_ACTIONS.REMOVE) {
+          const hasCommand =
+            !!reactor &&
+            !!config.commandRoleId &&
+            reactor.roles.cache.has(config.commandRoleId);
+          if (!hasCommand) {
+            await reaction.users.remove(user.id).catch(() => {});
+            const warnThread = await ensureThread(message, "Недостаточно прав");
+            if (warnThread) {
+              await warnThread.send(
+                `⚠️ <@${user.id}>, удалить бойца из ШДС может только **Командирский состав**. Реакция снята.`
+              );
+            }
+            return;
           }
-          return;
+        } else {
+          const allowed = await reactorIsAllowed(
+            reactor ? new Set(reactor.roles.cache.keys()) : null,
+            config.moderatorRoleId,
+            message.content || ""
+          );
+          if (!allowed) {
+            await reaction.users.remove(user.id).catch(() => {});
+            const warnThread = await ensureThread(message, "Недостаточно прав");
+            if (warnThread) {
+              await warnThread.send(
+                `⚠️ <@${user.id}>, у вас нет роли, упомянутой в заявке — реакция снята.`
+              );
+            }
+            return;
+          }
         }
 
         const reactorMention = `<@${user.id}>`;
@@ -524,33 +563,59 @@ export function initBot() {
 
         let outcome = "";
         if (req.isVacation) {
-          // Отпуск: выдаём роль, синхронизируем БД, уведомляем в ЛС
-          const target = req.discordId
-            ? await guild.members.fetch(req.discordId).catch(() => null)
+          // Отпуск: выдача или снятие статуса + роль «Отпуск» + БД
+          const did = await resolveDiscordId(req);
+          const target = did
+            ? await guild.members.fetch(did).catch(() => null)
             : null;
 
-          const untilDate = parseVacationUntil(req.vacationDates);
+          const untilDate = req.vacationRemove ? null : parseVacationUntil(req.vacationDates);
           if (target && config.leaveRoleId) {
-            await target.roles.add(config.leaveRoleId).catch((e) =>
-              console.error("[bot] Не удалось выдать роль «Отпуск»:", e)
-            );
+            if (req.vacationRemove) {
+              await target.roles.remove(config.leaveRoleId).catch((e) =>
+                console.error("[bot] Не удалось снять роль «Отпуск»:", e)
+              );
+            } else {
+              await target.roles.add(config.leaveRoleId).catch((e) =>
+                console.error("[bot] Не удалось выдать роль «Отпуск»:", e)
+              );
+            }
           }
 
           try {
-            const [memberRow] = await db
-              .select()
-              .from(members)
-              .where(eq(members.discordId, req.discordId));
-            if (memberRow) {
+            const [memberRow] = did
+              ? await db
+                  .select()
+                  .from(members)
+                  .where(eq(members.discordId, did))
+              : [];
+            const matchRow =
+              memberRow ??
+              (req.userName
+                ? (await db
+                    .select()
+                    .from(members)
+                    .where(eq(members.name, req.userName)))[0]
+                : undefined);
+            if (matchRow) {
               await db
                 .update(members)
-                .set({
-                  vacation: true,
-                  vacationUntil: untilDate,
-                  vacationNotified: false,
-                  updatedAt: new Date(),
-                })
-                .where(eq(members.id, memberRow.id));
+                .set(
+                  req.vacationRemove
+                    ? {
+                        vacation: false,
+                        vacationUntil: null,
+                        vacationNotified: false,
+                        updatedAt: new Date(),
+                      }
+                    : {
+                        vacation: true,
+                        vacationUntil: untilDate,
+                        vacationNotified: false,
+                        updatedAt: new Date(),
+                      }
+                )
+                .where(eq(members.id, matchRow.id));
             }
           } catch (e) {
             console.error("[bot] Ошибка синхронизации отпуска с БД:", e);
@@ -558,12 +623,18 @@ export function initBot() {
 
           if (target) {
             await target
-              .send(`✅ Ваша заявка на отпуск была **одобрена**!${untilDate ? ` Ориентировочная дата возвращения: ${formatDate(untilDate)}.` : ""}`)
+              .send(
+                req.vacationRemove
+                  ? `✅ Ваша заявка на **снятие отпуска** была одобрена. Роль снята, статус в БД обновлён. Ждём в строю!`
+                  : `✅ Ваша заявка на отпуск была **одобрена**!${untilDate ? ` Ориентировочная дата возвращения: ${formatDate(untilDate)}.` : ""}`
+              )
               .catch(() => console.log("[bot] Не удалось отправить ЛС (закрыты DM)"));
           }
           outcome = target
-            ? "роль выдана, БД синхронизирована, ЛС отправлено"
-            : "участник Discord не найден — роль не выдана";
+            ? req.vacationRemove
+              ? "отпуск снят: роль убрана, БД синхронизирована, ЛС отправлено"
+              : "роль выдана, БД синхронизирована, ЛС отправлено"
+            : "участник Discord не найден — роль не изменена";
         } else if (isReserveRequest(req)) {
           // Запас: работа с Google Таблицей + роли Discord
           const reserveResult = await applyReserveRequest(req, guild, config);
@@ -574,6 +645,83 @@ export function initBot() {
           // ШДС: выполняем сценарий в Google Таблице
           const result = await applyShdsRequest(req);
           outcome = result.ok ? result.message : `ошибка: ${result.error}`;
+
+          // «Убрать из таблицы»: снимаем ВСЕ роли бойца и выдаём «Друг АТК»
+          if (result.ok && req.shdsAction === SHDS_ACTIONS.REMOVE) {
+            try {
+              const remDid = await resolveDiscordId(req);
+              const target = remDid
+                ? await guild.members.fetch(remDid).catch(() => null)
+                : null;
+              if (target) {
+                const removable = [...target.roles.cache.keys()].filter(
+                  (id) =>
+                    id !== guild.roles.everyone.id &&
+                    id !== COMMON_ROLE_IDS.FRIEND &&
+                    !target.roles.cache.get(id)?.managed // ботовые/интеграционные роли не трогаем
+                );
+                if (removable.length) {
+                  await target.roles.remove(removable).catch((e) =>
+                    console.error("[bot] Не удалось снять роли при удалении:", e)
+                  );
+                }
+                await target.roles.add(COMMON_ROLE_IDS.FRIEND).catch((e) =>
+                  console.error("[bot] Не удалось выдать «Друг АТК»:", e)
+                );
+                outcome += `. Роли: снято ${removable.length}, выдана «Друг АТК»`;
+              } else {
+                outcome += ". Роли не изменены: участник Discord не найден";
+              }
+            } catch (e) {
+              console.error("[bot] Ошибка снятия ролей при удалении из ШДС:", e);
+              outcome += `. Роли: ошибка (${e instanceof Error ? e.message : e})`;
+            }
+          }
+
+          // «Добавление в ШДС»: роли выдаются АВТОМАТИЧЕСКИ из данных
+          // заявки — направление (ТР/АД) + звание + общие роли (корпус,
+          // категория «Звания», снятие «Новобранца»/«Друга АТК»).
+          // Дополнительно учитываются «Роли выдать/снять», если боец их выбрал.
+          if (result.ok && req.shdsAction === SHDS_ACTIONS.ADD) {
+            try {
+              const addDid = await resolveDiscordId(req);
+              const target = addDid
+                ? await guild.members.fetch(addDid).catch(() => null)
+                : null;
+              if (target) {
+                // Направление: «Танковая рота» → ТР, «Артиллерийский дивизион» → АД
+                const subdiv = /танк/i.test(req.unit)
+                  ? "ТР"
+                  : /арт|дивизион/i.test(req.unit)
+                    ? "АД"
+                    : "";
+                const rank = req.rank.trim();
+                // Если звание уже с суффиксом («Рядовой ТР») — не дублируем
+                const rankHasSuffix = /(ТР|АД)$/i.test(rank);
+
+                const parts: string[] = [];
+                if (rank && subdiv && !rankHasSuffix) {
+                  parts.push(`Выдать ${rank} ${subdiv}`); // составное звание: направление + звание + общие роли
+                } else if (rank) {
+                  parts.push(`Выдать ${rank}`);
+                } else {
+                  parts.push("Выдать Новобранец"); // звание не указано — минимум для новичка
+                }
+                if (req.rolesGive) parts.push(`Выдать ${req.rolesGive}`);
+                if (req.rolesRemove) parts.push(`Снять ${req.rolesRemove}`);
+
+                const roleResult = await applyRoleCommand(guild, target, parseRoleCommand(parts.join(", ")));
+                outcome += roleResult.ok
+                  ? `. Роли: ${roleResult.message}`
+                  : `. Роли НЕ изменены: ${roleResult.message}`;
+              } else {
+                outcome += ". Роли не изменены: участник Discord не найден";
+              }
+            } catch (e) {
+              console.error("[bot] Ошибка выдачи ролей при добавлении в ШДС:", e);
+              outcome += `. Роли: ошибка (${e instanceof Error ? e.message : e})`;
+            }
+          }
         }
 
         const thread = await ensureThread(message, `Одобрено: ${req.userName}`);
@@ -615,13 +763,32 @@ export function initBot() {
 /* ------------------------------------------------------------------ */
 
 /**
+ * Discord ID бойца: из заявки либо из БД панели по имени
+ * (форма может не содержать ID — например, боец выбрал себя из списка).
+ */
+async function resolveDiscordId(req: ParsedRequest): Promise<string> {
+  if (req.discordId) return req.discordId;
+  if (!req.userName) return "";
+  try {
+    const rows = await db
+      .select({ discordId: members.discordId })
+      .from(members)
+      .where(eq(members.name, req.userName));
+    return rows.find((r) => r.discordId)?.discordId || "";
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Разбор «Даты отпуска» вида «с 10.11.2023 по 20.11.2023»
- * (или просто «20.11.2023»). Возвращает дату окончания или null.
+ * (или просто «20.11.2023», «10.11»). Возвращает дату окончания или null.
  */
 export function parseVacationUntil(raw: string): Date | null {
   if (!raw) return null;
   const range = raw.match(/(\d{2})\.(\d{2})\.(\d{4})\s*(?:-|по|–)\s*(\d{2})\.(\d{2})\.(\d{4})/i);
   const single = raw.match(/(\d{2})\.(\d{2})\.(\d{4})/);
+  const short = raw.match(/(?:^|[^\d.])(\d{1,2})\.(\d{2})(?:[^\d.]|$)/);
   const pick = (d: RegExpMatchArray, offset = 0) =>
     new Date(
       `${d[3 + offset]}-${d[2 + offset]}-${d[1 + offset]}T00:01:00+03:00`
@@ -629,6 +796,14 @@ export function parseVacationUntil(raw: string): Date | null {
   try {
     if (range) return pick(range, 3);
     if (single) return pick(single);
+    if (short) {
+      // «10.11» без года — ближайший такой день (этот год или следующий)
+      const now = new Date();
+      const year = now.getFullYear();
+      const thisYear = new Date(`${year}-${short[2]}-${short[1].padStart(2, "0")}T00:01:00+03:00`);
+      if (thisYear.getTime() >= Date.now() - 24 * 3600 * 1000) return thisYear;
+      return new Date(`${year + 1}-${short[2]}-${short[1].padStart(2, "0")}T00:01:00+03:00`);
+    }
   } catch {
     return null;
   }
@@ -643,6 +818,7 @@ export function formatDate(d: Date | null): string {
 
 /** Признак заявки на запас (уйти / вернуться) */
 function isReserveRequest(req: ParsedRequest): boolean {
+  if (req.shdsAction === "Уход в запас" || req.shdsAction === "Возврат из запаса") return true;
   const action = (req.shdsAction || "").toLowerCase();
   return action.includes("запас");
 }
@@ -653,9 +829,10 @@ async function applyReserveRequest(
   guild: NonNullable<Message["guild"]>,
   config: BotConfig
 ): Promise<{ ok: true; message: string } | { ok: false; error: string }> {
-  const isGoing = (req.shdsAction || "").toLowerCase().includes("возврат") === false;
-  const target = req.discordId
-    ? await guild.members.fetch(req.discordId).catch(() => null)
+  const isGoing = req.shdsAction !== SHDS_ACTIONS.RESERVE_BACK;
+  const did = await resolveDiscordId(req);
+  const target = did
+    ? await guild.members.fetch(did).catch(() => null)
     : null;
 
   try {

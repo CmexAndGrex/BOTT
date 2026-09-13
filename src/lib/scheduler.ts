@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { cronRuns } from "@/db/schema";
-import { runCleanup, runDailySnapshot, runOperationPing, runWeeklyCheck, runWeeklyRecord, runGoogleFormPoll, syncRoster } from "@/lib/tasks";
+import { runCleanup, runDailySnapshot, runLeftMembersCheck, runOperationPing, runWeeklyCheck, runWeeklyRecord, runGoogleFormPoll, syncRoster } from "@/lib/tasks";
 import {
   getSettings,
   nowInTz,
@@ -113,6 +113,19 @@ async function tick() {
         console.log(
           `[scheduler] auto sync: ${r.ok ? `${r.membersCount} members` : r.error}`
         );
+      }
+    }
+  }
+
+  // Контроль вышедших из подразделения (раз в 30 минут, после автосинка):
+  // если боец пропал из состава >24ч назад и роли клана с него не сняты —
+  // пинг Командирскому составу (однократно на бойца)
+  if (map.get("left_members_check") === "true") {
+    const halfHour = Math.floor(Date.now() / (30 * 60 * 1000));
+    if (await claim(`left-check:${halfHour}`)) {
+      const r = await runLeftMembersCheck("schedule");
+      if (!r.ok || r.title.includes("пинг")) {
+        console.log(`[scheduler] left-check: ${r.ok ? r.detail : r.error}`);
       }
     }
   }

@@ -91,6 +91,27 @@ export async function addReaction(
   );
 }
 
+/** Роли участника гильдии через REST (null — если участник не найден/ошибка) */
+export async function getGuildMemberRoles(
+  guildId: string,
+  userId: string
+): Promise<string[] | null> {
+  try {
+    const member = await discordRequest<{ roles?: string[] }>(
+      `/guilds/${guildId}/members/${userId}`
+    );
+    return Array.isArray(member?.roles) ? member.roles : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Серверы, на которых состоит бот (для автоопределения guild_id) */
+export async function getBotGuildIds(): Promise<string[]> {
+  const guilds = await discordRequest<{ id: string }[]>("/users/@me/guilds");
+  return Array.isArray(guilds) ? guilds.map((g) => g.id) : [];
+}
+
 export const mentionRole = (id: string) => `<@&${id}>`;
 export const mentionUser = (id: string) => `<@${id}>`;
 

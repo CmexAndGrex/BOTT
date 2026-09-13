@@ -11,6 +11,7 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   vacation_channel_id: "",
   roles_channel_id: "1090516508725215253",
   moderator_role_id: "1089254387488145550",
+  command_role_id: "1392552505162072264",
   leave_role_id: "1166476218791645256",
   // Google Таблица (ШДС)
   gsheet_spreadsheet_id: "",
@@ -38,6 +39,10 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   // Запас
   reserve_role_id: "",
   reserve_sheet_name: "Запас",
+  // Контроль состава: пинг «Командирскому составу», если боец пропал из
+  // подразделения, а роли клана с него не сняли в течение суток
+  left_members_check: "true",
+  left_check_channel_id: "",
   // Discord сервер (для списка ролей в форме)
   guild_id: "",
   // Контент
