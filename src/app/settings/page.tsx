@@ -642,6 +642,56 @@ export default function SettingsPage() {
             </div>
           </div>
         </Section>
+
+        {/* Контроль вышедших из состава */}
+        <Section title="Контроль вышедших из состава" eyebrow="задача №4 · пинг при выходе"
+          action={
+            <div className="flex items-center gap-2">
+              <span className="label">вкл</span>
+              <Toggle
+                on={settings.left_members_check === "true"}
+                onChange={(v) => set("left_members_check", v ? "true" : "false")}
+              />
+            </div>
+          }
+        >
+          <div className="flex flex-col gap-4 px-5 py-5">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <div className="label mb-1.5">ID канала проверок</div>
+                <input
+                  className="input input-mono"
+                  placeholder="например 1185432109876543210"
+                  value={settings.left_check_channel_id}
+                  onChange={(e) => set("left_check_channel_id", e.target.value.replace(/[^\d]/g, ""))}
+                />
+                <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
+                  Если пусто — используется основной канал для пингов из блока Discord.
+                </p>
+              </div>
+              <div>
+                <div className="label mb-1.5">ID роли «Командирский состав»</div>
+                <input
+                  className="input input-mono"
+                  placeholder="например 1392552505162072264"
+                  value={settings.command_role_id}
+                  onChange={(e) => set("command_role_id", e.target.value.replace(/[^\d]/g, ""))}
+                />
+                <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
+                  Эта роль пингуется, если у вышедшего бойца сутки не сняты роли клана.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-start gap-2.5 text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
+              <ShieldCheck size={14} className="mt-0.5 flex-none" style={{ color: "var(--amber)" }} />
+              <span>
+                Боец пропал из состава rs-red.com и с него не сняли роли клана в течение суток —
+                бот отправит однократный пинг командирскому составу. При возвращении бойца в состав
+                флаг сбрасывается, и проверка сработает снова при следующем выходе.
+              </span>
+            </div>
+          </div>
+        </Section>
       </div>
 
       {/* Автосинхронизация cookie */}

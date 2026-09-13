@@ -361,6 +361,9 @@ export async function pollGoogleForm(): Promise<PollResult> {
       } catch (e) {
         result.errors++;
         console.error(`[forms] Ошибка публикации строки ${r + 1}:`, e);
+        // Не двигаем курсор — строка будет повторена на следующем опросе,
+        // чтобы заявка не потерялась при сбое Discord API
+        break;
       }
       await setSettingQuiet("_form_last_row", String(r + 1));
     }

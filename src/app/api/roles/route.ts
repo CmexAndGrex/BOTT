@@ -1,5 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { timingSafeEqual } from "node:crypto";
 import { getSettings } from "@/lib/settings";
+
+/** Сравнение секретов без утечки по времени */
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && ab.length > 0 && timingSafeEqual(ab, bb);
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,7 +27,7 @@ export async function GET(req: NextRequest) {
 
     // Авторизация: либо по ключу (для скрипта), либо по cookie админа
     let authorized = false;
-    if (key && cronSecret && key === cronSecret) {
+    if (key && cronSecret && safeEqual(key, cronSecret)) {
       authorized = true;
     } else {
       const token = req.cookies.get("auth_token")?.value;
@@ -40,7 +48,8 @@ export async function GET(req: NextRequest) {
     }
 
     const map = await getSettings();
-    const guildId = url.searchParams.get("guild") || map.get("guild_id") || "";
+    // Валидация: guild_id — только цифры (защита от подделки пути Discord API)
+    const guildId = (url.searchParams.get("guild") || map.get("guild_id") || "").replace(/[^\d]/g, "");
     if (!guildId) {
       return NextResponse.json({ error: "Не задан guild_id" }, { status: 400 });
     }
