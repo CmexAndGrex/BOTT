@@ -656,11 +656,11 @@ export default function SettingsPage() {
           }
         >
           <div className="flex flex-col gap-4 px-5 py-5">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="label mb-1.5">ID канала проверок</div>
+            <div className="grid grid-cols-2 items-start gap-3">
+              <div className="flex min-w-0 flex-col items-start">
+                <div className="label mb-1.5 w-full">ID канала проверок</div>
                 <input
-                  className="input input-mono"
+                  className="input input-mono w-full"
                   placeholder="например 1185432109876543210"
                   value={settings.left_check_channel_id}
                   onChange={(e) => set("left_check_channel_id", e.target.value.replace(/[^\d]/g, ""))}
@@ -669,10 +669,10 @@ export default function SettingsPage() {
                   Если пусто — используется основной канал для пингов из блока Discord.
                 </p>
               </div>
-              <div>
-                <div className="label mb-1.5">ID роли «Командирский состав»</div>
+              <div className="flex min-w-0 flex-col items-start">
+                <div className="label mb-1.5 w-full">ID роли «Командирский состав»</div>
                 <input
-                  className="input input-mono"
+                  className="input input-mono w-full"
                   placeholder="например 1392552505162072264"
                   value={settings.command_role_id}
                   onChange={(e) => set("command_role_id", e.target.value.replace(/[^\d]/g, ""))}
