@@ -1,22 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { members, settings, users, logs } from "@/db/schema";
+import { members, settings, logs } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { jwtVerify } from "jose";
-import { getJwtSecret } from "@/lib/auth";
+import { requireRole } from "@/lib/api-auth";
+import { CooldownLimiter, nextWarningCount, isDiscordId } from "@/lib/validation";
 
-const SECRET = getJwtSecret();
-const discordRateLimit = new Map<string, number>();
+/**
+ * Антиспам по ключу «кто выдаёт → кому выдаёт».
+ *
+ * Раньше лимит был глобальным (одна константа "last_warn"), поэтому один
+ * командир блокировал выдачу предупреждений всем остальным на 3 секунды.
+ * Теперь лимит персональный: разные офицеры не мешают друг другу.
+ */
+const warnLimiter = new CooldownLimiter(3000);
+
+/** Тип предупреждения, который ожидает интерфейс: 1/2 или 2/2 */
+type WarnType = 1 | 2;
 
 export async function POST(req: NextRequest) {
-  const token = req.cookies.get("auth_token")?.value;
-  if (!token) return NextResponse.json({ error: "Нет доступа" }, { status: 401 });
-  
-  let authUsername: string | null = null;
-  try {
-    const verified = await jwtVerify(token, SECRET);
-    authUsername = ((verified.payload as any).username as string) || null;
-  } catch (err) { return NextResponse.json({ error: "Сессия устарела" }, { status: 403 }); }
+  // Предупреждение с пингом в Discord — командиры и админы
+  const auth = await requireRole(req, ["officer"]);
+  if (!auth.ok) return auth.response;
+  const authUsername = auth.user.username;
 
   try {
     let body;
@@ -25,36 +30,46 @@ export async function POST(req: NextRequest) {
 
     const { memberId, type, norm } = body;
 
-    if (typeof memberId !== "number" || !Number.isFinite(memberId)) return NextResponse.json({ error: "Неверный ID" }, { status: 400 });
+    if (typeof memberId !== "number" || !Number.isInteger(memberId)) return NextResponse.json({ error: "Неверный ID" }, { status: 400 });
     if (type !== 1 && type !== 2) return NextResponse.json({ error: "Тип 1 или 2" }, { status: 400 });
     if (typeof norm !== "number" || norm < 1 || norm > 168) return NextResponse.json({ error: "Некорректная норма" }, { status: 400 });
 
     const now = Date.now();
-    const lastWarningTime = discordRateLimit.get("last_warn") || 0;
-    if (now - lastWarningTime < 3000) return NextResponse.json({ error: "Слишком часто" }, { status: 429 });
-    discordRateLimit.set("last_warn", now);
+    const rateKey = `${authUsername || "unknown"}:${memberId}`;
+    if (!warnLimiter.allow(rateKey, now)) {
+      return NextResponse.json({ error: "Слишком часто" }, { status: 429 });
+    }
 
     const fighterRecord = await db.select().from(members).where(eq(members.id, memberId));
     if (!fighterRecord || fighterRecord.length === 0) return NextResponse.json({ error: "Боец не найден" }, { status: 404 });
     
     const fighter = fighterRecord[0];
-    const newWarnings = type === 1 ? 1 : 2;
+
+    // Счётчик только растёт: повторная выдача «1/2» не сбрасывает уже
+    // накопленные предупреждения (см. nextWarningCount).
+    const newWarnings = nextWarningCount(fighter.warnings, type as WarnType);
     await db.update(members).set({ warnings: newWarnings }).where(eq(members.id, memberId));
 
     const settingsData = await db.select().from(settings);
     const config = Object.fromEntries(settingsData.map((s) => [s.key, s.value]));
 
     const botToken = config["discord_token"] || process.env.DISCORD_BOT_TOKEN;
-    const channelId = config["discord_channel_id"] || process.env.DISCORD_CHANNEL_ID;
-
-    if (!botToken || !channelId) return NextResponse.json({ error: "Настройте Discord" }, { status: 400 });
+    // Строгая валидация ID канала: только цифры. Иначе значение из настроек
+    // подставлялось в URL Discord API как есть и могло изменить путь запроса.
+    const channelId = (config["discord_channel_id"] || process.env.DISCORD_CHANNEL_ID || "").trim();
+    if (!isDiscordId(channelId)) {
+      return NextResponse.json({ error: "Некорректный ID канала Discord" }, { status: 400 });
+    }
+    if (!botToken) return NextResponse.json({ error: "Настройте Discord" }, { status: 400 });
 
     const ping = fighter.discordId ? `<@${fighter.discordId}>` : fighter.name;
-    const messageContent = type === 1 
-      ? `⚠️ ${ping} 1/2 предупреждение, онлайн ${fighter.hours.toFixed(1)}ч, ниже нормы ${norm}ч. Добить онлайн, иначе исключение ⚠️`
-      : `⛔ ${ping} 2/2 предупреждение, онлайн ${fighter.hours.toFixed(1)}ч, повторно ниже нормы. Исключён! ⛔`;
+    // Текст сообщения строим по фактическому счётчику, чтобы он не расходился
+    // с состоянием в базе (например, не писал «1/2», когда уже 2/2).
+    const messageContent = newWarnings >= 2
+      ? `⛔ ${ping} 2/2 предупреждение, онлайн ${fighter.hours.toFixed(1)}ч, повторно ниже нормы. Исключён! ⛔`
+      : `⚠️ ${ping} 1/2 предупреждение, онлайн ${fighter.hours.toFixed(1)}ч, ниже нормы ${norm}ч. Добить онлайн, иначе исключение ⚠️`;
 
-    const discordRes = await fetch(`https://discord.com/api/v10/channels/${channelId.trim()}/messages`, {
+    const discordRes = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
       method: "POST",
       headers: { "Authorization": `Bot ${botToken.trim()}`, "Content-Type": "application/json" },
       body: JSON.stringify({ content: messageContent }),
@@ -64,30 +79,28 @@ export async function POST(req: NextRequest) {
 
     // Пишем в журнал редактирования
     try {
-      let authorFormatted = "Командир";
-      if (authUsername) {
-        const [dbUser] = await db.select().from(users).where(eq(users.username, authUsername));
-        authorFormatted = `${dbUser?.role === "admin" ? "Администратор" : "Командир"} ${authUsername}`;
-      }
+      const roleRu = auth.user.role === "admin" ? "Администратор" : "Командир";
+      const authorFormatted = authUsername ? `${roleRu} ${authUsername}` : roleRu;
       await db.insert(logs).values({
         category: "edit",
         author: authorFormatted,
-        action: `выдал предупреждение ${type}/2 бойцу ${fighter.name}`,
+        action: `выдал предупреждение ${newWarnings}/2 бойцу ${fighter.name}`,
         details: {
           "Боец": fighter.name,
           "Онлайн": `${fighter.hours.toFixed(1)} ч`,
           "Норма": `${norm} ч`,
-          "Тип": `${type}/2`,
+          "Запрошено": `${type}/2`,
+          "Стало": `${newWarnings}/2`,
         },
         kind: "system",
         title: "Предупреждение выдано",
-        detail: `Бойцу ${fighter.name} выдано предупреждение ${type}/2`,
+        detail: `Бойцу ${fighter.name} выдано предупреждение ${newWarnings}/2 (запрошено ${type}/2)`,
         ok: true,
       });
     } catch (e) {
       // Журнал не критичен для ответа
     }
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, warnings: newWarnings });
   } catch (error) {
     return NextResponse.json({ error: "Ошибка сервера" }, { status: 500 });
   }

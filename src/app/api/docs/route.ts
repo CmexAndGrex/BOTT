@@ -1,16 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { jwtVerify } from "jose";
 import { db } from "@/db";
-import { logs, users } from "@/db/schema";
+import { logs } from "@/db/schema";
 import { getSettings, invalidateSettingsCache, setSettingQuiet } from "@/lib/settings";
-import { getJwtSecret } from "@/lib/auth";
+import { requireRole } from "@/lib/api-auth";
+import { normalizeUrl } from "@/lib/validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const SECRET = getJwtSecret();
 
 type DocTag = { id: string; name: string };
 type DocLink = { id: string; title: string; url: string; tagIds: string[] };
@@ -94,20 +92,6 @@ function parseLinks(raw: string | undefined | null): DocLink[] {
   }
 }
 
-/** Приводим ссылку к http(s); возвращаем null, если она невалидна */
-function normalizeUrl(input: string): string | null {
-  let url = input.trim().slice(0, 2000);
-  if (!url) return null;
-  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
-  try {
-    const u = new URL(url);
-    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-    return u.toString();
-  } catch {
-    return null;
-  }
-}
-
 /** Публичный список кнопок и тегов документации — доступен всем без авторизации */
 export async function GET() {
   const map = await getSettings();
@@ -119,28 +103,22 @@ export async function GET() {
 
 /** Сохранение списка — только модераторы (officer) и администраторы (admin) */
 export async function PUT(req: NextRequest) {
-  const token = req.cookies.get("auth_token")?.value;
-  if (!token) {
-    return NextResponse.json({ ok: false, error: "Требуется вход в систему" }, { status: 401 });
-  }
-
-  let role = "guest";
-  let username = "";
-  try {
-    const verified = await jwtVerify(token, SECRET);
-    const payload = verified.payload as any;
-    role = payload.role || "guest";
-    username = payload.username || payload.sub || payload.name || "";
-  } catch {
-    return NextResponse.json({ ok: false, error: "Сессия истекла, войдите заново" }, { status: 401 });
-  }
-
-  if (role !== "admin" && role !== "officer") {
+  const auth = await requireRole(req, ["officer"]);
+  if (!auth.ok) {
+    // Текст ошибки сохраняем прежним, чтобы UI не менял поведение
     return NextResponse.json(
-      { ok: false, error: "Недостаточно прав для изменения документации" },
-      { status: 403 }
+      {
+        ok: false,
+        error:
+          auth.response.status === 401
+            ? "Требуется вход в систему"
+            : "Недостаточно прав для изменения документации",
+      },
+      { status: auth.response.status }
     );
   }
+  const role = auth.user.role;
+  const username = auth.user.username || "";
 
   let body: { links?: unknown; tags?: unknown };
   try {
@@ -192,16 +170,8 @@ export async function PUT(req: NextRequest) {
 
   // Пишем запись в журнал только если что-то реально изменилось
   if (linksChanged || tagsChanged) {
-    let authorFormatted = "Командир";
-    try {
-      if (username) {
-        const [dbUser] = await db.select().from(users).where(eq(users.username, username));
-        const roleRu = (dbUser?.role || role) === "admin" ? "Администратор" : "Командир";
-        authorFormatted = `${roleRu} ${username}`;
-      }
-    } catch {
-      // Игнорируем — журнал не критичен для сохранения
-    }
+    const roleRu = role === "admin" ? "Администратор" : "Командир";
+    const authorFormatted = username ? `${roleRu} ${username}` : roleRu;
 
     const oldIds = new Set(beforeLinks.map((x) => x.id));
     const newIds = new Set(clean.map((x) => x.id));

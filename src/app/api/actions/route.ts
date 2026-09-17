@@ -1,23 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runLeftMembersCheck, runOperationPing, runWeeklyCheck } from "@/lib/tasks";
-import { jwtVerify } from "jose";
-import { getJwtSecret } from "@/lib/auth";
+import { requireRole } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const SECRET = getJwtSecret();
-
 export async function POST(req: NextRequest) {
-  const token = req.cookies.get("auth_token")?.value;
-  if (!token) return NextResponse.json({ ok: false, error: "Нет доступа: авторизуйтесь" }, { status: 401 });
-
-  try {
-    await jwtVerify(token, SECRET);
-  } catch (err) {
-    return NextResponse.json({ ok: false, error: "Сессия устарела" }, { status: 403 });
-  }
+  // Ручной запуск задач: командиры и админы
+  const auth = await requireRole(req, ["officer"]);
+  if (!auth.ok) return auth.response;
 
   let body: { action?: string };
   try {

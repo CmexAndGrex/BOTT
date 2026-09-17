@@ -1,16 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { logs, users } from "@/db/schema";
-import { jwtVerify } from "jose";
+import { logs } from "@/db/schema";
 import { DEFAULT_SETTINGS, ensureCookieSyncKey, getSettings, maskCookie, setSettingQuiet, setSettings } from "@/lib/settings";
-import { getJwtSecret } from "@/lib/auth";
+import { requireRole } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const SECRET = getJwtSecret();
 const SECRET_KEYS = new Set(["rs_cookie", "discord_token", "gsheet_service_account"]);
 
 const SETTING_NAMES: Record<string, string> = {
@@ -30,9 +27,15 @@ const SETTING_NAMES: Record<string, string> = {
   form_enabled: "опрос Google-формы", form_response_sheet: "лист с ответами формы",
   reserve_role_id: "ID роли «Запас»", reserve_sheet_name: "название листа «Запас»",
   guild_id: "ID сервера Discord",
+  allowed_webhook_ids: "разрешённые вебхуки заявок",
 };
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  // Настройки содержат ключ синхронизации расширения и внутренние ID —
+  // отдаём их только администратору (раньше роут был анонимным).
+  const auth = await requireRole(req, ["admin"]);
+  if (!auth.ok) return auth.response;
+
   const map = await getSettings(true);
   const out: Record<string, string> = {};
   for (const key of Object.keys(DEFAULT_SETTINGS)) {
@@ -47,13 +50,9 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
-  const token = req.cookies.get("auth_token")?.value;
-  if (!token) return NextResponse.json({ ok: false, error: "Нет доступа" }, { status: 401 });
-
-  try {
-    const verified = await jwtVerify(token, SECRET);
-    if ((verified.payload as any).role !== "admin") return NextResponse.json({ ok: false, error: "Только администратор" }, { status: 403 });
-  } catch (err) { return NextResponse.json({ ok: false, error: "Сессия устарела" }, { status: 403 }); }
+  // Изменение настроек — только администратор
+  const auth = await requireRole(req, ["admin"]);
+  if (!auth.ok) return auth.response;
 
   let body: Record<string, unknown>;
   try { body = await req.json(); } 
@@ -118,16 +117,10 @@ export async function PUT(req: NextRequest) {
   await setSettings(patch);
 
   let authorFormatted = "Командир";
-  try {
-    const verified = await jwtVerify(token, SECRET);
-    const payload = verified.payload as any;
-    const username = payload.username || payload.sub || payload.name;
-    if (username) {
-      const [dbUser] = await db.select().from(users).where(eq(users.username, username));
-      if (dbUser) authorFormatted = `${dbUser.role === "admin" ? "Администратор" : "Командир"} ${dbUser.username}`;
-      else authorFormatted = `${payload.role === "admin" ? "Администратор" : "Командир"} ${username}`;
-    }
-  } catch { }
+  if (auth.user.username) {
+    const roleRu = auth.user.role === "admin" ? "Администратор" : "Командир";
+    authorFormatted = `${roleRu} ${auth.user.username}`;
+  }
 
   await db.insert(logs).values({
     category: "edit", author: authorFormatted, action: `изменил ${changedKeys.join(", ")}`,

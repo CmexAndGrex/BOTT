@@ -2,58 +2,56 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { users, logs } from "@/db/schema";
 import bcrypt from "bcryptjs";
-import { jwtVerify } from "jose";
-import { eq } from "drizzle-orm";
-import { getJwtSecret } from "@/lib/auth";
-
-const SECRET = getJwtSecret();
+import { requireRole } from "@/lib/api-auth";
+import { checkPasswordPolicy } from "@/lib/password-policy";
 
 export async function POST(req: NextRequest) {
-  const token = req.cookies.get('auth_token')?.value;
-  if (!token) return NextResponse.json({ error: "Нет доступа: авторизуйтесь" }, { status: 401 });
-
-  try {
-    const { payload } = await jwtVerify(token, SECRET);
-    if ((payload as any).role !== 'admin') {
-      return NextResponse.json({ error: "Только для админов" }, { status: 403 });
-    }
-  } catch (err) {
-    return NextResponse.json({ error: "Сессия устарела или недействительна" }, { status: 403 });
-  }
+  // Создание аккаунтов — только администратор
+  const auth = await requireRole(req, ["admin"]);
+  if (!auth.ok) return auth.response;
 
   try {
     const { username, password, role } = await req.json();
     if (!username || !password) return NextResponse.json({ error: "Укажите логин и пароль" }, { status: 400 });
 
+    // Политика паролей проверяется на сервере (в форме — только подсказка)
+    const policy = checkPasswordPolicy(password);
+    if (!policy.ok) return NextResponse.json({ error: policy.error }, { status: 400 });
+
+    const login = String(username).trim();
+    if (!/^[\w.\-]{3,32}$/.test(login)) {
+      return NextResponse.json(
+        { error: "Логин: 3–32 символа, буквы/цифры/точка/дефис/подчёркивание" },
+        { status: 400 }
+      );
+    }
+
+    // Роль ограничиваем известными значениями: иначе можно создать
+    // аккаунт с произвольной ролью, которая не обрабатывается панелью.
+    const safeRole = role === "admin" ? "admin" : "officer";
+
     const passwordHash = await bcrypt.hash(password, 10);
-    
-    await db.insert(users).values({ 
-      username, 
-      passwordHash, 
-      role: role || 'officer' 
+
+    await db.insert(users).values({
+      username: login,
+      passwordHash,
+      role: safeRole,
     });
 
     let authorFormatted = "Администратор";
-    try {
-      const verified = await jwtVerify(token, SECRET);
-      const payload = verified.payload as any;
-      if (payload.username) {
-        const [dbUser] = await db.select().from(users).where(eq(users.username, payload.username));
-        authorFormatted = `${dbUser?.role === "admin" ? "Администратор" : "Командир"} ${payload.username}`;
-      }
-    } catch {}
+    if (auth.user.username) authorFormatted = `Администратор ${auth.user.username}`;
     await db.insert(logs).values({
       category: "edit",
       author: authorFormatted,
-      action: `создал аккаунт ${username}`,
-      details: { "Логин": username, "Роль": role || "officer" },
+      action: `создал аккаунт ${login}`,
+      details: { "Логин": login, "Роль": safeRole },
       kind: "system",
       title: "Создание аккаунта",
-      detail: `Создан аккаунт ${username}`,
+      detail: `Создан аккаунт ${login}`,
       ok: true,
     });
 
-    return NextResponse.json({ ok: true, message: `Аккаунт '${username}' успешно создан.` });
+    return NextResponse.json({ ok: true, message: `Аккаунт '${login}' успешно создан.` });
   } catch (err) {
     return NextResponse.json({ error: "Ошибка сервера (возможно логин уже занят)" }, { status: 500 });
   }

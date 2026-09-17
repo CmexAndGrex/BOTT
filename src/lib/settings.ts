@@ -9,10 +9,19 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   // Каналы Discord-бота (ШДС / отпуск / запросы ролей)
   shds_channel_id: "",
   vacation_channel_id: "",
-  roles_channel_id: "1090516508725215253",
-  moderator_role_id: "1089254387488145550",
-  command_role_id: "1392552505162072264",
-  leave_role_id: "1166476218791645256",
+  // ВАЖНО: ID ролей обязательны и задаются администратором в панели.
+  // Раньше здесь стояли «зашитые» ID конкретного сервера, из-за чего при
+  // пустой настройке бот молча работал с чужой/устаревшей ролью.
+  roles_channel_id: "",
+  moderator_role_id: "",
+  command_role_id: "",
+  leave_role_id: "",
+  /**
+   * Белый список ID вебхуков, сообщения которых считаются заявками
+   * (формы присылают заявки через вебхуки Discord). Пусто = вебхуки
+   * не принимаются (fail-closed), чтобы нельзя было подделать заявку.
+   */
+  allowed_webhook_ids: "",
   // Google Таблица (ШДС)
   gsheet_spreadsheet_id: "",
   gsheet_service_account: "",

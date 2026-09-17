@@ -13,6 +13,24 @@ const MAX_ATTEMPTS = 5;
 const MAX_REMEMBERED_IPS = 5000;
 const RATE_RECORD_TTL_MS = 24 * 60 * 60 * 1000;
 const LOCK_TIME_MS = 15 * 60 * 1000; 
+/** Срок жизни сессии: короче 7 суток, ревокация — через tokenVersion. */
+const SESSION_TTL_SECONDS = 12 * 60 * 60; 
+
+/**
+ * Определяет, надо ли ставить флаг Secure на cookie сессии — по фактической
+ * схеме запроса. Раньше флаг снимался для любого URL, содержащего подстроку
+ * "localhost" (например evil-localhost.example), из-за чего cookie могла
+ * уйти по открытому HTTP.
+ */
+function isSecureRequest(req: NextRequest): boolean {
+  const proto =
+    (req.headers.get("x-forwarded-proto") || "").split(",")[0].trim() ||
+    req.nextUrl.protocol.replace(":", "");
+  if (proto !== "https") return false;
+  // Локальная проверка production-сборки по https://localhost без домена
+  const host = (req.headers.get("host") || req.nextUrl.host).split(":")[0].toLowerCase();
+  return host !== "localhost" && host !== "127.0.0.1" && host !== "::1";
+} 
 
 export async function POST(req: NextRequest) {
   try {
@@ -58,14 +76,44 @@ export async function POST(req: NextRequest) {
       const attempts = (record?.attempts || 0) + 1;
       const lockUntil = attempts >= MAX_ATTEMPTS ? now + LOCK_TIME_MS : 0;
       rateLimitMap.set(ip, { attempts, lockUntil, at: now });
+
+      // Фиксируем неудачную попытку в журнале — это сигнал для разбора
+      // инцидентов (раньше логировались только успешные входы).
+      try {
+        await db.insert(logs).values({
+          category: "auth",
+          author: typeof username === "string" ? username.slice(0, 100) : "—",
+          action: "неудачная попытка входа",
+          details: {
+            IP: ip,
+            Попытка: `${attempts}/${MAX_ATTEMPTS}`,
+            Блокировка: lockUntil ? "выдана на 15 мин" : "нет",
+          },
+          kind: "auth",
+          title: "Отказ в доступе",
+          detail: `Неудачная попытка входа: ${attempts} из ${MAX_ATTEMPTS}`,
+          ok: false,
+          error: "Неверный логин или пароль",
+        });
+      } catch {
+        // Журнал не должен мешать ответу клиенту
+      }
+
       return NextResponse.json({ error: "Неверный логин или пароль" }, { status: 401 });
     }
 
     rateLimitMap.delete(ip);
 
-    const token = await new SignJWT({ userId: user.id, username: user.username, role: user.role })
+    const token = await new SignJWT({
+      userId: user.id,
+      username: user.username,
+      role: user.role,
+      // Версия сверяется на каждом запросе: смена пароля/удаление аккаунта
+      // обрывает все ранее выданные сессии.
+      tokenVersion: user.tokenVersion,
+    })
       .setProtectedHeader({ alg: "HS256" })
-      .setExpirationTime("7d")
+      .setExpirationTime(`${SESSION_TTL_SECONDS}s`)
       .sign(SECRET);
 
     await db.insert(logs).values({
@@ -81,9 +129,13 @@ export async function POST(req: NextRequest) {
       httpOnly: true,
       path: "/",
       sameSite: "lax",
-      // Принудительно отключаем флаг secure, если вы сидите через localhost
-      secure: process.env.NODE_ENV === "production" && !req.url.includes("localhost"), 
-      maxAge: 60 * 60 * 24 * 7, 
+      // Флаг Secure зависит от того, как панель реально открыта:
+      //  - production: cookie ставится только поверх HTTPS, если запрос пришёл
+      //    по https (за прокси ориентируемся на X-Forwarded-Proto).
+      //    Исключение — http://localhost при локальной проверке сборки.
+      //  - dev: флаг снимаем, иначе cookie не сохранится на http://localhost.
+      secure: isSecureRequest(req),
+      maxAge: SESSION_TTL_SECONDS,
     });
 
     return response;

@@ -2,28 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { members, snapshots, weeklyStats } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { jwtVerify } from "jose";
 import { computeStats } from "@/lib/tasks";
 import { getSettings, normHours } from "@/lib/settings";
-import { getJwtSecret } from "@/lib/auth";
+import { authorizeCron, getAuthUser } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const SECRET = getJwtSecret();
-
 export async function GET(req: NextRequest) {
-  const key = req.nextUrl.searchParams.get("key");
-  const token = req.cookies.get("auth_token")?.value;
-  let isAuthorized = false;
-
-  if (key && key === process.env.CRON_SECRET) {
-    isAuthorized = true;
-  } else if (token) {
-    try {
-      await jwtVerify(token, SECRET);
-      isAuthorized = true;
-    } catch (e) {}
+  // Либо секрет внешнего cron (timing-safe), либо действующая сессия панели.
+  // При незаданном CRON_SECRET остаётся вход по cookie — панель работает как раньше.
+  let isAuthorized = authorizeCron(req).ok;
+  if (!isAuthorized) {
+    isAuthorized = !!(await getAuthUser(req));
   }
 
   if (!isAuthorized) {

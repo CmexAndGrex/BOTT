@@ -78,12 +78,35 @@ export const cronRuns = pgTable("cron_runs", {
     .defaultNow(),
 });
 
+/**
+ * Маркеры уже обработанных заявок Discord.
+ *
+ * Раньше признаком «обработано» служил префикс «[» в тексте сообщения —
+ * любой, кто мог редактировать сообщение (или повторно отправить реакцию),
+ * влиял на идемпотентность. Теперь решение принимается по записи в БД:
+ * вставка с ON CONFLICT DO NOTHING атомарно «занимает» сообщение.
+ */
+export const processedRequests = pgTable("processed_requests", {
+  messageId: text("message_id").primaryKey(),
+  /** Тип обработки: approved / denied / role-updated / error */
+  kind: text("kind").notNull().default("processed"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
 /** Учетные записи пользователей для доступа к панели */
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
   username: text("username").unique().notNull(),
   passwordHash: text("password_hash").notNull(),
   role: text("role").notNull().default("officer"),
+  /**
+   * Версия токена: попадает в JWT при входе и сверяется на каждом запросе.
+   * Инкремент делает все ранее выданные токены недействительными — так
+   * срабатывает отзыв сессии без хранения списка токенов.
+   */
+  tokenVersion: integer("token_version").notNull().default(1),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

@@ -82,7 +82,9 @@ function copyRowBetween(
       strikethrough: src.textFormat?.strikethrough,
       foregroundColor: src.textFormat?.foregroundColor,
     };
-    dest.backgroundColor = src.backgroundColor ? { ...src.backgroundColor } : undefined;
+    // В google-spreadsheet v5 сеттеры формата не принимают undefined,
+    // поэтому заливку переносим только когда она есть у источника.
+    if (src.backgroundColor) dest.backgroundColor = { ...src.backgroundColor };
     dest.horizontalAlignment = src.horizontalAlignment;
     dest.verticalAlignment = src.verticalAlignment;
   }
@@ -133,8 +135,8 @@ async function clearReserveRow(sheet: GoogleSpreadsheetWorksheet, row: number) {
   for (let c = 0; c <= META_COL.date; c++) {
     const cell = sheet.getCell(row - 1, c);
     cell.value = "";
-    cell.textFormat = undefined;
-    cell.backgroundColor = undefined;
+    // v5: очистка формата выполняется методом (setters не принимают undefined)
+    cell.clearAllFormatting();
   }
   await sheet.saveUpdatedCells();
 }
@@ -224,7 +226,8 @@ export async function moveToReserve(req: {
       for (let c = 0; c < SNAP_COLS; c++) {
         const cell = unitSheet.getCell(srcRow - 1, c);
         cell.value = c === nameColIdx ? "Вакант" : "";
-        cell.backgroundColor = undefined;
+        // v5: очистка заливки выполняется методом (setters не принимают undefined)
+        cell.clearAllFormatting();
       }
     }
     await unitSheet.saveUpdatedCells();

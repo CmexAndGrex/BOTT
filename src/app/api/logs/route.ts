@@ -2,11 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { desc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { logs } from "@/db/schema";
+import { requireRole } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
+  // Журнал содержит имена и действия сотрудников — доступен командирам и админам
+  const auth = await requireRole(req, ["officer"]);
+  if (!auth.ok) return auth.response;
+
   try {
     const url = new URL(req.url);
     const offsetParam = url.searchParams.get("offset");

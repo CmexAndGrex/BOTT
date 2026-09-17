@@ -6,6 +6,10 @@ node_modules/
 out/
 build/
 
+# Служебная папка drizzle-kit (создаётся при check/push, не для коммита)
+drizzle/
+drizzle.docker.config.json
+
 # Артефакты инкрементальной сборки TypeScript
 *.tsbuildinfo
 

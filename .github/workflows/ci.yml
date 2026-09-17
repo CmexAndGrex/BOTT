@@ -1,0 +1,60 @@
+name: CI
+
+# Проверки запускаются на каждый push и pull request в main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Отменяем устаревшие прогоны той же ветки, чтобы не тратить минуты впустую
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Минимально необходимые права: только чтение репозитория
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: test / typecheck / lint / build
+    runs-on: ubuntu-latest
+
+    env:
+      # next build выполняет модули с проверками на этапе загрузки, поэтому
+      # переменные нужны уже во время сборки (аналогично Dockerfile):
+      #   - DATABASE_URL: src/db/index.ts падает без него;
+      #   - JWT_SECRET (>= 32 символов): src/lib/auth.ts в production падает,
+      #     если секрет не задан или равен известной заглушке.
+      # Здесь только публичные заглушки для сборки. Настоящие секреты
+      # передаются приложению в рантайме (docker-compose), не в CI.
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/app_db
+      JWT_SECRET: ci-build-placeholder-secret-0123456789abcdef
+      NEXT_TELEMETRY_DISABLED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Тесты используют нативное выполнение TypeScript, поэтому нужен Node 24+.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Test
+        run: npm run test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build

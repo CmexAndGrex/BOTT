@@ -22,6 +22,15 @@ services:
     restart: "no"
     environment:
       DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/app_db"
+      # Нужен для fail-fast в seed-admin: в production админ не создаётся
+      # с паролем по умолчанию, если ADMIN_PASSWORD не задан.
+      NODE_ENV: "production"
+      # Первый администратор. Пароль задайте в .env — он используется ТОЛЬКО
+      # при создании аккаунта: существующий админ не перезаписывается.
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
+      # Осознанный сброс пароля существующего админа: ADMIN_PASSWORD_RESET=true
+      ADMIN_PASSWORD_RESET: "${ADMIN_PASSWORD_RESET:-false}"
     depends_on:
       db:
         condition: service_healthy

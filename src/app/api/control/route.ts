@@ -2,8 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { members, weeklyStats } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
+import { requireRole } from "@/lib/api-auth";
 
 export async function GET(req: NextRequest) {
+  // Страница «Контроль» доступна командирам и админам; роут отдаёт состав
+  // вместе с Discord ID, поэтому проверяем роль прямо здесь, а не только
+  // в middleware (защита от обхода middleware).
+  const auth = await requireRole(req, ["officer"]);
+  if (!auth.ok) return auth.response;
+
   try {
     // Получаем только активный состав
     const activeMembers = await db.select().from(members).where(eq(members.active, true));

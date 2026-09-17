@@ -4,15 +4,15 @@ import { members, snapshots } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { computeStats } from "@/lib/tasks";
 import { getSettings, normHours } from "@/lib/settings";
+import { authorizeCron } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
-  const key = req.nextUrl.searchParams.get("key");
-  if (key !== process.env.CRON_SECRET) {
-    return NextResponse.json({ error: "Доступ запрещен" }, { status: 403 });
-  }
+  // Проверка секрета внешнего cron: timing-safe + отказ при пустом CRON_SECRET
+  const cron = authorizeCron(req);
+  if (!cron.ok) return cron.response;
 
   const map = await getSettings();
   const norm = normHours(map);

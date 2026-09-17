@@ -24,7 +24,7 @@ import {
 } from "discord.js";
 import { eq, and, isNotNull } from "drizzle-orm";
 import { db } from "@/db";
-import { members } from "@/db/schema";
+import { members, processedRequests } from "@/db/schema";
 import { getSettings } from "@/lib/settings";
 import { applyShdsRequest, parseRequestText, SHDS_ACTIONS, type ParsedRequest } from "@/lib/gsheets";
 import { applyRoleCommand, parseRoleCommand, parseRoleRequest, COMMON_ROLE_IDS } from "@/lib/roles";
@@ -47,31 +47,55 @@ type BotConfig = {
   commandRoleId: string;
   leaveRoleId: string;
   reserveRoleId: string;
+  /** Белый список ID вебхуков-источников заявок (пусто = вебхуки запрещены) */
+  allowedWebhookIds: Set<string>;
 };
 
-/** Значения по умолчанию — используются, если настройка в базе пустая */
-const BOT_DEFAULTS = {
-  moderatorRoleId: "1089254387488145550",
-  commandRoleId: "1392552505162072264",
-  leaveRoleId: "1166476218791645256",
-};
-
+/**
+ * Загрузка конфигурации бота.
+ *
+ * ID ролей обязательны: раньше при пустой настройке подставлялись «зашитые»
+ * ID конкретного сервера, и бот молча работал с чужой ролью (например,
+ * выдавал права не тому кругу лиц). Теперь при пустых значениях функция
+ * падает — это fail-fast: лучше явная ошибка в логе, чем тихая выдача прав.
+ */
 async function loadBotConfig(): Promise<BotConfig> {
   const map = await getSettings();
-  return {
+
+  const missing: string[] = [];
+  const require = (key: string, title: string): string => {
+    const v = (map.get(key) || "").trim();
+    if (!v) missing.push(title);
+    return v;
+  };
+
+  const config: BotConfig = {
     token:
       (map.get("discord_token") || "").trim() ||
       (process.env.DISCORD_BOT_TOKEN || "").trim(),
     shdsChannelId: (map.get("shds_channel_id") || "").trim(),
     vacationChannelId: (map.get("vacation_channel_id") || "").trim(),
     rolesChannelId: (map.get("roles_channel_id") || "").trim(),
-    moderatorRoleId:
-      (map.get("moderator_role_id") || "").trim() || BOT_DEFAULTS.moderatorRoleId,
-    commandRoleId:
-      (map.get("command_role_id") || "").trim() || BOT_DEFAULTS.commandRoleId,
-    leaveRoleId: (map.get("leave_role_id") || "").trim() || BOT_DEFAULTS.leaveRoleId,
+    moderatorRoleId: require("moderator_role_id", "ID роли модератора"),
+    commandRoleId: require("command_role_id", "ID роли «Командирский состав»"),
+    leaveRoleId: require("leave_role_id", "ID роли «Отпуск»"),
     reserveRoleId: (map.get("reserve_role_id") || "").trim(),
+    allowedWebhookIds: new Set(
+      (map.get("allowed_webhook_ids") || "")
+        .split(/[\s,]+/)
+        .map((x) => x.trim())
+        .filter((x) => /^\d{5,25}$/.test(x))
+    ),
   };
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Не заданы обязательные настройки бота: ${missing.join(", ")}. ` +
+        `Укажите их в панели: Настройки → Discord / каналы заявок.`
+    );
+  }
+
+  return config;
 }
 
 /* ------------------------------------------------------------------ */
@@ -107,15 +131,59 @@ function isApproveEmoji(name: string): boolean {
   return name === "🟢" || name === "ATK" || name === "✅";
 }
 
+/**
+ * Необратимая короткая ссылка на сущность для логов.
+ *
+ * Раньше бот писал в консоль Discord-теги, имена и упоминания бойцов —
+ * это персональные данные, которые оседали в логах контейнера. Теперь
+ * пишем короткий хеш: логи остаются сопоставимыми между собой (по одному
+ * и тому же значению получается один и тот же ref), но личность по нему
+ * не восстанавливается.
+ */
+function logRef(kind: string, id: string | null | undefined): string {
+  const value = (id || "").trim();
+  if (!value) return `${kind}:—`;
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash * 31 + value.charCodeAt(i)) | 0;
+  }
+  return `${kind}:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
 /** Реакция отказа */
 function isDenyEmoji(name: string): boolean {
   return name === "❌";
 }
 
-/** Добавить префикс к сообщению заявки (защита от повторов) */
+/**
+ * Пометить заявку обработанной. Атомарная вставка с ON CONFLICT DO NOTHING
+ * служит «замком»: если строку вставили мы — мы и обрабатываем; если запись
+ * уже есть (или вставил параллельный инстанс), значит заявка занята.
+ *
+ * Возвращает true, если заявку захватили именно мы.
+ */
+async function claimRequest(messageId: string, kind: string): Promise<boolean> {
+  const rows = await db
+    .insert(processedRequests)
+    .values({ messageId, kind })
+    .onConflictDoNothing()
+    .returning({ messageId: processedRequests.messageId });
+  return rows.length > 0;
+}
+
+/** Отметка «в работе»: ставим сразу после проверки прав, до изменений */
+async function isRequestProcessed(messageId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ messageId: processedRequests.messageId })
+    .from(processedRequests)
+    .where(eq(processedRequests.messageId, messageId));
+  return !!row;
+}
+
+/** Добавить префикс к сообщению заявки (наглядный статус в Discord) */
 async function prefixMessage(message: Message, prefix: string): Promise<void> {
   const content = message.content || "";
-  if (content.startsWith("[")) return; // уже обработано
+  if (content.startsWith("[")) return; // визуальный префикс уже стоит
   try {
     await message.edit(`${prefix} ${content}`);
   } catch (e) {
@@ -199,8 +267,10 @@ async function handleRolesReaction({
     const roleReq = message.content ? parseRoleRequest(message.content) : null;
     if (!roleReq) return;
 
-    // Уже обработано ранее (префикс стоит) — не срабатываем повторно
-    if ((message.content || "").startsWith("[")) return;
+    // Идемпотентность через БД: повторная реакция не должна обрабатывать заявку
+    // дважды. Захватываем заявку ПОСЛЕ проверки прав — иначе неуполномоченная
+    // реакция «сожгла» бы заявку и модератор не смог бы её подтвердить.
+    if (await isRequestProcessed(message.id)) return;
 
     // Проверка прав реагирующего: это экзаменатор или модератор
     const reactor = await guild.members.fetch(user.id).catch(() => null);
@@ -221,6 +291,9 @@ async function handleRolesReaction({
       return;
     }
 
+    // Заявку берём в работу: атомарный захват вместо префикса в тексте
+    if (!(await claimRequest(message.id, deny ? "role-denied" : "role-updated"))) return;
+
     const recipientMember = await guild.members
       .fetch(roleReq.recipientId)
       .catch(() => null);
@@ -233,7 +306,7 @@ async function handleRolesReaction({
           `🛑 Запрос ролей для <@${roleReq.recipientId}> — **ОТКАЗАНО**. Решение принял <@${user.id}>.`
         );
       }
-      console.log(`[bot] Отказ запроса ролей: ${roleReq.line} (${user.tag})`);
+      console.log(`[bot] Отказ запроса ролей: получатель ${logRef("user", roleReq.recipientId)}, решение ${logRef("mod", user.id)}`);
       return;
     }
 
@@ -259,16 +332,19 @@ async function handleRolesReaction({
         );
       }
       console.log(
-        `[bot] Роли обновлены: <@${roleReq.recipientId}> ← ${result.message} (${user.tag})`
+        `[bot] Роли обновлены: получатель ${logRef("user", roleReq.recipientId)} ← ${result.message}, решение ${logRef("mod", user.id)}`
       );
 
-      // Запись в журнал панели
+      // Запись в журнал панели.
+      // Здесь (в отличие от консольных логов) автора оставляем узнаваемым:
+      // это аудит-трейл, доступный только в панели, и обезличивание сломало бы
+      // разбор инцидентов. user.tag устарел в discord.js v14 — берём username.
       try {
         const { db: dbMod } = await import("@/db");
         const { logs } = await import("@/db/schema");
         await dbMod.insert(logs).values({
           category: "edit",
-          author: user.tag || "Discord-бот",
+          author: user.username || "Discord-бот",
           action: `выдал/снял роли бойцу ${recipientMember.displayName || roleReq.recipientId}`,
           details: {
             "Получатель": `<@${roleReq.recipientId}>`,
@@ -392,11 +468,19 @@ export function initBot() {
   globalThis.__redopsBotClient = client;
 
   client.once("ready", () => {
-    console.log(`🤖 Бот-слушатель АТК (ШДС/отпуск) запущен как ${client.user?.tag}`);
+    console.log(`🤖 Бот-слушатель АТК (ШДС/отпуск) запущен как ${client.user?.username || "bot"} (${logRef("bot", client.user?.id)})`);
     void (async () => {
-      const config = await loadBotConfig();
-      // Фоновая проверка отпусков — раз в минуту
-      setInterval(() => checkVacations(client, config), 60 * 1000);
+      try {
+        const config = await loadBotConfig();
+        // Фоновая проверка отпусков — раз в минуту
+        setInterval(() => checkVacations(client, config), 60 * 1000);
+      } catch (e) {
+        // Fail-fast конфигурации не должен «убивать» процесс молча
+        console.error(
+          "[bot] Проверка отпусков не запущена:",
+          e instanceof Error ? e.message : e
+        );
+      }
     })();
   });
 
@@ -405,7 +489,8 @@ export function initBot() {
   /* -------------------------------------------------------------- */
   client.on("messageCreate", async (message: Message) => {
     try {
-      if (message.author.bot && !message.webhookId) return; // чужие боты — мимо, вебхуки пропускаем
+      if (message.author.bot && !message.webhookId) return; // чужие боты — мимо;
+      // вебхуки форм обрабатываем, но ниже проверяем их ID по белому списку
       if (!message.content) return;
 
       const config = await loadBotConfig();
@@ -431,6 +516,15 @@ export function initBot() {
 
       if (!isShdsChannel && !isVacChannel) return;
 
+      // Проверка источника: заявку принимаем только от разрешённых вебхуков
+      // или из каналов, где пишут люди (не боты — их отсекли выше).
+      if (message.webhookId && !config.allowedWebhookIds.has(message.webhookId)) {
+        console.warn(
+          `[bot] Проигнорировано сообщение неизвестного вебхука ${message.webhookId} в канале ${message.channelId}`
+        );
+        return;
+      }
+
       // По ТЗ бот НЕ ставит реакции сам — только парсит заявку и запоминает её
       const parsed = parseMessageRequest(message);
       if (!parsed) return; // не похоже на заявку — игнорируем
@@ -438,7 +532,9 @@ export function initBot() {
       const kind = parsed.isVacation
         ? `Отпуск${parsed.vacationDates ? ` (${parsed.vacationDates})` : ""}`
         : parsed.shdsAction || "Редакция ШДС";
-      console.log(`[bot] Принята заявка: ${kind} · ${parsed.unit} · ${parsed.userName}`);
+      console.log(
+          `[bot] Принята заявка: ${kind} · подразделение «${parsed.unit}» · боец ${logRef("user", parsed.userName)}`
+        );
     } catch (e) {
       console.error("[bot] Ошибка обработки сообщения:", e);
     }
@@ -486,8 +582,20 @@ export function initBot() {
         const req = parseMessageRequest(message);
         if (!req) return;
 
-        // Уже обработано ранее (префикс стоит) — не срабатываем повторно
-        if ((message.content || "").startsWith("[")) return;
+        // Заявки приходят от вебхуков форм. Принимаем их только от известных
+        // вебхуков (allowlist в настройках): иначе участник с правом
+        // «Управление вебхуками» мог бы подделать заявку на выдачу ролей/ШДС.
+        // Пустой allowlist = вебхуки не принимаем (fail-closed).
+        if (message.webhookId && !config.allowedWebhookIds.has(message.webhookId)) {
+          console.warn(
+            `[bot] Отклонена заявка от неизвестного вебхука ${message.webhookId} в канале ${message.channelId}. ` +
+              `Добавьте его ID в настройку «Разрешённые вебхуки заявок».`
+          );
+          return;
+        }
+
+        // Идемпотентность через БД: повторная реакция не обрабатывает заявку дважды
+        if (await isRequestProcessed(message.id)) return;
 
         // Проверка прав реагирующего
         const reactor = await guild.members.fetch(user.id).catch(() => null);
@@ -533,6 +641,10 @@ export function initBot() {
             ? `Заявка «${req.shdsAction}»`
             : `Заявка «${req.shdsAction}»`;
 
+        // Права проверены — атомарно берём заявку в работу. Если её уже
+        // обработал другой инстанс или повторная реакция, выходим.
+        if (!(await claimRequest(message.id, deny ? "denied" : "approved"))) return;
+
         /* ---------- ОТКАЗ ---------- */
         if (deny) {
           await prefixMessage(message, "[ОТКАЗАНО]");
@@ -551,7 +663,7 @@ export function initBot() {
           if (thread) {
             await thread.send(`🛑 ${kindLabel} для **${req.userName}** — **ОТКАЗАНО**. Решение принял ${reactorMention}.`);
           }
-          console.log(`[bot] Отказ: ${req.userName} (${user.tag})`);
+          console.log(`[bot] Отказ: боец ${logRef("user", req.userName)}, решение ${logRef("mod", user.id)}`);
           return;
         }
 
@@ -730,7 +842,7 @@ export function initBot() {
             `✅ ${kindLabel} для **${req.userName}** — **${req.isVacation ? "ОДОБРЕНО" : "ОДОБРЕНО И ВНЕСЕНО"}**.\nРешил: ${reactorMention}.\nИтог: ${outcome}`
           );
         }
-        console.log(`[bot] Одобрено: ${req.userName} (${user.tag}) — ${outcome}`);
+        console.log(`[bot] Одобрено: боец ${logRef("user", req.userName)}, решение ${logRef("mod", user.id)} — ${outcome}`);
       } catch (e) {
         console.error("[bot] Ошибка обработки реакции:", e);
       }

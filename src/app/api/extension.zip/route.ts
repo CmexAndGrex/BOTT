@@ -3,6 +3,8 @@ import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import JSZip from "jszip";
 import { ensureCookieSyncKey } from "@/lib/settings";
+import { requireRole } from "@/lib/api-auth";
+import { firstSafeOrigin } from "@/lib/validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,39 +25,47 @@ const BINARY_FILES = [
 
 /**
  * Персональная сборка расширения «скачал и работает»:
- * адрес панели берётся из самого запроса, ключ синхронизации — из базы.
+ * адрес панели определяется по PANEL_URL/заголовкам запроса с проверкой,
+ * ключ синхронизации — из базы.
  * Подстановка заменяет плейсхолдеры __SERVER_URL__ и __SYNC_KEY__ в шаблонах.
  */
 export async function GET(req: NextRequest) {
-  // Приоритет — Referer: браузер точно передаёт тот origin, на котором открыта панель.
-  const referer = req.headers.get("referer");
-  let origin = "";
-  if (referer) {
-    try {
-      origin = new URL(referer).origin;
-    } catch {
-      origin = "";
-    }
-  }
+  // Архив содержит ключ синхронизации — только администратор
+  const auth = await requireRole(req, ["admin"]);
+  if (!auth.ok) return auth.response;
 
-  if (!origin) {
-    const protoHeader = req.headers.get("x-forwarded-proto");
-    const hostHeader = req.headers.get("x-forwarded-host");
-    const host =
-      (hostHeader ? hostHeader.split(",")[0].trim() : "") ||
-      req.headers.get("host") ||
-      "";
-    if (!host) {
-      return NextResponse.json(
-        { ok: false, error: "Не удалось определить адрес сервера" },
-        { status: 500 }
-      );
-    }
-    // e2b-превью умеет только https, хотя proxy иногда передаёт proto=http
+  // Определяем адрес панели, который будет «зашит» в расширение.
+  //
+  // Раньше origin брался из заголовков (Referer / X-Forwarded-Host) — их
+  // подставляет клиент, поэтому в архив можно было вшить чужой домен и
+  // увести cookie rs-red.com на сторону. Теперь:
+  //   1) приоритет — настроенный адрес панели (PANEL_URL), только http(s);
+  //   2) иначе — собственный Host запроса (после проверки формата);
+  //   3) X-Forwarded-* принимаем лишь как вынужденную меру за прокси и
+  //      проверяем итоговый хост на разумный формат домена.
+  const configured = (process.env.PANEL_URL || "").trim();
+  const rawCandidates: string[] = [];
+  if (configured) rawCandidates.push(configured);
+
+  const protoHeader = (req.headers.get("x-forwarded-proto") || "").split(",")[0].trim();
+  const hostCandidates = [
+    (req.headers.get("host") || "").split(",")[0].trim(),
+    (req.headers.get("x-forwarded-host") || "").split(",")[0].trim(),
+  ].filter(Boolean);
+
+  for (const host of hostCandidates) {
     const proto = /(^|\.)e2b\.app$/.test(host)
       ? "https"
-      : (protoHeader ? protoHeader.split(",")[0].trim() : "") || "https";
-    origin = `${proto}://${host}`;
+      : protoHeader || (req.nextUrl.protocol.replace(":", "") || "https");
+    rawCandidates.push(`${proto}://${host}`);
+  }
+
+  const origin = firstSafeOrigin(rawCandidates);
+  if (!origin) {
+    return NextResponse.json(
+      { ok: false, error: "Не удалось определить адрес панели (задайте PANEL_URL)" },
+      { status: 500 }
+    );
   }
   const key = await ensureCookieSyncKey();
   const keyMasked = `${key.slice(0, 6)}…`;

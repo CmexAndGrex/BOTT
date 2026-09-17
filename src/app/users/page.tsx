@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { ShieldCheck, UserPlus, Trash2, AlertTriangle } from "lucide-react";
 import { Section, Spinner } from "@/components/ui";
+import { PASSWORD_POLICY_HINT } from "@/lib/password-policy";
 
 type Account = { id: number; username: string; role: string };
 
@@ -142,7 +143,10 @@ export default function UsersPage() {
             </div>
             <div>
               <label className="text-[12px] mb-1.5 block" style={{ color: "var(--dim)" }}>Пароль</label>
-              <input required minLength={5} type="password" autoComplete="new-password" className="input input-mono w-full" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="НадёжныйПароль123" />
+              <input required minLength={10} type="password" autoComplete="new-password" className="input input-mono w-full" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="НадёжныйПароль123" />
+              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
+                {PASSWORD_POLICY_HINT}
+              </p>
             </div>
             <div>
               <label className="text-[12px] mb-1.5 block" style={{ color: "var(--dim)" }}>Роль</label>

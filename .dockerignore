@@ -1,5 +1,9 @@
 node_modules
+# Артефакты сборки Next.js (в т.ч. .next/standalone/.env, который Next
+# копирует из корневого .env — в образ он попадать не должен)
 .next
+.next/standalone/.env
+**/standalone/.env
 .env
 .env*
 !.env.example

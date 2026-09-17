@@ -1,6 +1,6 @@
 import { and, eq, isNotNull, lt } from "drizzle-orm";
 import { db } from "@/db";
-import { cronRuns, logs, members as membersTable, snapshots, weeklyStats } from "@/db/schema";
+import { cronRuns, logs, members as membersTable, processedRequests, snapshots, weeklyStats } from "@/db/schema";
 import {
   REACTIONS,
   addReaction,
@@ -521,10 +521,17 @@ export async function runCleanup(): Promise<TaskResult> {
     .where(lt(cronRuns.createdAt, cronCutoff))
     .returning({ key: cronRuns.key });
 
+  // Маркеры обработанных заявок храним столько же, сколько cron-слоты:
+  // заявки живут в Discord дольше, но 7 дней покрывает любые «догоняющие» реакции
+  const removedRequests = await db
+    .delete(processedRequests)
+    .where(lt(processedRequests.createdAt, cronCutoff))
+    .returning({ messageId: processedRequests.messageId });
+
   const r: TaskResult = {
     ok: true,
     title: "Автоочистка логов",
-    detail: `Удалено строк журнала: ${removedLogs.length}, cron-слотов: ${removedCron.length}. Хранение журнала: ${retentionDays} дн.`,
+    detail: `Удалено строк журнала: ${removedLogs.length}, cron-слотов: ${removedCron.length}, маркеров заявок: ${removedRequests.length}. Хранение журнала: ${retentionDays} дн.`,
   };
   await addLog("system", r.title, r.detail, true);
   return r;
@@ -581,9 +588,7 @@ export async function runLeftMembersCheck(source = "schedule"): Promise<TaskResu
     map.get("discord_channel_id") ||
     ""
   ).trim();
-  const commandRoleId = (
-    map.get("command_role_id") || "1392552505162072264"
-  ).trim();
+  const commandRoleId = (map.get("command_role_id") || "").trim();
   if (!channelId) {
     return {
       ok: false,

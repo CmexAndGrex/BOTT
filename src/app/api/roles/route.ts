@@ -1,13 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { timingSafeEqual } from "node:crypto";
 import { getSettings } from "@/lib/settings";
-
-/** Сравнение секретов без утечки по времени */
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ab.length === bb.length && ab.length > 0 && timingSafeEqual(ab, bb);
-}
+import { authorizeCron, getAuthUser } from "@/lib/api-auth";
+import { isDiscordId } from "@/lib/validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,32 +9,22 @@ export const dynamic = "force-dynamic";
 /**
  * Возвращает список ролей сервера Discord для подстановки в Google-форму.
  * Используется Google Apps Script (см. FORMS_SETUP.md, п. 4).
+ * Авторизация:
+ *   заголовок X-Cron-Secret: <CRON_SECRET> — для скрипта (рекомендуется)
+ *   либо cookie администратора панели
  * Параметры:
- *   ?key=<CRON_SECRET>  — авторизация по ключу (для скрипта)
  *   ?guild=<guild_id>   — ID сервера (если не задан в настройках guild_id)
  */
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
-    const key = url.searchParams.get("key");
-    const cronSecret = process.env.CRON_SECRET || "";
 
-    // Авторизация: либо по ключу (для скрипта), либо по cookie админа
-    let authorized = false;
-    if (key && cronSecret && safeEqual(key, cronSecret)) {
-      authorized = true;
-    } else {
-      const token = req.cookies.get("auth_token")?.value;
-      if (token) {
-        try {
-          const { jwtVerify } = await import("jose");
-          const { getJwtSecret } = await import("@/lib/auth");
-          const verified = await jwtVerify(token, getJwtSecret());
-          authorized = (verified.payload as any).role === "admin";
-        } catch {
-          authorized = false;
-        }
-      }
+    // Секрет принимается заголовком (устаревший ?key= поддерживается хелпером),
+    // иначе — обычная сессия администратора панели.
+    let authorized = authorizeCron(req).ok;
+    if (!authorized) {
+      const user = await getAuthUser(req);
+      authorized = user?.role === "admin";
     }
 
     if (!authorized) {
@@ -48,11 +32,17 @@ export async function GET(req: NextRequest) {
     }
 
     const map = await getSettings();
-    // Валидация: guild_id — только цифры (защита от подделки пути Discord API)
-    const guildId = (url.searchParams.get("guild") || map.get("guild_id") || "").replace(/[^\d]/g, "");
-    if (!guildId) {
-      return NextResponse.json({ error: "Не задан guild_id" }, { status: 400 });
+    // Строгая валидация: guild_id — числовой ID (защита от подделки пути
+    // Discord API). Раньше нецифровые символы просто вырезались, из-за чего
+    // «мусорное» значение молча превращалось в другой ID.
+    const rawGuildId = (url.searchParams.get("guild") || map.get("guild_id") || "").trim();
+    if (!isDiscordId(rawGuildId)) {
+      return NextResponse.json(
+        { error: "Не задан или некорректен guild_id (ожидается числовой ID)" },
+        { status: 400 }
+      );
     }
+    const guildId = rawGuildId;
 
     // Загружаем роли через Discord REST API
     const token = map.get("discord_token") || process.env.DISCORD_BOT_TOKEN || "";

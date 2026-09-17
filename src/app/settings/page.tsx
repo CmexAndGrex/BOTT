@@ -61,7 +61,16 @@ export default function SettingsPage() {
 
   const load = useCallback(async () => {
     const res = await fetch("/api/settings", { cache: "no-store" });
+
+    // Роут отдаёт настройки только администратору: 401 — нет сессии,
+    // 403 — вошёл командир. Раньше ответ был анонимным, поэтому обрабатываем явно.
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || "Нет доступа к настройкам");
+    }
+
     const data = await res.json();
+    if (!data.settings) throw new Error(data.error || "Пустой ответ настроек");
     setSettings(data.settings);
     setEnv(data.env);
     setSyncKey(data.cookieSyncKey || "");
@@ -69,7 +78,12 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    load().catch(() => setNotice({ ok: false, text: "Не удалось загрузить настройки" }));
+    load().catch((e: unknown) =>
+      setNotice({
+        ok: false,
+        text: e instanceof Error ? e.message : "Не удалось загрузить настройки",
+      })
+    );
   }, [load]);
 
   useEffect(() => {
@@ -337,6 +351,22 @@ export default function SettingsPage() {
                   onChange={(e) => set("leave_role_id", e.target.value.replace(/[^\d]/g, ""))}
                 />
               </div>
+            </div>
+            <div>
+              <div className="label mb-1.5">Разрешённые вебхуки заявок (ID через запятую)</div>
+              <input
+                className="input input-mono"
+                placeholder="например 1085141850966458519, 1090516508725215253"
+                value={settings.allowed_webhook_ids}
+                onChange={(e) => set("allowed_webhook_ids", e.target.value)}
+              />
+              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
+                Заявки приходят в каналы ШДС/отпуска от вебхуков Discord. Бот выполняет
+                только сообщения вебхуков из этого списка — так поддельная заявка от
+                постороннего вебхука не будет принята. ID вебхука виден в его URL
+                (Discord: Настройки канала → Интеграции → Вебхуки).
+                <b> Если список пуст, заявки от вебхуков не принимаются вообще.</b>
+              </p>
             </div>
             <hr className="divider" />
             <div>

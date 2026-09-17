@@ -5,6 +5,7 @@
  * src/lib/google-service-account.json.
  */
 import { GoogleSpreadsheet, GoogleSpreadsheetWorksheet } from "google-spreadsheet";
+import { JWT } from "google-auth-library";
 import { getSettings } from "@/lib/settings";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -133,6 +134,38 @@ async function loadServiceAccount(): Promise<Record<string, unknown>> {
 
 let cachedDoc: { id: string; doc: GoogleSpreadsheet } | null = null;
 
+/**
+ * Области доступа сервисного аккаунта: таблицы (чтение и запись).
+ * drive.file нужен только для операций с файлом (метаданные/шаринг) и
+ * запрашивается отдельно, чтобы не расширять права без необходимости.
+ */
+const GOOGLE_SCOPES = [
+  "https://www.googleapis.com/auth/spreadsheets",
+  "https://www.googleapis.com/auth/drive.file",
+];
+
+/**
+ * Собирает авторизацию для Google API из «паспорта» сервисного аккаунта.
+ * В google-spreadsheet v5 метод useServiceAccountAuth удалён — вместо него
+ * передаётся google-auth-library JWT прямо в конструктор документа.
+ */
+function buildServiceAccountAuth(creds: Record<string, unknown>): JWT {
+  const email =
+    typeof creds.client_email === "string" ? creds.client_email.trim() : "";
+  const key = typeof creds.private_key === "string" ? creds.private_key : "";
+  if (!email || !key) {
+    throw new Error(
+      "В «паспорте» сервисного аккаунта отсутствует client_email или private_key"
+    );
+  }
+  // В настройках панели и .env переносы строк ключа иногда экранированы как \n
+  return new JWT({
+    email,
+    key: key.replace(/\\n/g, "\n"),
+    scopes: GOOGLE_SCOPES,
+  });
+}
+
 /** Документ Google Таблицы по ID из настроек (с кэшем авторизации) */
 export async function getDoc(): Promise<GoogleSpreadsheet> {
   const map = await getSettings();
@@ -141,8 +174,9 @@ export async function getDoc(): Promise<GoogleSpreadsheet> {
   if (cachedDoc && cachedDoc.id === id) return cachedDoc.doc;
 
   const creds = await loadServiceAccount();
-  const doc = new GoogleSpreadsheet(id);
-  await doc.useServiceAccountAuth(creds as never);
+  const auth = buildServiceAccountAuth(creds);
+  // v5: авторизация передаётся вторым аргументом конструктора
+  const doc = new GoogleSpreadsheet(id, auth);
   await doc.loadInfo();
   cachedDoc = { id, doc };
   return doc;
@@ -312,7 +346,9 @@ export function copyRow(sheet: GoogleSpreadsheetWorksheet, srcRow: number, destR
       strikethrough: src.textFormat?.strikethrough,
       foregroundColor: src.textFormat?.foregroundColor,
     };
-    dest.backgroundColor = src.backgroundColor ? { ...src.backgroundColor } : undefined;
+    // В google-spreadsheet v5 сеттеры формата не принимают undefined,
+    // поэтому заливку переносим только когда она есть у источника.
+    if (src.backgroundColor) dest.backgroundColor = { ...src.backgroundColor };
     dest.horizontalAlignment = src.horizontalAlignment;
     dest.verticalAlignment = src.verticalAlignment;
   }
@@ -419,7 +455,8 @@ async function scenarioPost(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayou
     for (let c = colIndex(ROW_START_COL); c <= colIndex(ROW_END_COL); c++) {
       const cell = sheet.getCell(srcRow - 1, c);
       cell.value = c === colIndex(layout.nameCol) ? "Вакант" : "";
-      cell.backgroundColor = undefined;
+      // v5: полная очистка формата делается методом, а не присваиванием undefined
+      cell.clearAllFormatting();
     }
   }
 

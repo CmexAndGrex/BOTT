@@ -1,23 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { members, logs, users } from "@/db/schema";
-import { jwtVerify } from "jose";
-import { getJwtSecret } from "@/lib/auth";
+import { members, logs } from "@/db/schema";
+import { getAuthUser, requireAuth } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const SECRET = getJwtSecret();
-
 type Params = { params: Promise<{ id: string }> };
 
 export async function PATCH(req: NextRequest, { params }: Params) {
-  const token = req.cookies.get("auth_token")?.value;
-  if (!token) return NextResponse.json({ ok: false, error: "Нет доступа" }, { status: 401 });
-
-  try { await jwtVerify(token, SECRET); } 
-  catch (err) { return NextResponse.json({ ok: false, error: "Сессия устарела" }, { status: 403 }); }
+  // Редактирование бойцов — только авторизованные (командиры и админы)
+  const auth = await requireAuth(req);
+  if (!auth.ok) return auth.response;
 
   const { id } = await params;
   const memberId = parseInt(id, 10);
@@ -54,17 +49,10 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   if (!rows.length) return NextResponse.json({ ok: false, error: "Боец не найден" }, { status: 404 });
 
   if (changesDescription.length > 0) {
-    let authorFormatted = "Командир";
-    try {
-      const verified = await jwtVerify(token, SECRET);
-      const payload = verified.payload as any;
-      const username = payload.username || payload.sub || payload.name;
-      if (username) {
-        const [dbUser] = await db.select().from(users).where(eq(users.username, username));
-        if (dbUser) authorFormatted = `${dbUser.role === "admin" ? "Администратор" : "Командир"} ${dbUser.username}`;
-        else authorFormatted = `${payload.role === "admin" ? "Администратор" : "Командир"} ${username}`;
-      }
-    } catch { }
+    const roleRu = auth.user.role === "admin" ? "Администратор" : "Командир";
+    const authorFormatted = auth.user.username
+      ? `${roleRu} ${auth.user.username}`
+      : roleRu;
 
     await db.insert(logs).values({
       category: "edit",

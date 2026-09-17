@@ -1,4 +1,5 @@
 import { getSettings, resolveToken } from "@/lib/settings";
+import { assertDiscordId } from "@/lib/validation";
 
 const DISCORD_API = "https://discord.com/api/v10";
 
@@ -74,8 +75,9 @@ export async function sendChannelMessage(
     };
   }
 ): Promise<ChannelMessage> {
+  const id = assertDiscordId(channelId, "ID канала Discord");
   return discordRequest<ChannelMessage>(
-    `/channels/${channelId}/messages`,
+    `/channels/${id}/messages`,
     { method: "POST", body: JSON.stringify(payload) }
   );
 }
@@ -85,8 +87,10 @@ export async function addReaction(
   messageId: string,
   emoji: string
 ): Promise<void> {
+  const ch = assertDiscordId(channelId, "ID канала Discord");
+  const msg = assertDiscordId(messageId, "ID сообщения Discord");
   await discordRequest(
-    `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`,
+    `/channels/${ch}/messages/${msg}/reactions/${encodeURIComponent(emoji)}/@me`,
     { method: "PUT" }
   );
 }
@@ -97,8 +101,10 @@ export async function getGuildMemberRoles(
   userId: string
 ): Promise<string[] | null> {
   try {
+    const g = assertDiscordId(guildId, "ID сервера Discord");
+    const u = assertDiscordId(userId, "ID пользователя Discord");
     const member = await discordRequest<{ roles?: string[] }>(
-      `/guilds/${guildId}/members/${userId}`
+      `/guilds/${g}/members/${u}`
     );
     return Array.isArray(member?.roles) ? member.roles : null;
   } catch {

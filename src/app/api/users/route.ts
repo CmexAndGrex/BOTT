@@ -1,26 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { users } from "@/db/schema";
-import { jwtVerify } from "jose";
-import { getJwtSecret } from "@/lib/auth";
-
-const SECRET = getJwtSecret();
+import { requireRole } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
-  const token = req.cookies.get("auth_token")?.value;
-  if (!token) return NextResponse.json({ error: "Нет доступа" }, { status: 401 });
-
-  try {
-    const { payload } = await jwtVerify(token, SECRET);
-    if ((payload as any).role !== "admin") {
-      return NextResponse.json({ error: "Только для админов" }, { status: 403 });
-    }
-  } catch {
-    return NextResponse.json({ error: "Сессия устарела" }, { status: 403 });
-  }
+  // Список аккаунтов — только администратор
+  const auth = await requireRole(req, ["admin"]);
+  if (!auth.ok) return auth.response;
 
   try {
     // Получаем список, строго ИСКЛЮЧАЯ пароли
