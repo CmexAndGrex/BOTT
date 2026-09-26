@@ -44,11 +44,26 @@ function withExtension(base) {
 // и не открывает соединение, пока не выполнен первый запрос.
 process.env.DATABASE_URL ??= "postgresql://test:test@127.0.0.1:5432/test";
 
+/**
+ * Подпакеты Next.js без расширения.
+ *
+ * У пакета next нет поля `exports` (проверено на 16.3.5), поэтому Node не
+ * догадывается дописать «.js» к голому «next/server». Браузерная сборка такие
+ * импорты разрешает через webpack, а тесты исполняются напрямую — без этой
+ * подстановки нельзя было бы импортировать боевые роуты и middleware, то есть
+ * проверять реальные гварды RBAC и CSRF, а не их копию в тесте.
+ */
+const NEXT_SUBPACKAGE_RE = /^next\/(server|navigation|headers|cache|router)$/;
+
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier.startsWith("@/")) {
       const target = withExtension(path.join(root, "src", specifier.slice(2)));
       return { url: pathToFileURL(target).href, shortCircuit: true };
+    }
+    if (NEXT_SUBPACKAGE_RE.test(specifier)) {
+      const target = path.join(root, "node_modules", `${specifier}.js`);
+      if (isFile(target)) return { url: pathToFileURL(target).href, shortCircuit: true };
     }
     return nextResolve(specifier, context);
   },

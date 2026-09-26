@@ -20,6 +20,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { Section, Spinner, Toggle, fmtDateLong } from "@/components/ui";
+import MaintenancePanel from "@/components/maintenance-panel";
 
 const DAY_OPTIONS = [
   { n: 1, label: "Пн" },
@@ -879,6 +880,11 @@ export default function SettingsPage() {
           </div>
         </div>
       </Section>
+
+      {/* Обслуживание системы: резервные копии, синхронизация ШДС, очистка.
+          Отдельный компонент со своими запросами: действия здесь применяются
+          сразу, а не кнопкой «Сохранить всё». */}
+      <MaintenancePanel />
 
       {/* Статус автоматики */}
       <Section title="Автоматика" eyebrow="что происходит само">

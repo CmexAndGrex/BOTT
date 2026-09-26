@@ -59,6 +59,16 @@ services:
       CRON_SECRET: "${CRON_SECRET:?Укажите CRON_SECRET в файле .env}"
       JWT_SECRET: "${JWT_SECRET:?Укажите JWT_SECRET в файле .env}"
       TZ: "${TZ:-Europe/Moscow}"
+      # Резервные копии: путь внутри контейнера совпадает с точкой монтирования
+      # тома ниже. Значения из .env здесь перекрываются намеренно — если в .env
+      # остался локальный ./backups, дампы ушли бы внутрь контейнера и пропали
+      # при его пересоздании.
+      BACKUP_DIR: "/app/backups"
+      BACKUP_RETENTION_DAYS: "${BACKUP_RETENTION_DAYS:-7}"
+    volumes:
+      # Копии базы: том, а не bind-mount, чтобы права nextjs сохранялись и на
+      # хосте не требовалось создавать каталог вручную.
+      - backups:/app/backups
     depends_on:
       db:
         condition: service_healthy
@@ -72,3 +82,8 @@ services:
 
 volumes:
   pgdata:
+  # Резервные копии: живут вне контейнера, поэтому переживают пересборку образа
+  # и удаление контейнера. Каталог /app/backups создан в образе (см. Dockerfile),
+  # иначе Docker отдал бы точку монтирования root, и nextjs не смог бы писать
+  # дампы.
+  backups:

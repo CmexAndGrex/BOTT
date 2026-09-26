@@ -49,15 +49,30 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN addgroup -S nodejs && adduser -S nextjs -G nodejs
 
+# pg_dump для резервного копирования: без клиента приложение уходит на резервный
+# экспорт «таблица за таблицей», в котором не восстанавливаются внешние ключи и
+# индексы. Версия клиента совпадает с сервером (postgres:16-alpine в compose) —
+# pg_dump старшей версии к младшему серверу не подключится.
+RUN apk add --no-cache postgresql16-client
+
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/extension ./extension
+
+# Каталог резервных копий. Создаём его до смены пользователя и владельцем делаем
+# nextjs: при подключении пустого тома Docker копирует в него содержимое образа
+# вместе с правами, поэтому контейнер сможет писать дампы без root.
+RUN mkdir -p /app/backups && chown nextjs:nodejs /app/backups
 
 USER nextjs
 EXPOSE 3000
 
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
+# Копии и срок их хранения: путь внутри контейнера совпадает с точкой монтирования
+# тома в docker-compose, поэтому BACKUP_DIR переопределять не нужно.
+ENV BACKUP_DIR=/app/backups
+ENV BACKUP_RETENTION_DAYS=7
 
 CMD ["node", "server.js"]

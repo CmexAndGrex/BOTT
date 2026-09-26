@@ -2,13 +2,16 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { jwtVerify } from "jose";
 import { getJwtSecret } from "@/lib/auth";
+import { isCrossSiteRequest, isUnsafeMethod } from "@/lib/csrf";
 
 const SECRET = getJwtSecret();
 
 const protectedPaths = [
   "/settings", "/logs", "/users",
   "/api/actions", "/api/sync", "/api/logs",
-  "/api/extension.zip", "/api/users"
+  "/api/extension.zip", "/api/users",
+  // Обслуживание системы: резервные копии, синхронизация ШДС, очистка данных
+  "/api/admin/maintenance",
 ];
 
 /**
@@ -29,45 +32,21 @@ const cookieAuthApiPaths = [
   "/api/member/reports", "/api/admin/reports",
   // Шаблоны выкладок: создание, правка и архив — cookie-авторизация
   "/api/admin/armory",
+  // Обслуживание системы: кнопки бэкапа/синхронизации/очистки меняют состояние
+  // базы и диска, значит чужой сайт не должен иметь возможности их нажать
+  "/api/admin/maintenance",
 ];
-
-const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 /**
  * Отсекаем межсайтовые запросы к cookie-авторизованным роутам.
  *
- * Блокируем только при явных признаках чужого источника, чтобы не ломать
- * легитимные same-origin вызовы и не-браузерных клиентов:
- *   - `Sec-Fetch-Site: cross-site` — современные браузеры помечают так сами;
- *   - `Origin` с чужим хостом — подстраховка для старых браузеров.
+ * Правило живёт в src/lib/csrf.ts: им пользуются и middleware, и роуты
+ * обслуживания (они обязаны проверять источник сами, не полагаясь только на
+ * этот слой). Здесь оставлена тонкая обёртка, чтобы вызовы ниже читались как
+ * прежде.
  */
 function isCrossSite(req: NextRequest): boolean {
-  const fetchSite = req.headers.get("sec-fetch-site");
-  if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "same-site" && fetchSite !== "none") {
-    return true;
-  }
-
-  const origin = req.headers.get("origin");
-  if (origin) {
-    try {
-      const originHost = new URL(origin).host;
-      // Сравниваем с фактическим Host и с X-Forwarded-Host: за обратным прокси
-      // Host может быть переписан на внутренний, а реальный домен придёт в
-      // X-Forwarded-Host. Браузер эти заголовки подделать не может.
-      const candidates = [
-        (req.headers.get("host") || "").split(",")[0].trim(),
-        (req.headers.get("x-forwarded-host") || "").split(",")[0].trim(),
-        req.nextUrl.host,
-      ].filter(Boolean);
-
-      if (originHost && candidates.length > 0 && !candidates.includes(originHost)) {
-        return true;
-      }
-    } catch {
-      return true; // нечитаемый Origin — считаем подозрительным
-    }
-  }
-  return false;
+  return isCrossSiteRequest(req);
 }
 
 /** Nonce для CSP: inline-скрипты Next.js получают его автоматически */
@@ -153,7 +132,7 @@ export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // 1. CSRF: небезопасные методы к cookie-авторизованным API с чужого сайта
-  if (UNSAFE_METHODS.has(req.method) && cookieAuthApiPaths.some((p) => pathname.startsWith(p))) {
+  if (isUnsafeMethod(req.method) && cookieAuthApiPaths.some((p) => pathname.startsWith(p))) {
     if (isCrossSite(req)) {
       return NextResponse.json(
         { ok: false, error: "Запрос с чужого источника отклонён" },
@@ -293,7 +272,12 @@ export async function middleware(req: NextRequest) {
     const isAdminArea =
       pathname.startsWith("/settings") ||
       pathname.startsWith("/users") ||
-      pathname.startsWith("/api/extension.zip");
+      pathname.startsWith("/api/extension.zip") ||
+      // Обслуживание системы: ротация копий, очистка журнала и правка состава
+      // необратимы, поэтому командира сюда не пускаем ещё на входе. Роут
+      // дублирует проверку (requireMaintenance) — обход middleware не должен
+      // открывать доступ.
+      pathname.startsWith("/api/admin/maintenance");
 
     if (isAdminArea && role !== "admin") {
       if (isApi) {

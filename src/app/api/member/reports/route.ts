@@ -25,6 +25,7 @@ import {
 } from "@/lib/reports";
 import { publishReviewMessage, reportsChannelId } from "@/lib/review";
 import { LoginThrottle } from "@/lib/recruits";
+import { registerThrottle } from "@/lib/throttle-registry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,7 +39,7 @@ export const maxDuration = 30;
  * роутера, поэтому лимит по адресу заблокировал бы всё подразделение. Ошибки
  * валидации в лимит не идут — иначе опечатка в форме «съедала» бы попытку.
  */
-const throttle = new LoginThrottle(15, 10 * 60 * 1000);
+const throttle = registerThrottle(new LoginThrottle(15, 10 * 60 * 1000));
 
 type ReportBody = {
   type?: unknown;

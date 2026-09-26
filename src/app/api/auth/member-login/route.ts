@@ -12,13 +12,8 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { logs, members } from "@/db/schema";
 import { issueMemberSession, requestIp, setMemberCookie } from "@/lib/member-auth";
-import {
-  LoginThrottle,
-  normalizeCallsign,
-  PENDING_NOTICE,
-  DISMISSED_NOTICE,
-  hasProfileAccess,
-} from "@/lib/recruits";
+import { LoginThrottle, normalizeCallsign, PENDING_NOTICE, DISMISSED_NOTICE, hasProfileAccess } from "@/lib/recruits";
+import { registerThrottle } from "@/lib/throttle-registry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,7 +23,7 @@ export const dynamic = "force-dynamic";
  * блокирует остальных бойцов с того же адреса (в панели обратная ситуация —
  * там лимит по IP, поэтому здесь он уточнён).
  */
-const throttle = new LoginThrottle();
+const throttle = registerThrottle(new LoginThrottle());
 
 export async function POST(req: NextRequest) {
   const ip = requestIp(req);

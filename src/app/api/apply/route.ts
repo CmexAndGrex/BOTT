@@ -31,6 +31,7 @@ import {
   readApplication,
   validateApplication,
 } from "@/lib/recruits";
+import { registerThrottle } from "@/lib/throttle-registry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,7 +44,7 @@ export const dynamic = "force-dynamic";
  * возраст, пустой опыт) в лимит НЕ идут: иначе боец, трижды опечатавшийся в
  * форме, получал бы блокировку на полчаса вместо подсказки об ошибке.
  */
-const throttle = new LoginThrottle(5, 30 * 60 * 1000);
+const throttle = registerThrottle(new LoginThrottle(5, 30 * 60 * 1000));
 
 type ApplyBody = {
   callsign?: unknown;

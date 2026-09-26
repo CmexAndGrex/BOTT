@@ -22,7 +22,14 @@ export async function register() {
     const { startScheduler } = await import("@/lib/scheduler");
     startScheduler();
 
-    // 2. Подгружаем и запускаем нашего слушателя Discord
+    // 2. Обслуживание системы: синхронизация ШДС, резервные копии, очистка.
+    //    Только здесь — после проверки лидер-лока: при нескольких репликах
+    //    дампы и синхронизации пошли бы дублирующимися пачками, а ротация
+    //    начала бы удалять файлы соседнего инстанса как «лишние».
+    const { startMaintenanceScheduler } = await import("@/lib/sync-scheduler");
+    startMaintenanceScheduler();
+
+    // 3. Подгружаем и запускаем нашего слушателя Discord
     const { initBot } = await import("@/lib/bot");
     initBot();
   }
