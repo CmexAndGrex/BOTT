@@ -4,7 +4,12 @@
  * Модуль намеренно не зависит ни от Next.js, ни от БД: это позволяет
  * тестировать боевую логику напрямую (tests/*.test.ts) без стенда и моков.
  * Если правило нужно и роуту, и тесту — живёт здесь, а не копией в двух местах.
+ *
+ * Из recruits.ts берутся только предикаты ролей бойца: они уже описаны там
+ * (единый источник значений «officer»/«admin»), а второй их копии здесь быть
+ * не должно — иначе правило доступа разошлось бы в двух местах.
  */
+import { isMemberRole, isStaffRole, MEMBER_ROLES, type MemberRole } from "@/lib/recruits";
 
 /** Проверка, что идентификатор Discord — «снежинка» (только цифры) */
 export function isDiscordId(value: string | null | undefined): boolean {
@@ -26,6 +31,67 @@ export function assertDiscordId(value: string, label: string): string {
     );
   }
   return id;
+}
+
+/**
+ * Приводит Discord ID к каноническому виду («снежинке»).
+ *
+ * Копия профиля из Discord приходит с разделителями и упоминаниями
+ * («<@123 456>»), а в БД должен лежать чистый ID: по нему ищется боец при
+ * входе. null — значение не является ID: пустая строка означает «не задан»,
+ * а мусор вида «1» или «user#1234» писать нельзя — по такому значению потом
+ * ищется владелец учётной записи.
+ */
+export function normalizeDiscordSnowflake(value: unknown): string | null {
+  const digits = String(value ?? "").replace(/[^\d]/g, "");
+  return isDiscordId(digits) ? digits : null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Учётные записи панели: роли и приватность полей состава             */
+/* ------------------------------------------------------------------ */
+
+/** Роли учётной записи панели, дающие доступ к модерации и приватным полям */
+export const PANEL_STAFF_ROLES = ["admin", "officer"] as const;
+
+export type PanelStaffRole = (typeof PANEL_STAFF_ROLES)[number];
+
+/**
+ * Является ли роль ролью штаба панели.
+ * Роли приходят из БД обычным текстом, поэтому неизвестное значение
+ * («guest», мусор после ручной правки) должно трактоваться как «доступа нет».
+ */
+export function isPanelStaffRole(value: unknown): value is PanelStaffRole {
+  return typeof value === "string" && (PANEL_STAFF_ROLES as readonly string[]).includes(value);
+}
+
+/**
+ * Право видеть приватные поля состава (Discord ID).
+ *
+ * Правило одно для сервера и интерфейса: доступ есть у штаба панели
+ * (admin/officer) ИЛИ у штаба бойца — командир, вошедший в кабинет, а не в
+ * панель, тоже не должен терять рабочий инструмент. Все прочие видят табель
+ * без технических ID.
+ */
+export function canViewPrivateFields(panelRole: unknown, memberRole: unknown): boolean {
+  if (isPanelStaffRole(panelRole)) return true;
+  return isMemberRole(memberRole) && isStaffRole(memberRole);
+}
+
+/**
+ * Роль бойца при связке с аккаунтом панели.
+ *
+ * Уровень доступа только поднимается до роли аккаунта и никогда не понижается:
+ * связка означает «этот человек — командир или администратор», а решение о
+ * понижении принимается отдельно в модерации рапортов, где виден статус и
+ * история бойца. Иначе привязка аккаунта командира к бойцу-«member» молча
+ * отняла бы у него права штаба, которые он получил раньше.
+ */
+export function roleAfterLink(current: unknown, target: PanelStaffRole): MemberRole {
+  const desired = target;
+  if (!isMemberRole(current)) return desired;
+  const order = (role: MemberRole): number => MEMBER_ROLES.indexOf(role);
+  return order(current) > order(desired) ? current : desired;
 }
 
 /**
@@ -130,6 +196,91 @@ export function firstSafeOrigin(candidates: string[]): string | null {
   return null;
 }
 
+/* ------------------------------------------------------------------ */
+/* Origin глазами браузера                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Адрес прослушивания, а не адрес визита.
+ *
+ * В Dockerfile задано `HOSTNAME=0.0.0.0`, и Next подставляет это значение в
+ * req.url (см. route-module: initURL собирается из hostname, потому что
+ * trustHostHeader выключен). Редирект на такой адрес браузер отклоняет с
+ * ERR_ADDRESS_INVALID, поэтому «нулевой» хост заменяем на localhost.
+ */
+const LISTEN_ALL_HOST = "0.0.0.0";
+
+/** Хост без порта, в нижнем регистре */
+function hostName(host: string): string {
+  return host.split(":")[0].toLowerCase();
+}
+
+/** Локальный запуск: протокол там http, а не https */
+function isLocalHost(host: string): boolean {
+  const name = hostName(host);
+  return name === "localhost" || name === "127.0.0.1" || name === "[::1]";
+}
+
+/**
+ * Хост — IP-адрес. Панель без домена (docker-compose открывает порт 3000
+ * наружу) работает по http, поэтому для IP протокол не повышаем до https —
+ * иначе редирект увёл бы браузер на несуществующий TLS-порт.
+ */
+function isIpHost(host: string): boolean {
+  return /^\d{1,3}(\.\d{1,3}){3}(:\d{2,5})?$/.test(host) || /^\[[0-9a-f:]+\](:\d{2,5})?$/i.test(host);
+}
+
+/** Похож ли хост на адрес, который браузер реально откроет: домен, IP или localhost */
+function isUsableHost(host: string): boolean {
+  return /^[a-z0-9.-]+(:\d{2,5})?$/i.test(host) && !host.startsWith(".") && !host.includes("..");
+}
+
+/**
+ * Origin для перенаправления браузера.
+ *
+ * Почему не `new URL(path, req.url)`: req.url в Next собран из переменной
+ * окружения HOSTNAME, а в контейнере это 0.0.0.0 — браузер по такому адресу
+ * не пойдёт (ERR_ADDRESS_INVALID). Хост берём из заголовков запроса, как это
+ * уже делает discordRedirectUri. Значение X-Forwarded-* подставляет обратный
+ * прокси, но формат всё равно проверяем: иначе в Location можно было бы
+ * подставить чужой домен и увести человека на фишинговую копию панели.
+ *
+ * Возвращает origin без пути, например «https://atk-red.site».
+ */
+export function browserOrigin(headers: Headers, fallbackHost = "localhost:3000"): string {
+  const firstValue = (value: string | null): string => (value || "").split(",")[0].trim();
+
+  const candidates = [
+    firstValue(headers.get("x-forwarded-host")),
+    firstValue(headers.get("host")),
+    firstValue(fallbackHost),
+  ];
+
+  let host = "";
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    // Адрес прослушивания открыть нельзя — ведём на localhost, сохраняя порт
+    const reachable = candidate
+      .replace(/\s/g, "")
+      .replaceAll(LISTEN_ALL_HOST, "localhost")
+      .replace(/^\[::\](?=:|$)/, "localhost");
+    if (isUsableHost(reachable)) {
+      host = reachable;
+      break;
+    }
+  }
+  if (!host) host = fallbackHost;
+
+  const forwardedProto = firstValue(headers.get("x-forwarded-proto")).toLowerCase();
+  const proto =
+    forwardedProto === "https" || forwardedProto === "http"
+      ? forwardedProto
+      : isLocalHost(host) || isIpHost(host)
+        ? "http"
+        : "https";
+
+  return `${proto}://${host}`;
+}
 /**
  * Приводит ссылку к http(s); null — если она невалидна или небезопасна.
  *

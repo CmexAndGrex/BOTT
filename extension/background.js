@@ -1,6 +1,6 @@
 /*
- * RED ATK Cookie Sync v5 — сборка для магазина расширений (Opera Add-ons).
- * Данные сервера и ключ перехватываются с сайта через content.js.
+ * RED ATK Cookie Sync v5 — фоновый сервис.
+ * Передаёт сессию rs-red.com на боевую или локальную панель RED ATK.
  */
 
 const COOKIE_DOMAIN = "rs-red.com";
@@ -17,7 +17,7 @@ let pushInProgress = null;
 
 // Читаем настройки из внутренней памяти расширения
 async function getConfig() {
-  const data = await chrome.storage.local.get(['serverUrl', 'syncKey']);
+  const data = await chrome.storage.local.get(["serverUrl", "syncKey"]);
   return {
     serverUrl: String(data.serverUrl || "").replace(/\/+$/, ""),
     syncKey: String(data.syncKey || "").trim(),
@@ -92,7 +92,7 @@ async function wakeApi(serverUrl) {
 }
 
 async function doPush(reason, attempt = 0) {
-  const cfg = await getConfig(); // Ждем загрузки конфига из памяти
+  const cfg = await getConfig();
 
   if (!cfg.serverUrl || !cfg.syncKey) {
     const status = {
@@ -124,7 +124,7 @@ async function doPush(reason, attempt = 0) {
     const status = {
       at: Date.now(),
       ok: false,
-      error: "Браузер отозвал доступ к домену панели",
+      error: `Браузер отозвал доступ к домену панели (${cfg.serverUrl})`,
       reason,
       count,
     };
@@ -162,6 +162,7 @@ async function doPush(reason, attempt = 0) {
       transport: "direct",
     };
     await saveStatus(status);
+    console.log(`[Cookie Sync] Успешно передано ${count} cookies на ${cfg.serverUrl}`);
     return status;
   } catch (error) {
     const willRetry = attempt === 0;
@@ -176,6 +177,7 @@ async function doPush(reason, attempt = 0) {
       transport: "direct",
     };
     await saveStatus(status);
+    console.warn(`[Cookie Sync] Ошибка отправки на ${cfg.serverUrl}:`, message);
     return status;
   }
 }
@@ -186,7 +188,7 @@ async function push(reason, attempt = 0) {
   if (reason === "startup") {
     const { lastStartup } = await chrome.storage.local.get("lastStartup");
     if (lastStartup && Date.now() - lastStartup < 5 * 60 * 1000) {
-      return; 
+      return;
     }
     await chrome.storage.local.set({ lastStartup: Date.now() });
   }
@@ -239,9 +241,16 @@ chrome.cookies.onChanged.addListener((info) => {
 
 // Слушатель сообщений от popup.js и content.js
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  // Перехват данных с сайта
+  // Перехват данных с сайта (боевого или localhost)
   if (msg && msg.type === "SAVE_CONFIG") {
-    chrome.storage.local.set({ serverUrl: msg.serverUrl, syncKey: msg.syncKey });
+    chrome.storage.local.set(
+      { serverUrl: msg.serverUrl, syncKey: msg.syncKey },
+      () => {
+        console.log(`[Cookie Sync] Обновлен конфиг: целевой сервер ${msg.serverUrl}`);
+        // МГНОВЕННАЯ синхронизация при получении конфига
+        push("config_updated");
+      }
+    );
     return false;
   }
 
@@ -249,7 +258,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     push("manual").then(sendResponse);
     return true;
   }
-  
+
   if (msg && msg.type === "GET_STATUS") {
     (async () => {
       const cfg = await getConfig();

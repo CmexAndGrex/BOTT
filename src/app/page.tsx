@@ -21,6 +21,16 @@ type Member = { id: number; name: string; rankName: string | null; post: string 
 type LogRow = { id: number; createdAt: string; kind: string; title: string; detail: string; ok: boolean; error: string | null; };
 type Status = { bot: { configured: boolean; ok: boolean }; site: { ok: boolean }; schedulerAlive: boolean; nextRuns: { operation: string | null; weekly: string | null; snapshot: string | null }; };
 type Toast = { id: number; ok: boolean; title: string; detail?: string };
+type Me = { role?: string; member?: { role?: string } | null };
+
+/**
+ * Роли, которым видны приватные поля состава.
+ *
+ * Список локальный, а не импортированный из validation.ts: тот модуль тянет за
+ * собой recruits.ts, а страница — «use client». Правило то же самое и
+ * продублировано осознанно, чтобы публичный бандл не набирал серверные модули.
+ */
+const STAFF_ROLES = ["admin", "officer"];
 
 function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: { value: number }[]; label?: string }) {
   if (!active || !payload?.length) return null;
@@ -38,8 +48,19 @@ export default function DashboardPage() {
   const [logs, setLogs] = useState<LogRow[]>([]);
   const [status, setStatus] = useState<Status | null>(null);
   const [role, setRole] = useState("guest");
+  const [memberRole, setMemberRole] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+
+  /**
+   * Доступ к приватным полям состава (Discord ID).
+   *
+   * Учитываются обе сессии: штаб панели и командир, вошедший в кабинет. Тем же
+   * правилом руководствуется сервер (/api/members обнуляет поле), поэтому
+   * скрытие колонки — не единственный рубеж, а лишь отсутствие мусора в
+   * интерфейсе.
+   */
+  const canSeePrivate = STAFF_ROLES.includes(role) || STAFF_ROLES.includes(memberRole);
 
   const pushToast = useCallback((t: Omit<Toast, "id">) => {
     const id = Date.now() + Math.random();
@@ -55,7 +76,7 @@ export default function DashboardPage() {
         fetch("/api/status", { cache: "no-store" }).then((r) => r.json()),
         fetch("/api/me", { cache: "no-store" }).then((r) => r.json()),
       ]);
-      
+
       let logsData = { logs: [] };
       if (me.role && me.role !== "guest") {
         logsData = await fetch("/api/logs", { cache: "no-store" }).then(r => r.json()).catch(() => ({ logs: [] }));
@@ -64,7 +85,15 @@ export default function DashboardPage() {
       setStats(s);
       setMembers(m.members);
       setStatus(st);
-      setRole(me.role || "guest");
+      /**
+       * Роль панели и роль бойца — разные вещи, и смешивать их нельзя: быстрые
+       * действия и журнал требуют сессии панели (requireRole), а командир,
+       * вошедший только в кабинет, получил бы кнопки, которые отвечают отказом.
+       * Видеть приватные поля он при этом вправе — это отдельный флаг.
+       */
+      const meData = me as Me;
+      setRole(meData.role || "guest");
+      setMemberRole(meData.member?.role ?? "");
       setLogs((logsData.logs ?? []).slice(0, 6));
     } catch (e) {
       pushToast({ ok: false, title: "Не удалось загрузить данные" });
@@ -203,13 +232,20 @@ export default function DashboardPage() {
               <div className="flex flex-col items-center gap-2 py-10 text-center"><CheckCircle2 size={20} style={{ color: "var(--green)" }} /><p className="text-sm" style={{ color: "var(--muted)" }}>{members ? "Должников нет — все держат норму" : "Загрузка…"}</p></div>
             ) : (
               <table className="tbl">
-                <thead><tr><th>Боец</th><th>Онлайн</th><th>Discord</th></tr></thead>
+                <thead><tr>
+                  <th>Позывной</th>
+                  <th>Онлайн</th>
+                  {/* Discord — служебная колонка штаба: бойцам технические ID не видны */}
+                  {canSeePrivate && <th>Discord</th>}
+                </tr></thead>
                 <tbody>
                   {debtors.slice(0, 8).map((m) => (
                     <tr key={m.id}>
                       <td><div className="flex items-center gap-2.5"><Avatar name={m.name} /><div><div className="font-semibold leading-tight">{m.name}</div><div className="text-[11px]" style={{ color: "var(--dim)" }}>{[m.rankName, m.post].filter(Boolean).join(" · ") || "—"}</div></div></div></td>
                       <td><span className="mono font-bold" style={{ color: Math.floor(m.hours) === 0 ? "var(--red)" : "var(--amber)" }}>{m.hours.toFixed(1)} ч</span></td>
-                      <td>{m.discordId ? <span className="badge badge-green">привязан</span> : <span className="badge badge-red">нет ID</span>}</td>
+                      {canSeePrivate && (
+                        <td>{m.discordId ? <span className="badge badge-green">привязан</span> : <span className="badge badge-red">нет ID</span>}</td>
+                      )}
                     </tr>
                   ))}
                 </tbody>

@@ -94,7 +94,11 @@ export function parseRoleCommand(line: string): RoleOp[] {
     const segment = raw.trim();
     if (!segment) continue;
 
-    const actionMatch = segment.match(/^(Выдать|Снять)\s+(?!роль\s+)(.*)$/i);
+    // «роль» после действия — служебное слово, а не имя роли:
+    // «Выдать роль Игроман» должно выдать «Игроман». Раньше здесь стоял
+    // отрицательный lookahead, из-за которого такая строка не распознавалась
+    // как действие вовсе и в имя роли попадало «Выдать роль Игроман».
+    const actionMatch = segment.match(/^(Выдать|Снять)\s+(?:роль\s+)?(.*)$/i);
     let opName: string;
     if (actionMatch) {
       current = actionMatch[1].toLowerCase() === "выдать" ? "give" : "remove";
@@ -287,7 +291,11 @@ export function parseRoleRequest(content: string): RoleRequest | null {
   }
   if (commandIdx < 0) return null;
 
-  const commandLine = lines.slice(commandIdx).join(" | ");
+  // Строки команды склеиваем через запятую, а не через « | »: parseRoleCommand
+  // разбирает строку именно по запятым, и при « | » вторая строка («| Снять X»)
+  // не распознавалась как действие — она наследовала «Выдать» и превращалась
+  // в несуществующую роль с именем «| Снять X».
+  const commandLine = lines.slice(commandIdx).join(", ");
 
   return {
     recipientId: recipientMatch[1],

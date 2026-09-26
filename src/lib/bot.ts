@@ -16,11 +16,18 @@ import {
   Client,
   GatewayIntentBits,
   Partials,
+} from "discord.js";
+// Типы импортируются отдельно: в discord.js это только типы, и при обычном
+// импорте среда исполнения (node --experimental-strip-types в тестах) ищет
+// их как реальные экспорты и падает. `import type` стирается при сборке.
+import type {
   Message,
   MessageReaction,
   PartialMessageReaction,
   User,
   PartialUser,
+  ButtonInteraction,
+  Interaction,
 } from "discord.js";
 import { eq, and, isNotNull } from "drizzle-orm";
 import { db } from "@/db";
@@ -29,6 +36,13 @@ import { getSettings } from "@/lib/settings";
 import { applyShdsRequest, parseRequestText, SHDS_ACTIONS, type ParsedRequest } from "@/lib/gsheets";
 import { applyRoleCommand, parseRoleCommand, parseRoleRequest, COMMON_ROLE_IDS } from "@/lib/roles";
 import { moveToReserve, returnFromReserve } from "@/lib/reserve";
+import { parseReviewCustomId, type ReviewAction, type ReviewScope } from "@/lib/reports";
+import {
+  approveRecruitApplication,
+  approveServiceReport,
+  rejectRecruitApplication,
+  rejectServiceReport,
+} from "@/lib/review";
 
 declare global {
   var __redopsBotClient: Client | undefined;
@@ -375,6 +389,108 @@ async function handleRolesReaction({
 }
 
 /* ------------------------------------------------------------------ */
+/* Кнопки решения по заявкам и рапортам                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Проверка прав на решение: модератор заявок, Командирский состав или
+ * администратор сервера.
+ *
+ * Проверяются роли именно на сервере (кэш участника), а не «кто угодно с
+ * доступом к каналу»: решение по заявке выдаёт доступ в личный кабинет, и
+ * право на это должно быть явным. Командирский состав допущен наравне с
+ * модератором — приказы по составу отдают и командиры.
+ */
+function canReview(
+  member: { roles: { cache: { has(id: string): boolean } } } | null,
+  config: BotConfig
+): boolean {
+  if (!member) return false;
+  const roles = member.roles.cache;
+  return Boolean(
+    (config.moderatorRoleId && roles.has(config.moderatorRoleId)) ||
+      (config.commandRoleId && roles.has(config.commandRoleId))
+  );
+}
+
+/** Текст ответа модератору (ephemeral) после решения по кнопке */
+function decisionReply(action: ReviewAction, message: string, ok: boolean): string {
+  const head =
+    action === "approve" ? "✅ Решение: **одобрено**" : "🛑 Решение: **отклонено**";
+  return ok ? `${head}\n${message}` : `⚠️ ${message}`;
+}
+
+/**
+ * Обработчик нажатий на кнопки «Одобрить / Отклонить».
+ *
+ * Логика решений живёт в src/lib/review.ts — общая с панелью модерации, чтобы
+ * кнопка в Discord и кнопка на сайте делали ровно одно и то же (зачисление +
+ * ЛС + роль; рапорт + ШДС + отпуск/запас).
+ */
+async function handleReviewButton(
+  interaction: ButtonInteraction,
+  parsed: { scope: ReviewScope; action: ReviewAction; id: number },
+  config: BotConfig
+): Promise<void> {
+  const guild = interaction.guild;
+  if (!guild) {
+    await interaction.reply({ content: "Решение доступно только на сервере", ephemeral: true });
+    return;
+  }
+
+  const reviewerMember = await guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
+
+  if (!canReview(reviewerMember, config)) {
+    await interaction.reply({
+      content:
+        "🚫 Недостаточно прав: решение по заявкам принимают модератор заявок и Командирский состав.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Позывной офицера для Embed и журнала: имя участника на сервере, иначе
+  // глобальное имя Discord
+  const reviewer =
+    reviewerMember?.displayName || interaction.user.globalName || interaction.user.username || "Офицер";
+
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    const result =
+      parsed.scope === "recruit"
+        ? parsed.action === "approve"
+          ? await approveRecruitApplication(parsed.id, reviewer)
+          : await rejectRecruitApplication(parsed.id, reviewer)
+        : parsed.action === "approve"
+          ? await approveServiceReport(parsed.id, reviewer)
+          : await rejectServiceReport(parsed.id, reviewer);
+
+    // Дополнение для рекрута: если ЛС закрыто, пароль нужно продиктовать —
+    // иначе боец не сможет войти, а офицер об этом не узнает
+    const dmNote =
+      parsed.scope === "recruit" && parsed.action === "approve" && result.ok
+        ? "dmDelivered" in result && result.dmDelivered === false && "tempPassword" in result
+          ? `\n⚠️ ЛС не доставлено (закрыты личные сообщения). Временный пароль: \`${result.tempPassword}\``
+          : ""
+        : "";
+
+    await interaction.editReply({
+      content: `${decisionReply(parsed.action, result.message, result.ok)}${dmNote}`,
+    });
+  } catch (e) {
+    console.error("[bot] Ошибка решения по кнопке:", e);
+    await interaction
+      .editReply({
+        content: `⚠️ Сбой обработки решения: ${e instanceof Error ? e.message : String(e)}`,
+      })
+      .catch(() => {});
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Фоновая проверка отпусков (раз в минуту)                             */
 /* ------------------------------------------------------------------ */
 
@@ -390,8 +506,21 @@ async function checkVacations(client: Client, config?: BotConfig) {
     if (activeLeaves.length === 0) return;
 
     const nowMs = Date.now();
-    const guild = client.guilds.cache.first();
-    if (!guild) return;
+    // Сервер выбираем детерминированно: раньше брался «первый попавшийся»
+    // (guilds.cache.first()), и если бота добавят на второй сервер, авто-снятие
+    // отпусков и напоминания могли уйти не туда. Приоритет — канал отпусков
+    // из настроек; иначе, при одном сервере, работаем как раньше.
+    const guild =
+      (cfg.vacationChannelId
+        ? client.guilds.cache.find((g) => g.channels.cache.has(cfg.vacationChannelId))
+        : undefined) ?? (client.guilds.cache.size === 1 ? client.guilds.cache.first() : undefined);
+    if (!guild) {
+      console.warn(
+        "[bot] Проверка отпусков: не удалось однозначно определить сервер " +
+          "(бот на нескольких серверах, а канал отпусков не найден) — пропуск тика"
+      );
+      return;
+    }
     const leaveChannel = cfg.vacationChannelId
       ? guild.channels.cache.get(cfg.vacationChannelId)
       : undefined;
@@ -467,7 +596,10 @@ export function initBot() {
 
   globalThis.__redopsBotClient = client;
 
-  client.once("ready", () => {
+  // В discord.js v14 событие переименовано: старое `ready` ещё работает, но
+  // выдаёт DeprecationWarning и будет удалено в v15 («will only emit under that
+  // name in v15»). Слушаем новое имя, чтобы не сломаться при обновлении.
+  client.once("clientReady", () => {
     console.log(`🤖 Бот-слушатель АТК (ШДС/отпуск) запущен как ${client.user?.username || "bot"} (${logRef("bot", client.user?.id)})`);
     void (async () => {
       try {
@@ -537,6 +669,32 @@ export function initBot() {
         );
     } catch (e) {
       console.error("[bot] Ошибка обработки сообщения:", e);
+    }
+  });
+
+  /* -------------------------------------------------------------- */
+  /* 1.5. Кнопки решения по заявкам и рапортам                       */
+  /* -------------------------------------------------------------- */
+  client.on("interactionCreate", async (interaction: Interaction) => {
+    try {
+      if (!interaction.isButton()) return;
+
+      // Чужие компоненты (другие боты, старые сообщения) молча игнорируем:
+      // parseReviewCustomId вернёт null, и мы не помешаем другим обработчикам
+      const parsed = parseReviewCustomId(interaction.customId);
+      if (!parsed) return;
+
+      const config = await loadBotConfig();
+      await handleReviewButton(interaction, parsed, config);
+    } catch (e) {
+      console.error("[bot] Ошибка обработки нажатия кнопки:", e);
+      // Пользователь не должен остаться без ответа: Discord показывает
+      // «Приложение не отвечает», если взаимодействие не подтвердить
+      if (interaction.isButton() && !interaction.replied && !interaction.deferred) {
+        await interaction
+          .reply({ content: "⚠️ Сбой обработки решения. Повторите или решите в панели.", ephemeral: true })
+          .catch(() => {});
+      }
     }
   });
 

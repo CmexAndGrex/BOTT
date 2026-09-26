@@ -71,8 +71,12 @@ export function parseRequestText(text: string): ParsedRequest | null {
     if (/возврат|вернуться|вернуть/i.test(low) && /запас/.test(low)) shdsAction = SHDS_ACTIONS.RESERVE_BACK;
     else if (low.includes("запас")) shdsAction = SHDS_ACTIONS.RESERVE_GO;
     else if (low.includes("добавление")) shdsAction = SHDS_ACTIONS.ADD;
-    else if (low.includes("звание")) shdsAction = SHDS_ACTIONS.RANK;
-    else if (low.includes("должность")) shdsAction = SHDS_ACTIONS.POST;
+    // Стеммы, а не полные слова: в заявках эти операции пишут в родительном
+    // падеже («Изменение зван-ия», «Изменение должност-и»), поэтому поиск
+    // подстрок «звание»/«должность» не находил совпадения и заявка молча
+    // оставалась без действия (shdsAction = null).
+    else if (low.includes("звани")) shdsAction = SHDS_ACTIONS.RANK;
+    else if (low.includes("должност")) shdsAction = SHDS_ACTIONS.POST;
     else if (low.includes("экзамен")) shdsAction = SHDS_ACTIONS.EXAM;
     else if (low.includes("убрать")) shdsAction = SHDS_ACTIONS.REMOVE;
   }
@@ -380,6 +384,9 @@ async function scenarioAdd(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayout
   applyStdFormat(steamCell);
   applyStdFormat(discordCell);
 
+  // Зелёная заливка имени (колонка C) — признак занятой строки
+  nameCell.backgroundColor = { ...EXAM_GREEN };
+
   await sheet.saveUpdatedCells();
   return `Боец ${req.userName} добавлен в строку ${row} (лист «${sheet.title}»)`;
 }
@@ -464,6 +471,88 @@ async function scenarioPost(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayou
   return `${req.userName} переведён на «${req.должность}»: строка ${srcRow} → ${destRow} (лист «${sheet.title}»)`;
 }
 
+/**
+ * Нормализация названия экзамена для сопоставления.
+ * Приводим регистр, неразрывные пробелы и «ё» — иначе «Миномётное дело» из
+ * формы не найдёт столбец «Минометное дело» в таблице.
+ */
+function normalizeExamTitle(value: string): string {
+  return String(value ?? "")
+    .replace(/\u00A0/g, " ") // неразрывный пробел из Google Таблиц
+    .replace(/[«»"'']/g, "") // кавычки-ёлочки и лапки на значимость не влияют
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/\s+/g, " ")
+    .replace(/\s*,\s*/g, ",") // «а , б» → «а,б»
+    .trim();
+}
+
+export type ExamMatchResult = {
+  /** Индексы столбцов шапки (0-based), которые нужно закрасить */
+  columns: number[];
+  /** Части ответа, которые не удалось сопоставить ни с одним столбцом */
+  unmatched: string[];
+};
+
+/**
+ * Сопоставление экзаменов из заявки со столбцами шапки листа ШДС.
+ *
+ * Почему не простое сравнение строк: Google Формы склеивают выбранные флажки
+ * через запятую, а название экзамена, которое САМО содержит запятую
+ * («Снаряжение, обслуживание техники»), при разборе заявки разъезжается на два
+ * куска. Сравнение кусков с заголовком по отдельности столбец не находило, и
+ * заявка падала с ошибкой «Столбцы экзаменов не найдены».
+ *
+ * Поэтому заголовок каждого столбца тоже делится по запятой, и столбец
+ * считается найденным, если ВСЕ его части присутствуют среди кусков ответа.
+ * Столбцы из нескольких частей проверяются первыми: иначе одиночный кусок
+ * «Снаряжение» успел бы «съесть» себя раньше, чем составное название получит
+ * свою вторую часть.
+ */
+export function matchExamColumns(
+  headers: string[],
+  requested: string[]
+): ExamMatchResult {
+  const tokens = requested.map((raw) => ({ raw, norm: normalizeExamTitle(raw) }));
+  const used = new Array(tokens.length).fill(false);
+  const columns: number[] = [];
+
+  const candidates = headers
+    .map((title, index) => ({
+      index,
+      parts: normalizeExamTitle(title).split(",").filter(Boolean),
+    }))
+    .filter((h) => h.parts.length > 0)
+    // Сначала заголовки из нескольких частей — они самые «жадные»
+    .sort((a, b) => b.parts.length - a.parts.length);
+
+  for (const header of candidates) {
+    const picked: number[] = [];
+    let matched = true;
+    for (const part of header.parts) {
+      const at = tokens.findIndex(
+        (t, i) => !used[i] && !picked.includes(i) && t.norm === part
+      );
+      if (at === -1) {
+        matched = false;
+        break;
+      }
+      picked.push(at);
+    }
+    if (!matched) continue;
+    for (const i of picked) used[i] = true;
+    columns.push(header.index);
+  }
+
+  // Порядок столбцов — как в шапке, а не как отсортировали кандидатов
+  columns.sort((a, b) => a - b);
+
+  return {
+    columns,
+    unmatched: tokens.filter((_, i) => !used[i]).map((t) => t.raw),
+  };
+}
+
 /** Сценарий Г: «Получение подтверждения об экзаменации» */
 async function scenarioExam(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayout, req: ParsedRequest) {
   if (!req.exams.length) throw new Error("В заявке не указаны сданные экзамены");
@@ -472,13 +561,13 @@ async function scenarioExam(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayou
   const headerRow = layout.examHeaderRow;
   const maxCol = Math.min(sheet.columnCount, 40);
 
-  // Столбцы экзаменов по точному совпадению названия
-  const examCols: number[] = [];
+  const headers: string[] = [];
   for (let c = 0; c < maxCol; c++) {
-    const v = String(sheet.getCell(headerRow - 1, c).value ?? "").trim().toLowerCase();
-    if (!v) continue;
-    if (req.exams.some((e) => e.toLowerCase() === v)) examCols.push(c);
+    headers.push(String(sheet.getCell(headerRow - 1, c).value ?? "").trim());
   }
+
+  const { columns: examCols, unmatched } = matchExamColumns(headers, req.exams);
+
   if (!examCols.length) {
     throw new Error(
       `Столбцы экзаменов не найдены в строке ${headerRow}: ${req.exams.join(", ")}`
@@ -500,7 +589,13 @@ async function scenarioExam(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayou
   const titles = examCols.map((c) => String(sheet.getCell(headerRow - 1, c).value ?? "").trim());
   const gradeStr = req.grade && !isKmbt ? `, оценка «${req.grade}»` : "";
   const examinerStr = req.examiner ? `, экзаменатор: ${req.examiner}` : "";
-  return `Отмечены экзамены (${titles.join(", ")}) для ${req.userName} (строка ${row})${gradeStr}${examinerStr}`;
+  // Часть названий могла не найтись (опечатка в форме или переименованный
+  // столбец) — раньше об этом молчали, и модератор считал заявку полностью
+  // выполненной. Теперь несовпавшие перечисляются явным предупреждением.
+  const missedStr = unmatched.length
+    ? `. ВНИМАНИЕ: не найдены в таблице — ${unmatched.join(", ")}`
+    : "";
+  return `Отмечены экзамены (${titles.join(", ")}) для ${req.userName} (строка ${row})${gradeStr}${examinerStr}${missedStr}`;
 }
 
 /** Сценарий Д: «Убрать из таблицы» */

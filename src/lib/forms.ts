@@ -35,8 +35,9 @@ export type FormResponse = {
   reason: string;
 };
 
-/** Названия столбцов формы (регистр не важен) */
-const COLUMN_ALIASES: Record<string, string[]> = {
+/** Названия столбцов формы (регистр не важен).
+ *  Таблица сопоставления: заголовок листа ответов → поле заявки. */
+export const COLUMN_ALIASES: Record<string, string[]> = {
   timestamp: ["отметка времени", "timestamp", "время"],
   userName: ["имя пользователя", "имя", "никнейм", "ник"],
   discordId: ["discord id", "discord_id", "дискорд id", "id дискорда"],
@@ -55,8 +56,10 @@ const COLUMN_ALIASES: Record<string, string[]> = {
   reason: ["причина", "комментарий", "доп. информация"],
 };
 
-/** Построение карты «поле → индекс столбца» по заголовкам листа */
-function mapColumns(sheet: GoogleSpreadsheetWorksheet): Record<string, number> {
+/** Построение карты «поле → индекс столбца» по заголовкам листа.
+ *  По этой карте видно, какие заголовки формы бот распознал, а какие нет
+ *  (без этого непонятно, почему заявка не публикуется). */
+export function mapColumns(sheet: GoogleSpreadsheetWorksheet): Record<string, number> {
   const map: Record<string, number> = {};
   const maxCol = Math.min(sheet.columnCount, 30);
   for (let c = 0; c < maxCol; c++) {

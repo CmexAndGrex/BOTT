@@ -1,6 +1,17 @@
 import { db } from "@/db";
 import { settings } from "@/db/schema";
 
+/**
+ * Дополнительные настройки каналов Discord для заявок и рапортов.
+ *
+ * Дефолт — пусто: подставлять чужие ID нельзя (раньше в проекте были «зашитые»
+ * ID конкретного сервера, и бот молча работал с чужой ролью). Пока настройка не
+ * задана, публикация идёт в канал ШДС (shds_channel_id), а решения принимаются
+ * в панели модерации — заявка не теряется.
+ */
+export const RECRUIT_CHANNEL_SETTING = "recruits_channel_id";
+export const REPORTS_CHANNEL_SETTING = "reports_channel_id";
+
 export const DEFAULT_SETTINGS: Record<string, string> = {
   // Discord
   discord_token: "",
@@ -9,6 +20,10 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   // Каналы Discord-бота (ШДС / отпуск / запросы ролей)
   shds_channel_id: "",
   vacation_channel_id: "",
+  // Каналы новых модулей: заявки на вступление и рапорты действующего состава.
+  // Пусто = публикуется в канал ШДС (см. recruitsChannelId/reportsChannelId).
+  recruits_channel_id: "",
+  reports_channel_id: "",
   // ВАЖНО: ID ролей обязательны и задаются администратором в панели.
   // Раньше здесь стояли «зашитые» ID конкретного сервера, из-за чего при
   // пустой настройке бот молча работал с чужой/устаревшей ролью.

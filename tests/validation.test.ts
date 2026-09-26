@@ -14,6 +14,11 @@ import {
   assertDiscordId,
   firstSafeOrigin,
   normalizeUrl,
+  normalizeDiscordSnowflake,
+  isPanelStaffRole,
+  canViewPrivateFields,
+  roleAfterLink,
+  browserOrigin,
 } from "../src/lib/validation.ts";
 
 describe("L4 — nextWarningCount (инкремент вместо перезаписи)", () => {
@@ -111,6 +116,76 @@ describe("L5 — проверка ID Discord (защита от подмены �
     assert.equal(isDiscordId(undefined), false);
   });
 
+describe("normalizeDiscordSnowflake — ID учётной записи панели", () => {
+  test("чистый ID сохраняется как есть", () => {
+    assert.equal(normalizeDiscordSnowflake("1085141850966458519"), "1085141850966458519");
+  });
+
+  test("упоминание и разделители приводятся к цифрам", () => {
+    // Профиль Discord приходит и в виде «<@123>» — в БД должен лежать чистый ID
+    assert.equal(normalizeDiscordSnowflake("<@1085141850966458519>"), "1085141850966458519");
+    assert.equal(normalizeDiscordSnowflake("108514185096 6458519"), "1085141850966458519");
+  });
+
+  test("мусор и пустое значение не превращаются в ID", () => {
+    // Регрессия: пустая строка не должна стать ID — иначе вход по Discord
+    // находил бы «владельца» по пустому значению
+    assert.equal(normalizeDiscordSnowflake(""), null);
+    assert.equal(normalizeDiscordSnowflake("   "), null);
+    assert.equal(normalizeDiscordSnowflake("user#1234"), null);
+    assert.equal(normalizeDiscordSnowflake("1"), null);
+    assert.equal(normalizeDiscordSnowflake(null), null);
+    assert.equal(normalizeDiscordSnowflake(undefined), null);
+  });
+});
+
+describe("Роли штаба и приватность полей состава", () => {
+  test("staff-роли панели распознаются, прочие — нет", () => {
+    assert.equal(isPanelStaffRole("admin"), true);
+    assert.equal(isPanelStaffRole("officer"), true);
+    assert.equal(isPanelStaffRole("guest"), false);
+    assert.equal(isPanelStaffRole("recruit"), false);
+    assert.equal(isPanelStaffRole(undefined), false);
+  });
+
+  test("штаб панели видит приватные поля", () => {
+    assert.equal(canViewPrivateFields("admin", undefined), true);
+    assert.equal(canViewPrivateFields("officer", ""), true);
+  });
+
+  test("командир из кабинета видит приватные поля и без сессии панели", () => {
+    assert.equal(canViewPrivateFields("guest", "officer"), true);
+    assert.equal(canViewPrivateFields(undefined, "admin"), true);
+  });
+
+  test("боец и гость приватных полей не видят", () => {
+    // Без этой проверки Discord ID уехали бы в API всем, кто открыл табель
+    assert.equal(canViewPrivateFields("guest", "member"), false);
+    assert.equal(canViewPrivateFields("guest", "recruit"), false);
+    assert.equal(canViewPrivateFields(undefined, undefined), false);
+    assert.equal(canViewPrivateFields("", ""), false);
+  });
+});
+
+describe("roleAfterLink — уровень доступа бойца при связке с аккаунтом панели", () => {
+  test("бойцу без прав выдаётся роль аккаунта", () => {
+    assert.equal(roleAfterLink("recruit", "officer"), "officer");
+    assert.equal(roleAfterLink("member", "admin"), "admin");
+  });
+
+  test("уже имеющиеся права не понижаются", () => {
+    // Регрессия: связка не должна молча отнимать права штаба
+    assert.equal(roleAfterLink("admin", "officer"), "admin");
+    assert.equal(roleAfterLink("officer", "officer"), "officer");
+  });
+
+  test("мусор в поле роли трактуется как «прав нет»", () => {
+    assert.equal(roleAfterLink(null, "officer"), "officer");
+    assert.equal(roleAfterLink("полковник", "admin"), "admin");
+    assert.equal(roleAfterLink(undefined, "officer"), "officer");
+  });
+});
+
 describe("L6 — firstSafeOrigin (безопасный адрес панели)", () => {
   test("нормальный домен принимается", () => {
     assert.equal(firstSafeOrigin(["https://panel.example.ru"]), "https://panel.example.ru");
@@ -154,6 +229,86 @@ describe("L6 — firstSafeOrigin (безопасный адрес панели)"
   test("пустой список даёт null", () => {
     assert.equal(firstSafeOrigin([]), null);
     assert.equal(firstSafeOrigin(["", ""]), null);
+  });
+});
+
+describe("browserOrigin — адрес для редиректа (а не адрес прослушивания)", () => {
+  /** Заголовки запроса: удобно задавать только то, что нужно в кейсе */
+  const headers = (values: Record<string, string> = {}): Headers => new Headers(values);
+
+  test("хост берётся из Host, а не из req.url (регрессия ERR_ADDRESS_INVALID)", () => {
+    // В Dockerfile задано HOSTNAME=0.0.0.0, и Next собирает req.url именно из
+    // него — редирект на такой адрес браузер отклоняет.
+    assert.equal(browserOrigin(headers({ host: "localhost:3000" })), "http://localhost:3000");
+  });
+
+  test("0.0.0.0 из HOSTNAME заменяется на localhost", () => {
+    assert.equal(browserOrigin(headers({ host: "0.0.0.0:3000" })), "http://localhost:3000");
+  });
+
+  test("адрес прослушивания без порта тоже приводится к localhost", () => {
+    assert.equal(browserOrigin(headers({ host: "0.0.0.0" })), "http://localhost");
+  });
+
+  test("реальный домен получает https по умолчанию", () => {
+    assert.equal(browserOrigin(headers({ host: "atk-red.site" })), "https://atk-red.site");
+  });
+
+  test("X-Forwarded-Host имеет приоритет над Host (адрес за прокси)", () => {
+    assert.equal(
+      browserOrigin(headers({ "x-forwarded-host": "atk-red.site", host: "0.0.0.0:3000" })),
+      "https://atk-red.site"
+    );
+  });
+
+  test("X-Forwarded-Proto определяет схему", () => {
+    assert.equal(
+      browserOrigin(headers({ host: "panel.example.ru", "x-forwarded-proto": "http" })),
+      "http://panel.example.ru"
+    );
+  });
+
+  test("X-Forwarded-Proto=https сохраняется для localhost (туннель разработки)", () => {
+    assert.equal(
+      browserOrigin(headers({ host: "localhost:3000", "x-forwarded-proto": "https" })),
+      "https://localhost:3000"
+    );
+  });
+
+  test("токен 0.0.0.0 убирается и внутри X-Forwarded-Host", () => {
+    // Прокси, не переписавший адрес приложения, не должен ломать редирект
+    assert.equal(browserOrigin(headers({ "x-forwarded-host": "0.0.0.0:3000" })), "http://localhost:3000");
+  });
+
+  test("первый хост из списка X-Forwarded-Host (цепочка прокси)", () => {
+    assert.equal(
+      browserOrigin(headers({ "x-forwarded-host": "atk-red.site, internal:3000" })),
+      "https://atk-red.site"
+    );
+  });
+
+  test("мусорный Host отклоняется, берётся следующий кандидат", () => {
+    assert.equal(
+      browserOrigin(headers({ "x-forwarded-host": "not a host!!", host: "atk-red.site" })),
+      "https://atk-red.site"
+    );
+  });
+
+  test("IP панели без домена остаётся на http, а не уходит на https", () => {
+    // docker-compose открывает порт 3000 наружу; TLS там нет, https сломал бы вход
+    assert.equal(browserOrigin(headers({ host: "203.0.113.7:3000" })), "http://203.0.113.7:3000");
+  });
+
+  test("пустые заголовки дают запасной localhost:3000", () => {
+    assert.equal(browserOrigin(headers()), "http://localhost:3000");
+  });
+
+  test("origin содержит только схему и хост — без пути", () => {
+    // «//» есть в самой схеме, поэтому путь ищем после «://»
+    const origin = browserOrigin(headers({ host: "atk-red.site" }));
+    assert.ok(!origin.split("://")[1].includes("/"), "лишний путь в origin");
+    // Значение пригодно как база для new URL — так его и использует роут
+    assert.equal(new URL("/login", origin).href, "https://atk-red.site/login");
   });
 });
 

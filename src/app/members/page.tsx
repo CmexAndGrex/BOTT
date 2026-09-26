@@ -1,5 +1,17 @@
 "use client";
 
+/**
+ * Состав подразделения (табель).
+ *
+ * Что видит личный состав: позывной, звание с должностью, онлайн, статус. Что
+ * видит штаб дополнительно: колонку Discord ID с полем для привязки (по нему
+ * бот упоминает человека в Discord) и сводку «без Discord ID».
+ *
+ * Технические идентификаторы не показываются бойцам намеренно: они не нужны для
+ * несения службы, а утечка ID позволяет увести человека в личку или упомянуть
+ * его в чужом канале. Права проверяются и на сервере (/api/members обнуляет
+ * поле для не-штаба), поэтому скрытие в разметке — не единственный рубеж.
+ */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -10,6 +22,9 @@ import { Avatar, Section, Spinner, Toggle, fmtDate } from "@/components/ui";
 
 type Member = { id: number; name: string; handle: string | null; rankName: string | null; post: string | null; hours: number; vacation: boolean; discordId: string | null; active: boolean; updatedAt: string; };
 type Notice = { ok: boolean; text: string } | null;
+
+/** Роли, которым доступны приватные поля состава (панель или кабинет) */
+const STAFF_ROLES = ["admin", "officer"];
 
 function DiscordIdInput({ value, onSave }: { value: string; onSave: (v: string) => Promise<void>; }) {
   const [local, setLocal] = useState(value);
@@ -43,17 +58,36 @@ export default function MembersPage() {
   const [busyIds, setBusyIds] = useState<Set<number>>(new Set());
   const [syncing, setSyncing] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
-  const [role, setRole] = useState("guest"); // <-- Добавили стейт роли
+  /** Роль сессии панели: guest / officer / admin */
+  const [role, setRole] = useState("guest");
+  /** Роль бойца из кабинета: пусто, если кабинет не открыт */
+  const [memberRole, setMemberRole] = useState("");
+  /**
+   * Приватные поля состава (Discord ID) видит штаб панели ИЛИ штаб кабинета:
+   * командир, вошедший в личный кабинет, тоже ведёт учёт онлайна.
+   */
+  const canSeePrivate = STAFF_ROLES.includes(role) || STAFF_ROLES.includes(memberRole);
+  /**
+   * Правки состава идут через сессию панели (PATCH /api/members/[id] требует
+   * requireAuth): бойцу-командиру поле ввода не показываем, иначе он получил бы
+   * интерфейс, который отвечает «Нет доступа».
+   */
+  const canEditPanel = STAFF_ROLES.includes(role);
 
   const reload = useCallback(async () => {
     const [m, s, me] = await Promise.all([
       fetch("/api/members", { cache: "no-store" }).then((r) => r.json()),
       fetch("/api/stats", { cache: "no-store" }).then((r) => r.json()),
-      fetch("/api/me", { cache: "no-store" }).then((r) => r.json()), // <-- Проверяем, кто зашел
+      fetch("/api/me", { cache: "no-store" }).then((r) => r.json()), // Кто вошёл: панель или кабинет
     ]);
     setMembers(m.members ?? []);
     setNorm(s.norm ?? 10);
+    /**
+     * Роли хранятся раздельно: сессия панели и сессия бойца дают разные права
+     * (правки состава — только панель), а видеть Discord ID вправе обе.
+     */
     setRole(me.role || "guest");
+    setMemberRole(me.member?.role ?? "");
   }, []);
 
   useEffect(() => { reload().catch(() => setMembers([])); }, [reload]);
@@ -90,16 +124,33 @@ export default function MembersPage() {
     return (members ?? []).filter((m) => {
       if (!showInactive && !m.active) return false;
       if (onlyDebtors && !(m.active && !m.vacation && Math.floor(m.hours) < norm)) return false;
-      if (q && !`${m.name} ${m.rankName ?? ""} ${m.post ?? ""} ${m.discordId ?? ""}`.toLowerCase().includes(q)) return false;
-      return true;
+      if (!q) return true;
+      // Discord ID участвует в поиске только у штаба: иначе по перебору цифр
+      // можно было бы узнать, привязан ли конкретный человек к Discord
+      const haystack = [m.name, m.rankName ?? "", m.post ?? "", canSeePrivate ? m.discordId ?? "" : ""];
+      return haystack.join(" ").toLowerCase().includes(q);
     });
-  }, [members, query, showInactive, onlyDebtors, norm]);
+  }, [members, query, showInactive, onlyDebtors, norm, canSeePrivate]);
 
   const all = members ?? [];
   const active = all.filter((m) => m.active);
   const onVacation = active.filter((m) => m.vacation).length;
+  /** Сколько бойцов без Discord — рабочая сводка штаба, бойцам не показывается */
   const withoutDiscord = active.filter((m) => !m.discordId).length;
   const lastSync = all.length ? all.reduce((a, b) => (new Date(a.updatedAt) > new Date(b.updatedAt) ? a : b)).updatedAt : null;
+
+  /**
+   * Сводные карточки: «Без Discord ID» — служебный показатель (по нему штаб
+   * видит, кого не удастся упомянуть в Discord), поэтому он показывается только
+   * тем, у кого есть доступ к самим ID. Остальным — состав и отпуска.
+   */
+  const summary = [
+    { label: "Активных бойцов", value: active.length, icon: Users, tint: "#7c9aff" },
+    { label: "В отпуске", value: onVacation, icon: Palmtree, tint: "#ffb020" },
+    ...(canSeePrivate
+      ? [{ label: "Без Discord ID", value: withoutDiscord, icon: Ghost, tint: "#ff3d3d" }]
+      : [{ label: "Выбывших в списке", value: all.length - active.length, icon: Ghost, tint: "#ff3d3d" }]),
+  ];
 
   return (
     <div className="flex flex-col gap-5">
@@ -108,11 +159,13 @@ export default function MembersPage() {
           <div className="eyebrow mb-2">личный состав // division 05</div>
           <h1 className="display text-[34px] font-black leading-tight sm:text-[40px]">Состав</h1>
           <p className="mt-2 text-sm" style={{ color: "var(--muted)" }}>
-            Отпуск исключает бойца из пингов. Discord ID нужен для персональных упоминаний.
+            {canSeePrivate
+              ? "Отпуск исключает бойца из пингов. Discord ID нужен для персональных упоминаний."
+              : "Отпуск исключает бойца из пингов. Часы считает синхронизация с rs-red.com."}
           </p>
         </div>
-        {/* Кнопка синхронизации доступна только командирам */}
-        {role !== "guest" && (
+        {/* Кнопка синхронизации доступна только командирам панели */}
+        {canEditPanel && (
           <button className="btn btn-primary" onClick={sync} disabled={syncing}>
             {syncing ? <Spinner /> : <CloudDownload size={15} />}
             Синхронизировать с rs-red.com
@@ -130,11 +183,7 @@ export default function MembersPage() {
       </AnimatePresence>
 
       <div className="grid gap-5 sm:grid-cols-3">
-        {[
-          { label: "Активных бойцов", value: active.length, icon: Users, tint: "#7c9aff" },
-          { label: "В отпуске", value: onVacation, icon: Palmtree, tint: "#ffb020" },
-          { label: "Без Discord ID", value: withoutDiscord, icon: Ghost, tint: "#ff3d3d" },
-        ].map((s) => (
+        {summary.map((s) => (
           <div key={s.label} className="card card-hover flex items-center gap-3.5 px-5 py-4">
             <span className="flex items-center justify-center" style={{ width: 38, height: 38, borderRadius: 12, background: `${s.tint}1f`, color: s.tint }}><s.icon size={17} /></span>
             <div><div className="display text-[22px] font-black leading-none">{members ? s.value : "—"}</div><div className="label mt-1">{s.label}</div></div>
@@ -145,7 +194,7 @@ export default function MembersPage() {
       <Section title="Бойцы подразделения" eyebrow={lastSync ? `обновлено ${fmtDate(lastSync)}` : "ожидание синхронизации"} action={
           <div className="relative" style={{ width: 240 }}>
             <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "var(--dim)" }} />
-            <input className="input" style={{ paddingLeft: "2.1rem", paddingTop: "0.5rem", paddingBottom: "0.5rem", fontSize: "0.82rem" }} placeholder="Поиск по имени, званию, ID…" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <input className="input" style={{ paddingLeft: "2.1rem", paddingTop: "0.5rem", paddingBottom: "0.5rem", fontSize: "0.82rem" }} placeholder={canSeePrivate ? "Поиск по имени, званию, ID…" : "Поиск по имени, званию…"} value={query} onChange={(e) => setQuery(e.target.value)} />
           </div>
         }
       >
@@ -160,15 +209,22 @@ export default function MembersPage() {
           ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center gap-2 py-12 text-center"><Users size={20} style={{ color: "var(--dim)" }} /><p className="text-sm" style={{ color: "var(--muted)" }}>{all.length === 0 ? "Состав пуст — нажмите «Синхронизировать с rs-red.com»" : "Никого не найдено по фильтрам"}</p></div>
           ) : (
-            <table className="tbl" style={{ minWidth: 760 }}>
-              <thead><tr><th>Боец</th><th>Звание / должность</th><th>Онлайн</th><th>Discord ID</th><th style={{ textAlign: "center" }}>Отпуск</th></tr></thead>
+            <table className="tbl" style={{ minWidth: canSeePrivate ? 900 : 680 }}>
+              <thead><tr>
+                <th>Позывной</th>
+                <th>Звание / должность</th>
+                <th>Онлайн</th>
+                {/* Discord ID — рабочая колонка штаба: по ней бот пингует человека */}
+                {canSeePrivate && <th>Discord ID</th>}
+                <th style={{ textAlign: "center" }}>Статус</th>
+              </tr></thead>
               <tbody>
                 {filtered.map((m) => {
                   const okNorm = Math.floor(m.hours) >= norm;
                   const zero = Math.floor(m.hours) === 0;
                   return (
                     <tr key={m.id} className={`${m.vacation ? "row-vacation" : ""} ${m.active ? "" : "row-inactive"}`}>
-                      <td><div className="flex items-center gap-2.5"><Avatar name={m.name} /><div><div className="font-semibold leading-tight">{m.name}</div>{!m.active && (<span className="badge badge-red mt-0.5">выбыл</span>)}</div></div></td>
+                      <td><div className="flex items-center gap-2.5"><Avatar name={m.name} /><div><div className="font-semibold leading-tight">{m.name}{m.handle ? <span className="ml-1.5 text-[11px]" style={{ color: "var(--dim)" }}>@{m.handle}</span> : null}</div>{!m.active && (<span className="badge badge-red mt-0.5">выбыл</span>)}</div></div></td>
                       <td style={{ color: "var(--muted)" }}>{m.rankName ?? "—"}{m.post ? (<span style={{ color: "var(--dim)" }}> · {m.post}</span>) : null}</td>
                       <td>
                         <div className="flex items-center gap-2.5">
@@ -176,32 +232,34 @@ export default function MembersPage() {
                           <span className="mono text-[13px] font-bold" style={{ color: m.vacation ? "var(--amber)" : okNorm ? "var(--green)" : "var(--red)" }}>{m.hours.toFixed(1)} ч</span>
                         </div>
                       </td>
-                      
-                      {/* КОЛОНКА DISCORD ID (Скрыто для гостей) */}
-                      <td>
-                        {role === "guest" ? (
-                          <span className="mono text-[12px]" style={{ color: m.discordId ? "var(--text)" : "var(--dim)" }}>
-                            {m.discordId ? m.discordId : "не указан"}
-                          </span>
-                        ) : (
-                          <DiscordIdInput value={m.discordId ?? ""} onSave={(v) => patch(m.id, { discordId: v })} />
-                        )}
-                      </td>
-                      
-                      {/* КОЛОНКА ОТПУСКА (Скрыто для гостей) */}
+
+                      {/* Discord ID: только штабу — остальным колонка не отрисовывается.
+                          Правки доступны сессии панели; командиру из кабинета
+                          поле показываем только для чтения (без обмана) */}
+                      {canSeePrivate && (
+                        <td>
+                          {canEditPanel ? (
+                            <DiscordIdInput value={m.discordId ?? ""} onSave={(v) => patch(m.id, { discordId: v })} />
+                          ) : (
+                            <span className="mono text-[12.5px]" style={{ color: m.discordId ? "var(--text)" : "var(--dim)" }}>
+                              {m.discordId || "—"}
+                            </span>
+                          )}
+                        </td>
+                      )}
+
                       <td style={{ textAlign: "center" }}>
                         <div className="inline-flex items-center justify-center gap-2">
-                          {role === "guest" ? (
-                            m.vacation ? (
-                              <span className="badge badge-amber"><Palmtree size={12} className="mr-1" style={{ display: 'inline-block' }} /> в отпуске</span>
-                            ) : (
-                              <span className="text-[12px]" style={{ color: "var(--dim)" }}>нет</span>
-                            )
+                          {!m.active ? (
+                            <span className="badge badge-red">выбыл</span>
+                          ) : m.vacation ? (
+                            <span className="badge badge-amber"><Palmtree size={12} className="mr-1" style={{ display: 'inline-block' }} /> в отпуске</span>
                           ) : (
-                            <>
-                              <Toggle on={m.vacation} disabled={busyIds.has(m.id)} color="rgba(255,176,32,.9)" onChange={(v) => patch(m.id, { vacation: v })} />
-                              {m.vacation && <Palmtree size={13} style={{ color: "var(--amber)" }} />}
-                            </>
+                            <span className="badge badge-green">в строю</span>
+                          )}
+                          {/* Тумблер отпуска — рабочий инструмент штаба панели */}
+                          {canEditPanel && (
+                            <Toggle on={m.vacation} disabled={busyIds.has(m.id)} color="rgba(255,176,32,.9)" onChange={(v) => patch(m.id, { vacation: v })} />
                           )}
                         </div>
                       </td>

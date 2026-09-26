@@ -6,14 +6,20 @@
   "permissions": ["cookies", "alarms", "storage"],
   "host_permissions": [
     "https://rs-red.com/*",
-    "https://atk-red.site/*"
+    "https://atk-red.site/*",
+    "http://localhost:3000/*",
+    "http://localhost:3001/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://atk-red.site/*"],
+      "matches": [
+        "https://atk-red.site/*",
+        "http://localhost:3000/*",
+        "http://localhost:3001/*"
+      ],
       "js": ["content.js"],
       "run_at": "document_end"
     }

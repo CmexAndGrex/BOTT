@@ -316,6 +316,35 @@ export default function SettingsPage() {
                 />
               </div>
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <div className="label mb-1.5">
+                  ID канала заявок на вступление (RECRUITS_CHANNEL_ID)
+                </div>
+                <input
+                  className="input input-mono"
+                  placeholder="пусто — публикуется в канал ШДС"
+                  value={settings.recruits_channel_id}
+                  onChange={(e) => set("recruits_channel_id", e.target.value.replace(/[^\d]/g, ""))}
+                />
+                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                  Сюда приходят заявки с формы /apply — с кнопками «Одобрить / Отклонить».
+                </p>
+              </div>
+              <div>
+                <div className="label mb-1.5">ID канала рапортов состава (REPORTS_CHANNEL_ID)</div>
+                <input
+                  className="input input-mono"
+                  placeholder="пусто — публикуется в канал ШДС"
+                  value={settings.reports_channel_id}
+                  onChange={(e) => set("reports_channel_id", e.target.value.replace(/[^\d]/g, ""))}
+                />
+                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                  Рапорты бойцов (экзамены, отпуск, резерв, специальность, ШДС). Сама очередь
+                  всегда доступна штабу: <span className="kbd">/admin/reports</span>.
+                </p>
+              </div>
+            </div>
             <div>
               <div className="label mb-1.5">ID канала запросов ролей (ROLES_CHANNEL_ID)</div>
               <input
