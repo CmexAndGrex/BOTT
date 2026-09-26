@@ -27,6 +27,8 @@ const cookieAuthApiPaths = [
   // Рапорты и решения штаба из панели: cookie-авторизация, значит нужна
   // CSRF-проверка (иначе чужой сайт мог бы отправить рапорт за бойца)
   "/api/member/reports", "/api/admin/reports",
+  // Шаблоны выкладок: создание, правка и архив — cookie-авторизация
+  "/api/admin/armory",
 ];
 
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -128,7 +130,24 @@ const memberPaths = [
 ];
 
 /** Разделы модерации: командир или администратор (панель либо боец с ролью) */
-const staffPaths = ["/admin/recruits", "/api/admin/recruits", "/admin/reports", "/api/admin/reports"];
+const staffPaths = [
+  "/admin/recruits",
+  "/api/admin/recruits",
+  "/admin/reports",
+  "/api/admin/reports",
+  // Правка шаблонов выкладок — только штаб (роут продублирует проверку)
+  "/api/admin/armory",
+];
+
+/**
+ * Разделы, куда пускаем любую действующую сессию: и кабинет бойца, и панель.
+ *
+ * «Арсенал» нужен всем, а не только бойцам: у администратора, который ведёт бота и
+ * правит выкладки, рапорта может не быть вовсе, и требовать от него вход в кабинет
+ * — абсурдно. Роль здесь не проверяется: право на просмотр есть и у панели, и у
+ * бойца (см. canViewArmory), а полная проверка выполняется в роуте и странице.
+ */
+const anySessionPaths = ["/armory", "/api/armory"];
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -195,6 +214,7 @@ export async function middleware(req: NextRequest) {
   const isProtected = protectedPaths.some((p) => pathname.startsWith(p));
   const isMemberArea = memberPaths.some((p) => pathname.startsWith(p));
   const isStaffArea = staffPaths.some((p) => pathname.startsWith(p));
+  const isAnySessionArea = anySessionPaths.some((p) => pathname.startsWith(p));
 
   const withCsp = (res: NextResponse) => {
     if (cspEnabled && !isApi) res.headers.set("Content-Security-Policy", csp);
@@ -205,6 +225,23 @@ export async function middleware(req: NextRequest) {
     if (isApi) return NextResponse.json({ error: message }, { status: 403 });
     return NextResponse.redirect(new URL(redirectTo, req.url));
   };
+
+  /**
+   * «Арсенал»: достаточно любой действующей сессии — кабинета бойца или панели.
+   * Роль здесь не различаем (просмотр разрешён и бойцу, и штабу), а правку
+   * шаблонов отдельно закрывает staffPaths и сам роут.
+   */
+  if (isAnySessionArea) {
+    const memberToken = req.cookies.get("member_token")?.value;
+    if (memberToken && (await memberClaims(memberToken))) {
+      return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
+    }
+    const panelToken = req.cookies.get("auth_token")?.value;
+    if (panelToken && (await panelRole(panelToken))) {
+      return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
+    }
+    return deny("Нет доступа: войдите в личный кабинет или панель", "/login");
+  }
 
   // Кабинет и раздел модерации: проверяем cookie бойца отдельно от панели.
   // Полная проверка (статус, права, отзыв токена) выполняется в роутах —

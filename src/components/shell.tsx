@@ -8,7 +8,7 @@ import BackgroundSlideshow from "@/components/background";
 import {
   Activity, BookOpen, Bot, ClipboardCheck, Clock3, Globe, LayoutDashboard,
   ScrollText, Settings2, Users, LogIn, LogOut, ShieldAlert, UserRound, Inbox,
-  ChevronDown, FilePlus2
+  ChevronDown, FilePlus2, Crosshair
 } from "lucide-react";
 import { REPORT_TYPE_META } from "@/lib/reports";
 
@@ -111,6 +111,9 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   const NAV = [
     { href: "/", label: "Обзор", icon: LayoutDashboard, roles: ["guest", "officer", "admin"] },
     { href: "/members", label: "Состав", icon: Users, roles: ["guest", "officer", "admin"] },
+    // «Арсенал»: пресеты выкладок для состава. Пункт виден только вошедшему —
+    // каталог отдаётся под сессией бойца либо панели, и гостю он был бы тупиком
+    { href: "/armory", label: "Арсенал", icon: Crosshair, roles: ["guest", "officer", "admin"] },
     { href: "/admin/recruits", label: "Рапорты", icon: ClipboardCheck, roles: ["officer", "admin"] },
     { href: "/admin/reports", label: "Рапорты и заявки", icon: Inbox, roles: ["officer", "admin"] },
     { href: "/docs", label: "Документация", icon: BookOpen, roles: ["guest", "officer", "admin"] },
@@ -122,7 +125,9 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   if (member) {
     NAV.splice(1, 0, { href: "/profile", label: "Кабинет", icon: UserRound, roles: ["guest", "officer", "admin"] });
   }
-  const filteredNav = NAV.filter(item => item.roles.includes(role));
+  const filteredNav = NAV.filter(item => item.roles.includes(role)).filter(
+    (item) => item.href !== "/armory" || Boolean(member) || role !== "guest",
+  );
 
   /**
    * Меню «Подать рапорт» доступно только вошедшему бойцу: рапорт подаётся от

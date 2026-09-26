@@ -13,6 +13,7 @@ import {
 } from "drizzle-orm/pg-core";
 import type { MemberRole, MemberStatus } from "@/lib/recruits";
 import type { ServiceReportType } from "@/lib/reports";
+import type { ArmoryDivision, ArmoryEquipment } from "@/lib/armory";
 
 /**
  * Анкета рапорта на вступление (поле members.application_data).
@@ -301,6 +302,49 @@ export const serviceReports = pgTable(
     // «Мои рапорты» в кабинете: выборка по бойцу
     index("service_reports_member_idx").on(table.memberId),
   ]
+);
+
+/**
+ * Шаблон выкладки «Арсенала» (/armory).
+ *
+ * Одна строка = один комплект экипировки для специальности (механик-водитель,
+ * наводчик-оператор, стрелок КМБТ и т.п.). Из неё интерфейс рисует карточку и
+ * панель деталей, а боец копирует готовые строки в игру:
+ *   * aceImportString — текст для ACE Arsenal (Ctrl+V в окне арсенала);
+ *   * sqfCode — готовый массив для setUnitLoadout в Eden;
+ *   * textChecklist собирается на лету из equipmentBreakdown.
+ *
+ * equipmentBreakdown — jsonb: набор слотов расширяется без миграции, а чтение
+ * идёт через readEquipment(), потому что значения из БД (и тем более вставленные
+ * офицером через API) никогда не считаются доверенными.
+ */
+export const armoryLoadouts = pgTable(
+  "armory_loadouts",
+  {
+    id: serial("id").primaryKey(),
+    /** Название комплекта: «Механик-водитель Т-90А», «Стрелок КМБТ» */
+    title: text("title").notNull(),
+    /** Подразделение-владелец комплекта (см. ARMORY_DIVISIONS в lib/armory.ts) */
+    division: varchar("division", { length: 64 }).$type<ArmoryDivision>().notNull(),
+    /** Внутренний код специальности / MOS: «11B», «танк-мехвод» */
+    specialtyCode: text("specialty_code"),
+    /** Тактическое пояснение: допуски, требования, порядок выдачи */
+    description: text("description"),
+    /** Структурированная выкладка для интерфейса (слоты и списки предметов) */
+    equipmentBreakdown: jsonb("equipment_breakdown").$type<ArmoryEquipment>(),
+    /** Дословная строка для вставки в ACE Arsenal (Ctrl+V) */
+    aceImportString: text("ace_import_string").notNull().default(""),
+    /** Готовый SQF-массив для setUnitLoadout (Eden Editor) */
+    sqfCode: text("sqf_code").notNull().default(""),
+    /** Кто завёл или последним правил шаблон (позывной либо логин панели) */
+    createdBy: text("created_by"),
+    /** Архив: неактивные шаблоны скрыты из каталога, но не удаляются */
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  // Каталог: фильтр по подразделению среди действующих шаблонов
+  (table) => [index("armory_loadouts_division_active_idx").on(table.division, table.isActive)]
 );
 
 /** Еженедельная статистика по каждому бойцу */
