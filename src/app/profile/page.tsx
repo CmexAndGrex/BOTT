@@ -1,56 +1,85 @@
 "use client";
 
 /**
- * Личный кабинет бойца.
+ * Личный кабинет бойца — личное дело (досье).
  *
- * Доступен только бойцам со статусом «в строю» или «в отпуске» (проверка на
- * сервере — requireActiveMember). Здесь карточка бойца, привязка Discord для
- * тех, кто вошёл по паролю, смена пароля и уточнение анкеты.
+ * Страница собирает всё, что боец сверяет о себе: шапку личного дела со статусом
+ * службы, живой состав на сервере («Кто на ВЧ»), допуск к технике по званию или
+ * нормативам, историю поданных рапортов, уточнение анкеты и смену пароля.
+ *
+ * Данные приходят одним запросом (/api/member/dossier): три отдельных обращения
+ * дали бы «прыгающую» вёрстку и три раза дёргали БД. Разметка виджетов вынесена
+ * в components/dossier-panel.tsx, чтобы страница читалась как последовательность
+ * состояний: загрузка → нужен вход → досье.
+ *
+ * Проверка статуса и прав — на сервере (requireActiveMember): кандидат со
+ * статусом pending не увидит кабинет, даже если откроет адрес вручную.
  */
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { ShieldAlert, CheckCircle2, MessageCircle, KeyRound, Link2Off } from "lucide-react";
+import {
+  CheckCircle2, KeyRound, Link2Off, MessageCircle, RefreshCw, ShieldAlert,
+} from "lucide-react";
 import { Section, Spinner } from "@/components/ui";
+import {
+  DossierHeader,
+  GarrisonWidget,
+  ReportModal,
+  ServiceHistory,
+  VehicleAccessGrid,
+  type DossierMember,
+  type DossierReport,
+  type DossierService,
+} from "@/components/dossier-panel";
+import type { SessionMember } from "@/components/reports-panel";
 import { PASSWORD_POLICY_HINT } from "@/lib/password-policy";
+import { validateReportPayload, type ServiceReportType } from "@/lib/reports";
 import { AGE_MAX, AGE_MIN, SPECIALIZATIONS } from "@/lib/recruits";
+import type { VehicleAccessReport } from "@/lib/vehicles";
 
-type Member = {
-  id: number;
-  callsign: string;
-  rank: string;
-  unit: string | null;
-  status: string;
-  statusLabel: string;
-  roleLabel: string;
-  avatarUrl: string | null;
-  discordId: string | null;
-  hasDiscord: boolean;
-  hasPassword: boolean;
-  createdAt: string;
-  application: {
-    age?: number;
-    armaExperience?: string;
-    specialization?: string;
-    comment?: string;
+/** Ответ /api/member/dossier — то, что нужно интерфейсу */
+type DossierResponse = {
+  ok: boolean;
+  member: DossierMember;
+  service: DossierService;
+  serviceSummary: {
+    total: number;
+    pending: number;
+    approved: number;
+    rejected: number;
+    firstAt: string | null;
+    lastAt: string | null;
+    qualifications: string[];
   };
+  vehicles: VehicleAccessReport;
+  reports: DossierReport[];
+  error?: string;
 };
 
 export default function ProfilePage() {
   // useSearchParams() требует границы Suspense при пререндере страницы
   return (
-    <React.Suspense fallback={<div className="flex min-h-[60vh] items-center justify-center"><Spinner /></div>}>
-      <ProfileCard />
+    <React.Suspense
+      fallback={
+        <div className="flex min-h-[60vh] items-center justify-center">
+          <Spinner />
+        </div>
+      }
+    >
+      <DossierPageInner />
     </React.Suspense>
   );
 }
 
-function ProfileCard() {
-  const [member, setMember] = useState<Member | null>(null);
+function DossierPageInner() {
+  const [dossier, setDossier] = useState<DossierResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [flash, setFlash] = useState("");
   const [gate, setGate] = useState("");
+  const [reportOpen, setReportOpen] = useState(false);
+  const [sending, setSending] = useState(false);
 
   // Смена пароля
   const [currentPassword, setCurrentPassword] = useState("");
@@ -71,7 +100,7 @@ function ProfileCard() {
    * пришлось бы ставить после ранних выходов — хук вызывать условно нельзя
    * (ошибка rules-of-hooks).
    */
-  const urlNotice = useMemo(() => {
+  const urlNotice = React.useMemo(() => {
     if (params.get("linked") === "1") {
       return { kind: "ok" as const, text: "Discord привязан к аккаунту" };
     }
@@ -87,14 +116,32 @@ function ProfileCard() {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch("/api/member/session", { cache: "no-store" });
-      const data = await res.json();
-      if (!data.ok) {
-        setGate("Войдите в личный кабинет, чтобы увидеть карточку бойца");
+      const res = await fetch("/api/member/dossier", { cache: "no-store" });
+      const data = (await res.json()) as DossierResponse;
+
+      // 401/403 — разные ситуации, и бойцу нужно разное сообщение: «войдите» или
+      // «кабинет доступен зачисленным». Показываем экран входа, а не «сбой сети».
+      if (res.status === 401) {
+        setGate("Войдите в личный кабинет, чтобы увидеть личное дело");
         return;
       }
-      setMember(data.member);
-      const app = data.member.application || {};
+      if (res.status === 403) {
+        setGate("Личное дело доступно бойцам, зачисленным в подразделение");
+        return;
+      }
+      if (!data?.ok) {
+        setError(data?.error || "Не удалось загрузить личное дело");
+        return;
+      }
+
+      setDossier(data);
+
+      // Анкета живёт вне досье (её правит форма уточнения): отдельный запрос
+      // сессии, иначе поля формы остались бы пустыми
+      const session = await fetch("/api/member/session", { cache: "no-store" }).then((r) =>
+        r.json()
+      );
+      const app = session?.member?.application || {};
       setAge(app.age ? String(app.age) : "");
       setArmaExperience(app.armaExperience || "");
       setSpecialization(app.specialization || "");
@@ -107,13 +154,52 @@ function ProfileCard() {
   }, []);
 
   useEffect(() => {
-    // Загрузка идёт асинхронно (через промис), состояние меняется уже после
-    // ответа сети — синхронного setState в теле эффекта нет
+    // Вызов отложен на микрозадачу: синхронный setState в теле эффекта дал бы
+    // каскадный рендер (в проекте та же схема в /reports и /admin/recruits)
     const timer = window.setTimeout(() => {
       void load();
     }, 0);
     return () => window.clearTimeout(timer);
   }, [load]);
+
+  /** Подача рапорта из модального окна: тот же путь, что и на /reports */
+  const handleSubmit = async (
+    type: ServiceReportType,
+    payload: unknown,
+    reset: () => void
+  ): Promise<void> => {
+    setError("");
+    setFlash("");
+
+    // Проверка общим валидатором: формулировки ошибок совпадают с ответом API
+    const validation = validateReportPayload(type, payload);
+    if (!validation.ok) {
+      setError(validation.error);
+      return;
+    }
+
+    setSending(true);
+    try {
+      const res = await fetch("/api/member/reports", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, payload: validation.payload }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setError(data.error || "Не удалось подать рапорт");
+        return;
+      }
+      setFlash(data.notice || "Рапорт отправлен");
+      reset();
+      setReportOpen(false);
+      await load();
+    } catch {
+      setError("Сбой сети");
+    } finally {
+      setSending(false);
+    }
+  };
 
   const handleLinkDiscord = async () => {
     setError("");
@@ -139,7 +225,7 @@ function ProfileCard() {
       const data = await res.json();
       if (data.ok) {
         setFlash("Discord отвязан");
-        load();
+        void load();
       } else {
         setError(data.error || "Не удалось отвязать Discord");
       }
@@ -188,7 +274,7 @@ function ProfileCard() {
       const data = await res.json();
       if (data.ok) {
         setFlash("Данные анкеты обновлены");
-        load();
+        void load();
       } else {
         setError(data.error || "Не удалось сохранить анкету");
       }
@@ -216,11 +302,12 @@ function ProfileCard() {
     return (
       <div className="mx-auto max-w-md pt-10 text-center">
         <div className="card p-6">
-          <ShieldAlert size={32} className="mx-auto mb-3" style={{ color: "var(--amber)" }} />
+          <ShieldAlert size={32} className="mx-auto mb-3" style={{ color: "var(--dim)" }} />
+          <h1 className="display text-lg font-bold mb-1.5">Личный кабинет</h1>
           <p className="text-sm mb-4" style={{ color: "var(--muted)" }}>
             {gate}
           </p>
-          <Link href="/login" className="btn btn-primary w-full inline-flex justify-center">
+          <Link href="/login" className="btn btn-primary px-4 py-2">
             Войти
           </Link>
         </div>
@@ -228,124 +315,104 @@ function ProfileCard() {
     );
   }
 
-  if (!member) return null;
+  if (!dossier) {
+    return (
+      <div className="card px-5 py-6">
+        <div className="flex items-center gap-2.5">
+          <ShieldAlert size={16} style={{ color: "var(--red)" }} />
+          <span className="text-[13px]" style={{ color: "var(--muted)" }}>
+            {error || "Личное дело недоступно"}
+          </span>
+        </div>
+      </div>
+    );
+  }
 
-  const onVacation = member.status === "vacation";
-  const shownError = urlNotice?.kind === "err" ? urlNotice.text : error;
-  const shownFlash = flash || (urlNotice?.kind === "ok" ? urlNotice.text : "");
+  // Модальному окну нужны те же данные, что и /reports: каталог нормативов
+  // выбирается по подразделению, поэтому передаём карточку бойца
+  const sessionMember: SessionMember = {
+    id: dossier.member.id,
+    callsign: dossier.member.callsign,
+    rank: dossier.member.rank,
+    unit: dossier.member.unit,
+    status: dossier.member.status,
+    statusLabel: dossier.service.label,
+    role: "member",
+    roleLabel: "",
+    discordId: dossier.member.discordId,
+  };
+
+  const summary = dossier.serviceSummary;
+  const noticeError = error || (urlNotice?.kind === "err" ? urlNotice.text : "");
+  const noticeOk = flash || (urlNotice?.kind === "ok" ? urlNotice.text : "");
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-5">
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div className="flex items-center gap-4">
-          {member.avatarUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={member.avatarUrl}
-              alt={member.callsign}
-              width={64}
-              height={64}
-              style={{ borderRadius: "50%", border: "2px solid var(--stroke-soft)" }}
-            />
-          ) : (
-            <div
-              className="flex items-center justify-center mono font-bold"
-              style={{
-                width: 64,
-                height: 64,
-                borderRadius: "50%",
-                background: "var(--red-soft)",
-                color: "var(--red)",
-                fontSize: 22,
-              }}
-            >
-              {member.callsign.slice(0, 1).toUpperCase()}
-            </div>
-          )}
-          <div>
-            <div className="eyebrow mb-1">личный кабинет // боец</div>
-            <h1 className="display text-[30px] font-black leading-tight">{member.callsign}</h1>
-            <p className="text-sm mt-1" style={{ color: "var(--muted)" }}>
-              {member.roleLabel} · в системе с{" "}
-              {new Date(member.createdAt).toLocaleDateString("ru-RU")}
-            </p>
-          </div>
-        </div>
-        <button
-          onClick={handleLogout}
-          className="btn btn-sm"
-          style={{ background: "rgba(255,61,61,0.1)", borderColor: "transparent", color: "var(--red)" }}
-        >
-          Выйти
-        </button>
-      </header>
-
-      {shownError && (
-        <div className="flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
-          <ShieldAlert size={16} />
-          {shownError}
-        </div>
-      )}
-      {shownFlash && (
+    <div className="flex flex-col gap-5">
+      {noticeError && (
         <div
-          className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm"
-          style={{
-            borderColor: "rgba(61,220,132,.3)",
-            background: "var(--green-soft)",
-            color: "var(--green)",
-          }}
+          className="card flex items-center gap-2.5 px-4 py-3"
+          style={{ borderColor: "rgba(255,61,61,.45)" }}
         >
-          <CheckCircle2 size={16} />
-          {shownFlash}
+          <ShieldAlert size={16} style={{ color: "var(--red)" }} />
+          <span className="text-[13px]" style={{ color: "var(--red)" }}>
+            {noticeError}
+          </span>
+        </div>
+      )}
+      {noticeOk && (
+        <div
+          className="card flex items-center gap-2.5 px-4 py-3"
+          style={{ borderColor: "rgba(61,220,132,.4)" }}
+        >
+          <CheckCircle2 size={16} style={{ color: "var(--green)" }} />
+          <span className="text-[13px]" style={{ color: "var(--muted)" }}>
+            {noticeOk}
+          </span>
         </div>
       )}
 
-      <Section title="Карточка бойца" eyebrow="табель">
-        <div className="grid grid-cols-2 gap-4 p-5 md:grid-cols-4">
-          <div>
-            <div className="label mb-1">Позывной</div>
-            <div className="mono font-bold">{member.callsign}</div>
-          </div>
-          <div>
-            <div className="label mb-1">Звание</div>
-            <div className="font-semibold">{member.rank || "—"}</div>
-          </div>
-          <div>
-            <div className="label mb-1">Подразделение</div>
-            <div className="font-semibold">{member.unit || "не назначено"}</div>
-          </div>
-          <div>
-            <div className="label mb-1">Статус</div>
-            <span className={`badge ${onVacation ? "badge-amber" : "badge-green"}`}>
-              {member.statusLabel}
-            </span>
-          </div>
-        </div>
-      </Section>
+      <DossierHeader
+        member={dossier.member}
+        service={dossier.service}
+        onReport={() => setReportOpen(true)}
+        onLogout={handleLogout}
+      />
+
+      {/* Сводка службы: видно, сколько рапортов ждёт решения штаба */}
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <StatTile label="рапортов подано" value={String(summary.total)} />
+        <StatTile label="на рассмотрении" value={String(summary.pending)} tone="amber" />
+        <StatTile label="одобрено" value={String(summary.approved)} tone="green" />
+        <StatTile label="нормативов сдано" value={String(summary.qualifications.length)} />
+      </div>
+
+      <GarrisonWidget onNotice={setFlash} />
+
+      <VehicleAccessGrid report={dossier.vehicles} />
+
+      <ServiceHistory reports={dossier.reports} />
 
       <Section title="Discord" eyebrow="способы входа">
         <div className="flex flex-wrap items-center justify-between gap-4 p-5">
           <div className="flex items-center gap-3">
             <MessageCircle
               size={18}
-              style={{ color: member.hasDiscord ? "var(--green)" : "var(--dim)" }}
+              style={{ color: dossier.member.discordId ? "var(--green)" : "var(--dim)" }}
             />
             <div>
               <div className="text-sm font-medium">
-                {member.hasDiscord ? "Аккаунт Discord привязан" : "Discord не привязан"}
+                {dossier.member.discordId ? "Аккаунт Discord привязан" : "Discord не привязан"}
               </div>
               <div className="text-[11.5px] mono" style={{ color: "var(--dim)" }}>
-                {member.hasDiscord
-                  ? member.discordId
-                  : "вход возможен только по позывному и паролю"}
+                {dossier.member.discordId || "вход возможен только по позывному и паролю"}
               </div>
             </div>
           </div>
           <div className="flex gap-2">
             <button onClick={handleLinkDiscord} className="btn btn-sm">
-              {member.hasDiscord ? "Привязать другой" : "Привязать Discord"}
+              {dossier.member.discordId ? "Привязать другой" : "Привязать Discord"}
             </button>
-            {member.hasDiscord && member.hasPassword && (
+            {dossier.member.discordId && (
               <button
                 onClick={handleUnlinkDiscord}
                 className="btn btn-sm"
@@ -362,11 +429,11 @@ function ProfileCard() {
         </div>
       </Section>
 
-      <Section title="Смена пароля" eyebrow="безопасность">
+      <Section title="Безопасность" eyebrow="пароль кабинета">
         <form onSubmit={handlePassword} className="grid grid-cols-1 gap-4 p-5 md:grid-cols-3">
           <div>
             <label className="label mb-1.5 block">
-              {member.hasPassword ? "Текущий пароль" : "Текущий пароль (ещё не задан)"}
+              Текущий пароль (пусто, если вход только по Discord)
             </label>
             <input
               type="password"
@@ -375,7 +442,6 @@ function ProfileCard() {
               onChange={(e) => setCurrentPassword(e.target.value)}
               autoComplete="current-password"
               placeholder="••••••••"
-              required={member.hasPassword}
             />
           </div>
           <div>
@@ -451,13 +517,50 @@ function ProfileCard() {
               onChange={(e) => setComment(e.target.value)}
             />
           </div>
-          <div className="flex justify-end">
+          <div className="flex items-center justify-between gap-3">
+            <button type="button" className="btn btn-sm" onClick={() => void load()}>
+              <RefreshCw size={14} /> Обновить досье
+            </button>
             <button type="submit" className="btn btn-primary px-4 py-2" disabled={profileBusy}>
               {profileBusy ? <Spinner /> : "Сохранить"}
             </button>
           </div>
         </form>
       </Section>
+
+      <ReportModal
+        open={reportOpen}
+        member={sessionMember}
+        onSubmit={handleSubmit}
+        onClose={() => setReportOpen(false)}
+      />
+      {sending && (
+        <p className="text-center text-[11.5px]" style={{ color: "var(--dim)" }}>
+          Отправляем рапорт…
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Плитка сводки службы: подпись и число */
+function StatTile({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: "green" | "amber";
+}) {
+  const color =
+    tone === "green" ? "var(--green)" : tone === "amber" ? "var(--amber)" : "var(--text)";
+  return (
+    <div className="card px-4 py-3.5">
+      <div className="label mb-1">{label}</div>
+      <div className="mono text-[20px] font-bold" style={{ color }}>
+        {value}
+      </div>
     </div>
   );
 }

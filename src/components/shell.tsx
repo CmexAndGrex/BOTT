@@ -6,7 +6,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import React, { useEffect, useState } from "react";
 import BackgroundSlideshow from "@/components/background";
 import {
-  Activity, BookOpen, Bot, ClipboardCheck, Clock3, Globe, LayoutDashboard,
+  Activity, Badge, BookOpen, Bot, ClipboardCheck, Clock3, Globe, LayoutDashboard,
   ScrollText, Settings2, Users, LogIn, LogOut, ShieldAlert, UserRound, Inbox,
   ChevronDown, FilePlus2, Crosshair
 } from "lucide-react";
@@ -109,6 +109,20 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   };
 
   const NAV = [
+    // «Личный кабинет» — первым пунктом: это личное дело бойца (статус службы,
+    // «Кто на ВЧ», допуск к технике, свои рапорты), и заходит он сюда чаще
+    // всего. Пункт появляется только у того, кто реально вошёл как боец:
+    // у гостя панели кабинета нет.
+    ...(member
+      ? [
+          {
+            href: "/profile",
+            label: "Личный кабинет",
+            icon: Badge,
+            roles: ["guest", "officer", "admin"],
+          },
+        ]
+      : []),
     { href: "/", label: "Обзор", icon: LayoutDashboard, roles: ["guest", "officer", "admin"] },
     { href: "/members", label: "Состав", icon: Users, roles: ["guest", "officer", "admin"] },
     // «Арсенал»: пресеты выкладок для состава. Пункт виден только вошедшему —
@@ -121,10 +135,6 @@ export default function Shell({ children }: { children: React.ReactNode }) {
     { href: "/logs", label: "Журнал", icon: ScrollText, roles: ["officer", "admin"] },
     { href: "/settings", label: "Настройки", icon: Settings2, roles: ["admin"] },
   ];
-  // Кабинет показываем только тому, кто реально вошёл как боец
-  if (member) {
-    NAV.splice(1, 0, { href: "/profile", label: "Кабинет", icon: UserRound, roles: ["guest", "officer", "admin"] });
-  }
   const filteredNav = NAV.filter(item => item.roles.includes(role)).filter(
     (item) => item.href !== "/armory" || Boolean(member) || role !== "guest",
   );
