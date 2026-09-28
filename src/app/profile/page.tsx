@@ -5,7 +5,13 @@
  *
  * Страница собирает всё, что боец сверяет о себе: шапку личного дела со статусом
  * службы, живой состав на сервере («Кто на ВЧ»), допуск к технике по званию или
- * нормативам, историю поданных рапортов, уточнение анкеты и смену пароля.
+ * нормативам, историю поданных рапортов и смену пароля.
+ *
+ * Анкеты (возраст, специализация, опыт в Arma 3, комментарий) здесь больше нет:
+ * это данные заявки на вступление, и правка их из кабинета расходилась с личным
+ * делом — нормативы и допуски живут в разделе «Экзамены», а данные заявки
+ * меняет штаб при рассмотрении. Роут PUT /api/member/profile оставлен: им
+ * пользуются форма подачи заявления и модерация.
  *
  * Данные приходят одним запросом (/api/member/dossier): три отдельных обращения
  * дали бы «прыгающую» вёрстку и три раза дёргали БД. Разметка виджетов вынесена
@@ -19,7 +25,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
-  CheckCircle2, KeyRound, Link2Off, MessageCircle, RefreshCw, ShieldAlert,
+  CheckCircle2, GraduationCap, KeyRound, Link2Off, MessageCircle, ShieldAlert,
 } from "lucide-react";
 import { Section, Spinner } from "@/components/ui";
 import {
@@ -33,7 +39,6 @@ import {
 } from "@/components/dossier-panel";
 import { useReportLauncher } from "@/components/report-launcher";
 import { PASSWORD_POLICY_HINT } from "@/lib/password-policy";
-import { AGE_MAX, AGE_MIN, SPECIALIZATIONS } from "@/lib/recruits";
 import type { VehicleAccessReport } from "@/lib/vehicles";
 
 /** Ответ /api/member/dossier — то, что нужно интерфейсу */
@@ -104,13 +109,6 @@ function DossierPageInner() {
   const [newPassword, setNewPassword] = useState("");
   const [passwordBusy, setPasswordBusy] = useState(false);
 
-  // Анкета
-  const [age, setAge] = useState("");
-  const [armaExperience, setArmaExperience] = useState("");
-  const [specialization, setSpecialization] = useState("");
-  const [comment, setComment] = useState("");
-  const [profileBusy, setProfileBusy] = useState(false);
-
   const params = useSearchParams();
   /**
    * Сообщения из адреса (?linked=1, ?error=...) считаем при отрисовке, а не в
@@ -160,17 +158,6 @@ function DossierPageInner() {
       }
 
       setDossier(data);
-
-      // Анкета живёт вне досье (её правит форма уточнения): отдельный запрос
-      // сессии, иначе поля формы остались бы пустыми
-      const session = await fetch("/api/member/session", { cache: "no-store" }).then((r) =>
-        r.json()
-      );
-      const app = session?.member?.application || {};
-      setAge(app.age ? String(app.age) : "");
-      setArmaExperience(app.armaExperience || "");
-      setSpecialization(app.specialization || "");
-      setComment(app.comment || "");
     } catch {
       setError("Сбой сети");
     } finally {
@@ -254,31 +241,6 @@ function DossierPageInner() {
       setError("Сбой сети");
     } finally {
       setPasswordBusy(false);
-    }
-  };
-
-  const handleProfileSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError("");
-    setFlash("");
-    setProfileBusy(true);
-    try {
-      const res = await fetch("/api/member/profile", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ age, armaExperience, specialization, comment }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        setFlash("Данные анкеты обновлены");
-        void load();
-      } else {
-        setError(data.error || "Не удалось сохранить анкету");
-      }
-    } catch {
-      setError("Сбой сети");
-    } finally {
-      setProfileBusy(false);
     }
   };
 
@@ -402,6 +364,28 @@ function DossierPageInner() {
         <StatTile label="нормативов сдано" value={String(summary.qualifications.length)} />
       </div>
 
+      {/* Ссылка на шкалу нормативов: счётчик «нормативов сдано» сам по себе не
+          объясняет, что осталось сдать — детали в разделе «Экзамены» */}
+      {dossier.member.unit && (
+        <Link
+          href="/exams"
+          className="card card-hover flex flex-wrap items-center justify-between gap-3 px-5 py-4"
+        >
+          <span className="flex items-center gap-3">
+            <GraduationCap size={18} style={{ color: "var(--red)" }} />
+            <span>
+              <span className="label block">шкала нормативов</span>
+              <span className="text-[13px] font-semibold">
+                Экзамены по специальностям {dossier.member.unit}
+              </span>
+            </span>
+          </span>
+          <span className="text-[12px]" style={{ color: "var(--dim)" }}>
+            открыть →
+          </span>
+        </Link>
+      )}
+
       <GarrisonWidget onNotice={setFlash} memberId={dossier.member.id} />
 
       <VehicleAccessGrid report={dossier.vehicles} />
@@ -480,67 +464,6 @@ function DossierPageInner() {
           <p className="text-[11.5px] md:col-span-3" style={{ color: "var(--dim)" }}>
             {PASSWORD_POLICY_HINT} После смены пароля остальные устройства выходят автоматически.
           </p>
-        </form>
-      </Section>
-
-      <Section title="Моя анкета" eyebrow="данные рапорта">
-        <form onSubmit={handleProfileSave} className="flex flex-col gap-4 p-5">
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div>
-              <label className="label mb-1.5 block">Возраст</label>
-              <input
-                type="number"
-                className="input input-mono w-full"
-                value={age}
-                onChange={(e) => setAge(e.target.value)}
-                min={AGE_MIN}
-                max={AGE_MAX}
-                required
-              />
-            </div>
-            <div>
-              <label className="label mb-1.5 block">Специализация</label>
-              <input
-                className="input w-full"
-                list="profile-specializations"
-                value={specialization}
-                onChange={(e) => setSpecialization(e.target.value)}
-                required
-              />
-              <datalist id="profile-specializations">
-                {SPECIALIZATIONS.map((item) => (
-                  <option key={item} value={item} />
-                ))}
-              </datalist>
-            </div>
-          </div>
-          <div>
-            <label className="label mb-1.5 block">Опыт в Arma 3</label>
-            <textarea
-              className="input w-full"
-              rows={3}
-              value={armaExperience}
-              onChange={(e) => setArmaExperience(e.target.value)}
-              required
-            />
-          </div>
-          <div>
-            <label className="label mb-1.5 block">Комментарий</label>
-            <textarea
-              className="input w-full"
-              rows={2}
-              value={comment}
-              onChange={(e) => setComment(e.target.value)}
-            />
-          </div>
-          <div className="flex items-center justify-between gap-3">
-            <button type="button" className="btn btn-sm" onClick={() => void load()}>
-              <RefreshCw size={14} /> Обновить досье
-            </button>
-            <button type="submit" className="btn btn-primary px-4 py-2" disabled={profileBusy}>
-              {profileBusy ? <Spinner /> : "Сохранить"}
-            </button>
-          </div>
         </form>
       </Section>
     </div>

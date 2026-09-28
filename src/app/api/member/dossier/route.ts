@@ -35,6 +35,25 @@ function examsOf(report: DossierReportRow, payload: ReportPayload): string[] {
   return exams.map((item) => String(item?.exam_code ?? "")).filter(Boolean);
 }
 
+/**
+ * Оценка экзаменатора из рапорта на экзамены.
+ *
+ * В рапорте оценок может быть несколько (пакетная подача), а в ШДС бот пишет
+ * одну — первую из заполненных (то же правило в review.ts, applyReport).
+ * Поэтому здесь берётся ровно она: иначе бейдж в разделе «Экзамены» показывал бы
+ * не ту оценку, что стоит в таблице.
+ */
+function gradeOf(report: DossierReportRow, payload: ReportPayload): string | null {
+  if (report.type !== "exam") return null;
+  const exams = (payload as { exams?: { grade?: unknown }[] }).exams;
+  if (!Array.isArray(exams)) return null;
+  for (const item of exams) {
+    const grade = String(item?.grade ?? "").trim();
+    if (grade) return grade;
+  }
+  return null;
+}
+
 export async function GET(req: NextRequest) {
   const auth = await requireCabinetMember(req);
   if (!auth.ok) return auth.response;
@@ -75,6 +94,10 @@ export async function GET(req: NextRequest) {
 
     // Payload читается тем же валидатором, что и в модерации: значения из jsonb
     // не считаются доверенными (их мог записать бот или старый код).
+    const payloads = new Map<number, ReportPayload>(
+      rows.map((row) => [row.id, readReportPayload(row.type, row.payload)])
+    );
+
     const reports: DossierReportRow[] = rows.map((row) => ({
       id: row.id,
       type: row.type,
@@ -82,11 +105,10 @@ export async function GET(req: NextRequest) {
       createdAt: row.createdAt,
       reviewedBy: row.reviewedBy,
       moderatorComment: row.moderatorComment,
+      // Оценка достаётся из payload один раз здесь: раздел «Экзамены» показывает
+      // её в бейдже вместе с датой решения по рапорту
+      grade: gradeOf(row, payloads.get(row.id) ?? ({ exams: [] } as ReportPayload)),
     }));
-
-    const payloads = new Map<number, ReportPayload>(
-      rows.map((row) => [row.id, readReportPayload(row.type, row.payload)])
-    );
 
     const summary = serviceSummary(reports, (report) =>
       examsOf(report, payloads.get(report.id) ?? { exams: [] } as ReportPayload)
@@ -142,6 +164,14 @@ export async function GET(req: NextRequest) {
         firstAt: summary.firstAt ? summary.firstAt.toISOString() : null,
         lastAt: summary.lastAt ? summary.lastAt.toISOString() : null,
         qualifications: summary.qualifications,
+        // Нормативы с оценкой и датой: по ним раздел «Экзамены» рисует зелёные
+        // бейджи. Даты переводятся в ISO здесь, чтобы клиент не разбирал даты
+        // повторно (та же схема, что у firstAt/lastAt выше).
+        qualificationDetails: summary.qualificationDetails.map((item) => ({
+          code: item.code,
+          grade: item.grade,
+          at: item.at,
+        })),
       },
       vehicles,
       reports: rows.map((row) => {

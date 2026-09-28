@@ -16,6 +16,7 @@ import type { DiscordEmbed } from "@/lib/discord";
 import {
   buildRecruitEmbed,
   buildReportEmbed,
+  examCatalog,
   examColumnTokens,
   formatIsoDate,
   readReportPayload,
@@ -379,31 +380,50 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
           break;
         }
         const exams = (payload as ExamPayload).exams;
-        // Все выбранные нормативы закрашиваются в ШДС, но оценка пишется в один
-        // столбец заявки: берём оценку первого норматива с оценкой. Остальные
-        // видны в исходном Embed рапорта — модератор их проверит при надобности.
-        const { applyShdsRequest, SHDS_ACTIONS } = await import("@/lib/gsheets");
-        const result = await applyShdsRequest({
-          raw: `Рапорт #${report.id} (панель)`,
-          isVacation: false,
-          vacationRemove: false,
-          shdsAction: SHDS_ACTIONS.EXAM,
-          unit: member.unit,
-          userName: member.callsign || member.name,
-          rank: member.rank,
-          steamId: "",
-          discordId,
-          отделение: "",
-          должность: "",
-          exams: examColumnTokens(exams.map((e) => e.exam_code)),
-          grade: exams.find((e) => e.grade)?.grade || "",
-          examiner: report.reviewedBy || "",
-          rolesGive: "",
-          rolesRemove: "",
-          vacationDates: "",
-          reason: `Рапорт на экзамены #${report.id}`,
-        });
-        parts.push(result.ok ? result.message : `ШДС: ошибка (${result.error})`);
+        // Нормативы делятся на две группы: у одних есть столбец в листе ШДС, у
+        // других (спецкурсы, «Берет», «КБМ») столбца нет вовсе. Раньше весь
+        // список уходил в таблицу одной пачкой, и рапорт только по спецкурсам
+        // падал с «Столбцы экзаменов не найдены» — при том, что норматив сдан
+        // законно. Теперь столбцовые закрашиваются, остальные штаб отмечает сам.
+        const columnCodes = new Set(examCatalog(member.unit).exams.map((e) => e.code));
+        const inSheet = exams.filter((e) => columnCodes.has(e.exam_code));
+        const manual = exams.filter((e) => !columnCodes.has(e.exam_code));
+
+        if (inSheet.length) {
+          // Все выбранные нормативы закрашиваются в ШДС, но оценка пишется в один
+          // столбец заявки: берём оценку первого норматива с оценкой. Остальные
+          // видны в исходном Embed рапорта — модератор их проверит при надобности.
+          const { applyShdsRequest, SHDS_ACTIONS } = await import("@/lib/gsheets");
+          const result = await applyShdsRequest({
+            raw: `Рапорт #${report.id} (панель)`,
+            isVacation: false,
+            vacationRemove: false,
+            shdsAction: SHDS_ACTIONS.EXAM,
+            unit: member.unit,
+            userName: member.callsign || member.name,
+            rank: member.rank,
+            steamId: "",
+            discordId,
+            отделение: "",
+            должность: "",
+            exams: examColumnTokens(inSheet.map((e) => e.exam_code)),
+            grade: inSheet.find((e) => e.grade)?.grade || "",
+            examiner: report.reviewedBy || "",
+            rolesGive: "",
+            rolesRemove: "",
+            vacationDates: "",
+            reason: `Рапорт на экзамены #${report.id}`,
+          });
+          parts.push(result.ok ? result.message : `ШДС: ошибка (${result.error})`);
+        }
+
+        if (manual.length) {
+          parts.push(
+            `отметить вручную (столбца в ШДС нет): ${manual
+              .map((e) => (e.grade ? `${e.exam_code} — ${e.grade}` : e.exam_code))
+              .join(", ")}`
+          );
+        }
         break;
       }
 

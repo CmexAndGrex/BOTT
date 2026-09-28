@@ -317,3 +317,132 @@ describe("Интерфейс: пункт меню и экран кабинета
     assert.match(source, /router\.push\(nextPath \|\| "\/"\)/);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Меню рапортов без 404 и раздел «Экзамены»                           */
+/* ------------------------------------------------------------------ */
+
+describe("Меню «Подать рапорт»: переходов по ссылкам нет", () => {
+  test("в выпадающем меню нет ни одной ссылки на /reports/…", () => {
+    const source = read("src/components/shell.tsx");
+    // Раньше здесь были href="/reports/exam" и подобные — динамического сегмента
+    // у /reports нет, и каждый клик давал 404. Теперь только кнопки с openReport.
+    assert.equal(
+      /href="\/reports\//.test(source),
+      false,
+      "в меню рапортов не должно быть ссылок вида /reports/<тип>"
+    );
+    assert.match(source, /openReport\(\{ type \}\)/);
+  });
+
+  test("клик по типу рапорта — кнопка, а не переход", () => {
+    const source = read("src/components/shell.tsx");
+    // Ищем блок быстрых типов: он должен состоять из <button type="button">
+    const quick = source.slice(
+      source.indexOf("report-quick-types"),
+      source.indexOf("Подвал сайдбара")
+    );
+    assert.ok(quick.length > 0, "блок быстрых типов не найден");
+    assert.match(quick, /<button/);
+    assert.equal(/<Link/.test(quick), false, "в блоке типов рапортов осталась ссылка");
+  });
+
+  test("лончер умеет открывать окно с уже отмеченными нормативами", () => {
+    const launcher = read("src/components/report-launcher.tsx");
+    assert.match(launcher, /exams\?: readonly string\[\]/);
+    assert.match(launcher, /setPresetExams\(options\?\.exams \?\? \[\]\)/);
+    // Предвыбор доезжает до формы через проп — форма остаётся управляемой
+    assert.match(launcher, /presetExams=\{presetExams\}/);
+  });
+
+  test("старые адреса /reports/<тип> по-прежнему перенаправляются, а не 404", () => {
+    const source = read("src/app/reports/[type]/page.tsx");
+    assert.match(source, /redirect\(known \? `\/reports\?type=\$\{type\}` : "\/reports"\)/);
+  });
+
+  test("неизвестный адрес показывает карточку панели, а не белый экран", () => {
+    const source = read("src/app/not-found.tsx");
+    assert.match(source, /Адрес не найден/);
+    assert.match(source, /href="\/"/);
+    assert.match(source, /href="\/reports"/);
+  });
+});
+
+describe("Раздел «Экзамены»: пункт меню и вкладки", () => {
+  test("пункт «Экзамены» есть в сайдбаре с иконкой выпускника", () => {
+    const source = read("src/components/shell.tsx");
+    assert.match(source, /href: "\/exams", label: "Экзамены", icon: GraduationCap/);
+    assert.match(source, /GraduationCap/, "иконка должна быть импортирована");
+  });
+
+  test("пункт стоит в блоке «ОСНОВНОЕ» и виден только действующей сессии", () => {
+    const source = read("src/components/shell.tsx");
+    const main = source.slice(source.indexOf("const mainNav: NavItem[]"), source.indexOf("const staffNav"));
+    assert.match(main, /\/exams/);
+    assert.match(main, /cabinet !== "no_session"/);
+    // В списке управления (штабском) раздела быть не должно: он для всех бойцов
+    const staff = source.slice(source.indexOf("const staffNav"), source.indexOf("const mobileNav"));
+    assert.equal(staff.includes("/exams"), false);
+  });
+
+  test("страница раздела определяет подразделение из сессии", () => {
+    const source = read("src/app/exams/page.tsx");
+    assert.match(source, /examSpecialities\(data\?\.member\?\.unit \?\? null\)/);
+    assert.match(source, /\/api\/member\/dossier/);
+  });
+
+  test("статусы нормативов: зелёный бейдж, «Не сдано» и кнопка подачи", () => {
+    const source = read("src/app/exams/page.tsx");
+    assert.match(source, /badge badge-green/);
+    assert.match(source, /Не сдано/);
+    assert.match(source, /Сдать норматив/);
+    // Кнопка открывает модалку на вкладке «Экзамены» с предвыбранным нормативом
+    assert.match(source, /openReport\(\{ type: "exam", exams: \[code\]/);
+  });
+
+  test("прогресс-бар подписан числом сданных нормативов", () => {
+    const source = read("src/app/exams/page.tsx");
+    assert.match(source, /\{summary\}/);
+    assert.match(source, /hours-fill/);
+  });
+
+  test("middleware пускает в раздел только действующую сессию", () => {
+    const source = read("src/middleware.ts");
+    const memberPaths = source.slice(
+      source.indexOf("const memberPaths = ["),
+      source.indexOf("const staffPaths = [")
+    );
+    assert.match(memberPaths, /"\/exams"/);
+  });
+});
+
+describe("Кабинет: блок «Моя анкета» удалён", () => {
+  test("карточки анкеты нет ни на странице, ни в панели досье", () => {
+    const page = read("src/app/profile/page.tsx");
+    const panel = read("src/components/dossier-panel.tsx");
+    for (const source of [page, panel]) {
+      assert.equal(source.includes("Моя анкета"), false, "карточка «Моя анкета» осталась");
+      assert.equal(source.includes("данные рапорта"), false, "eyebrow анкеты остался");
+    }
+  });
+
+  test("на странице не осталось полей и обработчика анкеты", () => {
+    const page = read("src/app/profile/page.tsx");
+    for (const marker of [
+      "handleProfileSave",
+      "profileBusy",
+      "Опыт в Arma 3",
+      "profile-specializations",
+    ]) {
+      assert.equal(page.includes(marker), false, `в кабинете осталось «${marker}»`);
+    }
+  });
+
+  test("роут анкеты и форма заявления не тронуты — ими пользуются модерация и /apply", () => {
+    // Удалялся только блок в кабинете: правила проверки анкеты живут в recruits.ts
+    const route = read("src/app/api/member/profile/route.ts");
+    assert.match(route, /validateApplication/);
+    const apply = read("src/app/apply/page.tsx");
+    assert.match(apply, /SPECIALIZATIONS/);
+  });
+});

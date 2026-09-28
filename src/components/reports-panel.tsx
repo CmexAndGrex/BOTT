@@ -19,6 +19,7 @@ import {
   SHDS_ENTRY_UNITS,
   examCatalog,
   findExam,
+  formExamOptions,
   formatIsoDate,
   reportTypeMeta,
   reviewStatusLabel,
@@ -68,12 +69,18 @@ function todayIso(): string {
 export function ReportForm({
   member,
   type,
+  presetExams,
   sending,
   onPickType,
   onSubmit,
 }: {
   member: SessionMember | null;
   type: ServiceReportType | null;
+  /**
+   * Нормативы, отмеченные до открытия формы (кнопка «Сдать норматив» в разделе
+   * «Экзамены»). Список применяется как начальное состояние формы.
+   */
+  presetExams?: readonly string[];
   sending: boolean;
   /**
    * Выбор типа рапорта. `null` — «вернуться к списку типов»: так работает
@@ -105,7 +112,14 @@ export function ReportForm({
       }
     >
       <div className="p-5">
-        {type === "exam" && <ExamForm member={member} sending={sending} onSubmit={onSubmit} />}
+        {type === "exam" && (
+          <ExamForm
+            member={member}
+            presetExams={presetExams}
+            sending={sending}
+            onSubmit={onSubmit}
+          />
+        )}
         {type === "role" && <RoleForm sending={sending} onSubmit={onSubmit} />}
         {type === "vacation" && <VacationForm sending={sending} onSubmit={onSubmit} />}
         {type === "reserve" && <ReserveForm sending={sending} onSubmit={onSubmit} />}
@@ -282,22 +296,49 @@ function TypePicker({ onPick }: { onPick: (type: ServiceReportType) => void }) {
 /**
  * Рапорт на экзамены: пакетный выбор нормативов чекбоксами.
  *
- * Список нормативов берётся из examCatalog() по подразделению бойца, а поле
- * оценки раскрывается только для нормативов, где она предусмотрена (КМБТ —
- * базовый экзамен и сдаётся без оценки: то же правило в gsheets.ts).
+ * Перечень строится formExamOptions() по подразделению бойца: сначала столбцовые
+ * нормативы листа ШДС (их бот закрашивает при одобрении), затем внеплановые курсы
+ * подразделения (Берет, ПВО, КБМ) — по ним отметку штаб ставит вручную, о чём
+ * строка честно предупреждает. Поле оценки раскрывается только у нормативов, где
+ * она предусмотрена (КМБТ — базовый экзамен и сдаётся без оценки: то же правило в
+ * gsheets.ts).
+ *
+ * `presetExams` — нормативы, отмеченные ещё до открытия формы: так работает
+ * кнопка «Сдать норматив» в разделе «Экзамены». Предвыбор применяется как
+ * НАЧАЛЬНОЕ состояние (useState с функцией-инициализатором), а не через эффект:
+ * эффект с setState дал бы каскадный рендер и требовал бы сброса при каждой
+ * смене пропса. Повторное открытие окна с другим нормативом пересоздаёт форму —
+ * вызывающая сторона передаёт разный ключ (см. ReportModal в dossier-panel.tsx).
  */
 function ExamForm({
   member,
+  presetExams = [],
   sending,
   onSubmit,
 }: {
   member: SessionMember | null;
+  presetExams?: readonly string[];
   sending: boolean;
   onSubmit: (type: ServiceReportType, payload: unknown, reset: () => void) => Promise<void> | void;
 }) {
   const catalog = useMemo(() => examCatalog(member?.unit ?? null), [member?.unit]);
+  /**
+   * Перечень для отметок: столбцовые нормативы листа плюс внеплановые курсы
+   * подразделения (Берет, ПВО, КБМ). Без второго блока кнопка «Сдать норматив» в
+   * разделе «Экзамены» открывала бы форму без нужного норматива.
+   */
+  const options = useMemo(() => formExamOptions(member?.unit ?? null), [member?.unit]);
   /** Выбранные нормативы: код → оценка (пустая строка = без оценки) */
-  const [selected, setSelected] = useState<Record<string, string>>({});
+  const [selected, setSelected] = useState<Record<string, string>>(() => {
+    // Отмечаем только те предвыбранные названия, что есть в перечне: чужой
+    // норматив (например, «РСЗО» у танкиста) валидатор отклонил бы при отправке
+    const allowed = new Set(options.map((exam) => exam.code));
+    const initial: Record<string, string> = {};
+    for (const code of presetExams) {
+      if (allowed.has(code)) initial[code] = "";
+    }
+    return initial;
+  });
 
   const chosen = Object.keys(selected);
   const reset = () => setSelected({});
@@ -339,7 +380,7 @@ function ExamForm({
       )}
 
       <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-        {catalog.exams.map((exam) => {
+        {options.map((exam) => {
           const active = exam.code in selected;
           return (
             <div
@@ -361,6 +402,17 @@ function ExamForm({
                 {!exam.graded && (
                   <span className="chip ml-auto" style={{ fontSize: "0.62rem" }}>
                     без оценки
+                  </span>
+                )}
+                {/* Внеплановый курс: столбца в листе нет — предупреждаем сразу,
+                    чтобы боец не ждал автозакраски, которой не будет */}
+                {exam.inShds === false && (
+                  <span
+                    className="chip ml-auto"
+                    style={{ fontSize: "0.62rem" }}
+                    title="Отметку по этому нормативу штаб ставит вручную: столбца в листе ШДС нет"
+                  >
+                    вручную
                   </span>
                 )}
               </label>

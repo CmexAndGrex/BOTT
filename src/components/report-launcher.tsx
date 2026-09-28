@@ -23,6 +23,15 @@ import { validateReportPayload, type ServiceReportType } from "@/lib/reports";
 export type OpenReportOptions = {
   /** Открыть сразу на нужной вкладке (экзамены / отпуск / роль) */
   type?: ServiceReportType | null;
+  /**
+   * Открыть форму экзаменов с уже отмеченными нормативами.
+   *
+   * Так работает кнопка «Сдать норматив» в разделе «Экзамены»: боец не ищет
+   * нужную строку в общем списке из 30+ пунктов, а получает её отмеченной.
+   * Названия должны быть из каталога рапортов (allExamCodes) — иначе валидатор
+   * отклонит отправку, поэтому сюда попадают только коды требований раздела.
+   */
+  exams?: readonly string[];
   /** Вызывается после успешной отправки — страница может обновить данные */
   onSubmitted?: () => void;
 };
@@ -34,6 +43,16 @@ export type ReportLauncher = {
   openReport: (options?: OpenReportOptions) => void;
   /** Закрыть окно */
   closeReport: () => void;
+  /**
+   * Нормативы, предвыбранные при последнем открытии окна.
+   *
+   * Хранятся в вызывающей стороне (провайдере), а не в форме: форма — общий
+   * компонент для страницы /reports, кабинета и модалки, и её собственное
+   * состояние предвыбора пришлось бы синхронизировать с открытием окна эффектом
+   * (лишний рендер и замечание react-hooks). Ключ формы меняется вместе с
+   * предвыбором, поэтому состояние пересоздаётся без эффектов.
+   */
+  presetExams: readonly string[];
 };
 
 const ReportLauncherContext = createContext<ReportLauncher | null>(null);
@@ -47,7 +66,7 @@ const ReportLauncherContext = createContext<ReportLauncher | null>(null);
 export function useReportLauncher(): ReportLauncher {
   const ctx = useContext(ReportLauncherContext);
   if (ctx) return ctx;
-  return { open: false, openReport: () => {}, closeReport: () => {} };
+  return { open: false, openReport: () => {}, closeReport: () => {}, presetExams: [] };
 }
 
 export function ReportLauncherProvider({ children }: { children: React.ReactNode }) {
@@ -57,6 +76,8 @@ export function ReportLauncherProvider({ children }: { children: React.ReactNode
   const [onSubmitted, setOnSubmitted] = useState<(() => void) | null>(null);
   /** Карточка бойца для формы: подтягивается при первом открытии окна */
   const [member, setMember] = useState<SessionMember | null>(null);
+  /** Нормативы, отмеченные при открытии окна (кнопка «Сдать норматив») */
+  const [presetExams, setPresetExams] = useState<readonly string[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -65,6 +86,9 @@ export function ReportLauncherProvider({ children }: { children: React.ReactNode
     // Тип задан — открываем сразу на его вкладке (быстрые действия сайдбара,
     // кнопки на страницах). Тип не задан — оставляем вкладку прежней.
     if (options?.type) setTab(options.type);
+    // Предвыбор нормативов сбрасывается: окно, открытое без него, не должно
+    // тянуть за собой отметки прошлой подачи
+    setPresetExams(options?.exams ?? []);
     setOnSubmitted(() => options?.onSubmitted ?? null);
     setError("");
     setNotice("");
@@ -124,8 +148,8 @@ export function ReportLauncherProvider({ children }: { children: React.ReactNode
   );
 
   const value = useMemo<ReportLauncher>(
-    () => ({ open, openReport, closeReport }),
-    [open, openReport, closeReport],
+    () => ({ open, openReport, closeReport, presetExams }),
+    [open, openReport, closeReport, presetExams],
   );
 
   return (
@@ -136,6 +160,9 @@ export function ReportLauncherProvider({ children }: { children: React.ReactNode
         member={member}
         tab={tab}
         onTabChange={setTab}
+        // Предвыбор нормативов доезжает до формы через этот проп — форма остаётся
+        // управляемой и не заводит второго источника истины
+        presetExams={presetExams}
         sending={sending}
         error={error}
         notice={notice}

@@ -636,6 +636,7 @@ export function ReportModal({
   open,
   member,
   tab,
+  presetExams = [],
   onTabChange,
   sending = false,
   error = "",
@@ -654,6 +655,8 @@ export function ReportModal({
    * (setState в эффекте дал бы лишний рендер и замечание react-hooks).
    */
   tab: ServiceReportType;
+  /** Нормативы, отмеченные при открытии окна (кнопка «Сдать норматив») */
+  presetExams?: readonly string[];
   onTabChange: (type: ServiceReportType) => void;
   /** Идёт отправка: кнопки формы блокируются */
   sending?: boolean;
@@ -786,8 +789,13 @@ export function ReportModal({
 
             <div className="px-5 pb-5 pt-4">
               <ReportForm
+                // Ключ пересоздаёт форму при смене вкладки или предвыбора: без него
+                // состояние чекбоксов осталось бы от прошлого открытия окна, и
+                // предвыбор «Сдать норматив» не применился бы ко второму нормативу
+                key={`${tab}:${presetExams.join("|")}`}
                 member={member}
                 type={tab}
+                presetExams={presetExams}
                 sending={sending}
                 // «Другой тип» внутри окна: вкладки уже переключаются чипами выше,
                 // поэтому null (возврат к списку типов) здесь просто игнорируется —

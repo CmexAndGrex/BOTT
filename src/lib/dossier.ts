@@ -208,6 +208,14 @@ export type DossierReportRow = {
   createdAt: Date | string;
   reviewedBy?: string | null;
   moderatorComment?: string | null;
+  /**
+   * Оценка экзаменатора из рапорта на экзамены.
+   *
+   * Лежит рядом с датой решения, а не внутри payload: разделу «Экзамены» нужны
+   * «оценка + дата» по названию норматива, и доставать их из jsonb в каждом
+   * месте — лишний разбор (payload читается валидатором, см. dossier/route.ts).
+   */
+  grade?: string | null;
 };
 
 /**
@@ -219,27 +227,66 @@ export type DossierReportRow = {
  * столбец (scenarioExam в gsheets.ts). Дедупликация по нормализованному
  * названию: один норматив мог быть сдан рапортом дважды (пересдача), а в списке
  * допусков он должен быть один.
+ *
+ * Возвращаются только названия: этот вид нужен матрице техники
+ * (getAvailableVehicles), которой оценка и дата не важны.
  */
 export function collectQualifications(
   reports: readonly DossierReportRow[],
   examCodesOf: (report: DossierReportRow) => readonly string[]
 ): string[] {
+  return collectQualificationDetails(reports, examCodesOf).map((item) => item.code);
+}
+
+/**
+ * Сданный норматив с оценкой и датой.
+ *
+ * Раздел «Экзамены» показывает по ним зелёный бейдж: оценка — из одобренного
+ * рапорта (её вписывает экзаменатор), дата — дата решения штаба, то есть момент,
+ * когда столбец ШДС и был закрашен. Матрице техники хватает названий, но
+ * собирать две почти одинаковые функции незачем: детальный вид — источник, а
+ * список названий получается из него производным.
+ */
+export type QualificationDetail = {
+  /** Название норматива как оно записано в рапорте (оно же — столбец ШДС) */
+  code: string;
+  /** Оценка экзаменатора; пусто — оценка не выставлялась (например, КМБТ) */
+  grade: string | null;
+  /** Дата сдачи (ISO): дата решения по рапорту */
+  at: string | null;
+};
+
+/**
+ * Детальный список сданных нормативов: название, оценка и дата.
+ *
+ * При пересдаче сохраняется ПЕРВАЯ запись (рапорты приходят отсортированными по
+ * убыванию даты, поэтому «первая» — самая свежая): бойцу важнее последняя
+ * оценка, а не давняя. Порядок в списке — от свежих к старым.
+ */
+export function collectQualificationDetails(
+  reports: readonly DossierReportRow[],
+  examCodesOf: (report: DossierReportRow) => readonly string[]
+): QualificationDetail[] {
   const seen = new Set<string>();
-  const codes: string[] = [];
+  const list: QualificationDetail[] = [];
 
   for (const report of reports) {
     if (report.type !== "exam" || report.status !== "approved") continue;
+    const at = report.createdAt ? new Date(report.createdAt) : null;
+    const atIso = at && !Number.isNaN(at.getTime()) ? at.toISOString() : null;
+    const grade = typeof report.grade === "string" ? report.grade.trim() : "";
+
     for (const code of examCodesOf(report)) {
       const trimmed = String(code ?? "").trim();
       if (!trimmed) continue;
       const key = trimmed.toLowerCase().replace(/ё/g, "е");
       if (seen.has(key)) continue;
       seen.add(key);
-      codes.push(trimmed);
+      list.push({ code: trimmed, grade: grade || null, at: atIso });
     }
   }
 
-  return codes;
+  return list;
 }
 
 /** Итог службы: сколько рапортов и в каком состоянии */
@@ -254,6 +301,13 @@ export type ServiceSummary = {
   lastAt: Date | null;
   /** Сданные нормативы (одобренные рапорты на экзамены) */
   qualifications: string[];
+  /**
+   * Те же нормативы с оценкой и датой — для раздела «Экзамены».
+   *
+   * `qualifications` остаётся плоским списком: это контракт матрицы техники
+   * (getAvailableVehicles) и шапки кабинета, менять его без нужды не стоит.
+   */
+  qualificationDetails: QualificationDetail[];
 };
 
 /** Сводка по рапортам бойца для шапки истории службы */
@@ -279,6 +333,11 @@ export function serviceSummary(
     }
   }
 
+  // Нормативы собираются один раз: плоский список (`qualifications`) и детальный
+  // — производные одного прохода, иначе пересдача могла бы попасть в один вид, но
+  // не в другой.
+  const details = collectQualificationDetails(reports, examCodesOf);
+
   return {
     total: reports.length,
     pending,
@@ -286,7 +345,8 @@ export function serviceSummary(
     rejected,
     firstAt,
     lastAt,
-    qualifications: collectQualifications(reports, examCodesOf),
+    qualifications: details.map((item) => item.code),
+    qualificationDetails: details,
   };
 }
 

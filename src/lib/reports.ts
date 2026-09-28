@@ -156,6 +156,16 @@ export type ExamDefinition = {
    * оценки не получает (то же правило в gsheets.ts, сценарий EXAM).
    */
   graded: boolean;
+  /**
+   * Есть ли у норматива столбец в листе ШДС.
+   *
+   * false — норматив сдаётся и подаётся рапортом (спецкурсы, «Берет», «КБМ»), но
+   * отдельного столбца в листе нет: бот его не закрасит, отметку ставит штаб
+   * вручную. Признак нужен и разделу «Экзамены» (чтобы честно предупредить
+   * бойца), и проверке связи каталога с шапкой листа: сопоставлять с шапкой
+   * имеет смысл только столбцовые нормативы.
+   */
+  shds?: boolean;
 };
 
 /** Нормативы «Танковая рота» (заголовки столбцов листа, начиная с КМБТ) */
@@ -189,6 +199,57 @@ const AD_EXAMS: readonly ExamDefinition[] = [
   { code: "Управление гусеничной техникой", graded: true },
   { code: "Сдача на мехвода", graded: true },
   { code: "Устав АТК", graded: true },
+];
+
+/**
+ * Нормативы, которые сдаются рапортом, но своего столбца в листе ШДС не имеют.
+ *
+ * Это спецкурсы (ПВО, БПЛА), экзамен на берет (топография, связь, строй,
+ * должностные лица) и курсы испытателя (КБМ, уставы). В шапках листов
+ * «Танковая рота» / «Артиллерийский дивизион» таких названий нет, поэтому:
+ *   * в EXAM_CATALOG они НЕ попадают — тот каталог обязан совпадать с шапкой
+ *     построчно (иначе рапорт «одобрится» без отметки в таблице, см. тест
+ *     «нормативы из каталога находятся в реальных шапках листов ШДС»);
+ *   * здесь они нужны, чтобы валидатор не отклонил рапорт с нормативом из
+ *     раздела «Экзамены»: рапорт уходит в канал рапортов, а отметку в таблице
+ *     штаб ставит вручную.
+ *
+ * `units` — в каком подразделении норматив имеет смысл: показывать танкисту
+ * курс РСЗО значило бы предлагать чужой норматив.
+ */
+export type ManualExamDefinition = ExamDefinition & { units: readonly Unit[] };
+
+const MANUAL_EXAMS: readonly ManualExamDefinition[] = [
+  // Обе шкалы: экзамен на берет одинаков у роты и дивизиона
+  { code: "Топография", graded: true, shds: false, units: UNITS },
+  { code: "Связь", graded: true, shds: false, units: UNITS },
+  { code: "Строевая подготовка", graded: true, shds: false, units: UNITS },
+  { code: "Должностные лица", graded: true, shds: false, units: UNITS },
+  { code: "Берет", graded: true, shds: false, units: UNITS },
+  { code: "Уставы общие", graded: true, shds: false, units: UNITS },
+  { code: "ПВО", graded: true, shds: false, units: UNITS },
+  // Танковая рота: курсы испытателя и миномётный спецкурс
+  { code: "КБМ Испыт.", graded: true, shds: false, units: ["Танковая рота"] },
+  { code: "КБМ", graded: true, shds: false, units: ["Танковая рота"] },
+  { code: "Миномётное дело (Экзамен)", graded: true, shds: false, units: ["Танковая рота"] },
+  // Артиллерийский дивизион: беспилотники и артиллерийское дело
+  { code: "БПЛА", graded: true, shds: false, units: ["Артиллерийский дивизион"] },
+  { code: "РСЗО (обучение)", graded: true, shds: false, units: ["Артиллерийский дивизион"] },
+  { code: "РСЗО (Экзамен)", graded: true, shds: false, units: ["Артиллерийский дивизион"] },
+  {
+    code: "Артиллерийское дело (обучение)",
+    graded: true,
+    shds: false,
+    units: ["Артиллерийский дивизион"],
+  },
+  {
+    // Написание из ТЗ: оно же — код требования допуска к САУ в vehicles.ts
+    code: "Артиллирийское Дело (Экзамен)",
+    graded: true,
+    shds: false,
+    units: ["Артиллерийский дивизион"],
+  },
+  { code: "Техника АТК", graded: true, shds: false, units: ["Артиллерийский дивизион"] },
 ];
 
 export type ExamCatalog = {
@@ -234,17 +295,61 @@ export function normalizeExamCode(value: unknown): string {
 export function findExam(code: string): ExamDefinition | null {
   const needle = normalizeExamCode(code);
   if (!needle) return null;
-  for (const exam of [...TR_EXAMS, ...AD_EXAMS]) {
+  for (const exam of [...TR_EXAMS, ...AD_EXAMS, ...MANUAL_EXAMS]) {
     if (normalizeExamCode(exam.code) === needle) return exam;
   }
   return null;
 }
 
-/** Все допустимые названия нормативов (для серверной проверки payload) */
+/**
+ * Все допустимые названия нормативов (для серверной проверки payload).
+ *
+ * Кроме столбцовых нормативов листов сюда входят внеплановые (MANUAL_EXAMS):
+ * раздел «Экзамены» подаёт рапорты и по ним, и отклонить такой рапорт значило бы
+ * сломать кнопку «Сдать норматив» на спецкурсах и экзамене на берет.
+ */
 export function allExamCodes(): string[] {
   const codes = new Set<string>();
-  for (const exam of [...TR_EXAMS, ...AD_EXAMS]) codes.add(exam.code);
+  for (const exam of [...TR_EXAMS, ...AD_EXAMS, ...MANUAL_EXAMS]) codes.add(exam.code);
   return [...codes];
+}
+
+/**
+ * Нормативы, у которых нет столбца в листе ШДС своего подразделения.
+ *
+ * Нужно интерфейсу и модерации, чтобы отличить «рапорт закрасит столбец» от
+ * «отметку поставит штаб вручную». Без подразделения возвращаются все
+ * внеплановые: боец ещё не зачислен, и обещать закраску нельзя.
+ */
+export function manualExamCodes(unit?: string | null): string[] {
+  const normalized = (unit || "").trim().toLowerCase();
+  const exact = UNITS.find((u) => u.toLowerCase() === normalized) ?? null;
+  return MANUAL_EXAMS.filter((exam) => !exact || exam.units.includes(exact)).map(
+    (exam) => exam.code
+  );
+}
+
+/** Норматив в форме подачи: к столбцовым добавляется признак «есть в листе» */
+export type FormExamOption = ExamDefinition & {
+  /** Столбец есть в листе подразделения — бот закрасит его при одобрении */
+  inShds: boolean;
+};
+
+/**
+ * Перечень нормативов для формы подачи рапорта.
+ *
+ * Столбцовые нормативы листа идут первыми (их большинство), внеплановые курсы
+ * подразделения — следом. Без такого объединения кнопка «Сдать норматив» на
+ * спецкурсах открывала бы форму, в которой нужного норматива нет вовсе: раньше
+ * список строился только по каталогу листа, а «Берет» и «ПВО» в него не входят.
+ */
+export function formExamOptions(unit: string | null | undefined): FormExamOption[] {
+  const columnExams = examCatalog(unit).exams.map((exam) => ({ ...exam, inShds: true }));
+  const manual = manualExamCodes(unit).filter(
+    (code) => !columnExams.some((exam) => normalizeExamCode(exam.code) === normalizeExamCode(code))
+  );
+
+  return [...columnExams, ...manual.map((code) => ({ ...findExam(code)!, inShds: false }))];
 }
 
 /**

@@ -7,7 +7,7 @@ import React, { useEffect, useState } from "react";
 import BackgroundSlideshow from "@/components/background";
 import { ReportLauncherProvider, useReportLauncher } from "@/components/report-launcher";
 import {
-  Activity, BookOpen, Bot, ChevronDown, Crosshair, FilePlus2, Globe, IdCard, Inbox,
+  Activity, BookOpen, Bot, ChevronDown, Crosshair, FilePlus2, Globe, GraduationCap, IdCard, Inbox,
   LayoutDashboard, LogIn, LogOut, ScrollText, Settings2, ShieldAlert, UserRound, Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -192,6 +192,11 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
     // «Арсенал»: пресеты выкладок для состава. Пункт виден только вошедшему —
     // каталог отдаётся под сессией бойца либо панели, и гостю он был бы тупиком
     { href: "/armory", label: "Арсенал", icon: Crosshair },
+    // «Экзамены»: интерактивная шкала нормативов по специальностям подразделения.
+    // Пункт виден любому, у кого есть действующая сессия (как «Личный кабинет»):
+    // набор специальностей зависит от подразделения бойца, а гость получил бы
+    // заглушку — он и так уходит на вход по правилу кабинета.
+    ...(cabinet !== "no_session" ? [{ href: "/exams", label: "Экзамены", icon: GraduationCap }] : []),
     // Свои рапорты бойца: подача идёт модальным окном, здесь — история подач
     // со статусами решений штаба. Пункт только для того, у кого есть сессия
     // кабинета: у командира панели без строки бойца страница показала бы
@@ -373,16 +378,10 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
                         </button>
                       );
                     })}
-                    <Link
-                      href="/reports"
-                      className="nav-link"
-                      style={{ fontSize: "0.8rem" }}
-                      onClick={() => setReportMenuOpen(false)}
-                    >
-                      <span style={{ position: "relative", zIndex: 1, display: "flex", gap: "0.55rem", alignItems: "center" }}>
-                        <ScrollText size={13} /> Мои рапорты
-                      </span>
-                    </Link>
+                    {/* Ссылки на страницы из меню убраны совсем: раздел «Мои
+                        рапорты» стоит отдельным пунктом в «ОСНОВНОЕ», а здесь
+                        остались только запуски модалки — клик по типу рапорта не
+                        меняет URL и не может привести на несуществующий адрес */}
                   </div>
                 </motion.div>
               )}
