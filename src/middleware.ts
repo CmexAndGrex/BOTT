@@ -27,6 +27,10 @@ const cookieAuthApiPaths = [
   // Кабинет бойца: cookie member_token, запросы с чужого сайта недопустимы
   // (иначе возможна CSRF-смена пароля и отвязка Discord)
   "/api/member/profile", "/api/member/discord", "/api/admin/recruits", "/api/auth/member-logout",
+  // Вход по паролю и отладочный вход: меняют сессию (ставят cookie), поэтому
+  // запрос с чужого сайта отклоняем. Вне production dev-login отвечает 404,
+  // но источник проверяется всё равно — правило не должно зависеть от режима.
+  "/api/auth/member-login", "/api/auth/dev-login",
   // Рапорты и решения штаба из панели: cookie-авторизация, значит нужна
   // CSRF-проверка (иначе чужой сайт мог бы отправить рапорт за бойца)
   "/api/member/reports", "/api/admin/reports",
@@ -207,7 +211,16 @@ export async function middleware(req: NextRequest) {
 
   const deny = (message: string, redirectTo = "/login") => {
     if (isApi) return NextResponse.json({ error: message }, { status: 403 });
-    return NextResponse.redirect(new URL(redirectTo, req.url));
+    // Возврат на исходную страницу после входа (?next=): без него клик «Войти»
+    // на /profile вёл на /login, а после входа человек снова оказывался на
+    // кабинете с заглушкой — цикл «/profile → /login → /profile» из отчёта.
+    // Путь всегда локальный (строится из pathname запроса), поэтому открытого
+    // редиректа здесь быть не может; страница входа проверит его ещё раз.
+    // Добавляем только к входу: у отказа «Недостаточно прав» с уводом на
+    // /profile возврат на исходную страницу был бы бессмысленным.
+    const target =
+      redirectTo === "/login" ? `${redirectTo}?next=${encodeURIComponent(pathname)}` : redirectTo;
+    return NextResponse.redirect(new URL(target, req.url));
   };
 
   /**
@@ -236,13 +249,18 @@ export async function middleware(req: NextRequest) {
     const claims = memberToken ? await memberClaims(memberToken) : null;
 
     if (!claims) {
-      // Командир и администратор панели сохраняют доступ к модерации рапортов
+      // Командир и администратор панели сюда тоже допускаются: у командира
+      // может не быть строки бойца в табеле, но свой кабинет (/profile) он
+      // должен открывать — по ТЗ у него полный доступ и к панели, и к досье.
+      // Страница сама объяснит, что личное дело доступно зачисленным: она
+      // получает 401/403 от /api/member/dossier и показывает экран входа.
+      const panelToken = req.cookies.get("auth_token")?.value;
+      const role = panelToken ? await panelRole(panelToken) : null;
+      if (role === "admin" || role === "officer") {
+        return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
+      }
+
       if (isStaffArea) {
-        const panelToken = req.cookies.get("auth_token")?.value;
-        const role = panelToken ? await panelRole(panelToken) : null;
-        if (role === "admin" || role === "officer") {
-          return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
-        }
         return deny("Нет доступа: раздел доступен командирам", "/login");
       }
       return deny("Нет доступа: войдите в личный кабинет", "/login");

@@ -15,7 +15,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { members } from "@/db/schema";
 import { requireActiveMember } from "@/lib/member-auth";
-import { garrisonStatus, type RosterEntry } from "@/lib/a2s";
+import { garrisonStatus, type RosterEntry, type SelfMember } from "@/lib/a2s";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,6 +46,26 @@ async function loadRoster(): Promise<RosterEntry[]> {
   }));
 }
 
+/**
+ * Позывной бойца сессии для сопоставления с ником на сервере.
+ *
+ * Берётся из табеля (уже загруженного состава), а не из токена сессии: у бойцов
+ * из синхронизации rs-red.com поле callsign пустое, и позывным становится имя.
+ * С пустым значением боец не нашёлся бы на сервере никогда.
+ *
+ * Ошибка БД здесь не критична: состав уже получен, поэтому отсутствие своей
+ * записи означает лишь «статус в бою не считаем», а не сбой виджета.
+ */
+async function loadSelfMember(id: number): Promise<SelfMember | null> {
+  const [row] = await db
+    .select({ id: members.id, callsign: members.callsign, name: members.name })
+    .from(members)
+    .where(eq(members.id, id));
+
+  if (!row) return null;
+  return { id: row.id, callsign: (row.callsign || row.name || "").trim() };
+}
+
 export async function GET(req: NextRequest) {
   const auth = await requireActiveMember(req);
   if (!auth.ok) return auth.response;
@@ -65,8 +85,19 @@ export async function GET(req: NextRequest) {
   // перебивать кэш. Без параметра работает TTL 60 секунд (защита сервера от флуда).
   const force = req.nextUrl.searchParams.get("force") === "1";
 
+  // Боец сессии: позывной нужен, чтобы ответить на главный вопрос виджета —
+  // «я сейчас на сервере?». Позывной берётся из табеля (loadSelfMember): в токене
+  // сессии он может быть пустым, и тогда статус «в бою» не выдался бы никогда.
+  // Если запись не прочиталась, виджет остаётся сводкой состава — без ошибки.
+  let self: SelfMember | null = null;
   try {
-    const summary = await garrisonStatus(roster, { force });
+    self = await loadSelfMember(auth.member.id);
+  } catch (e) {
+    console.error("[vch] Не удалось прочитать бойца сессии:", e);
+  }
+
+  try {
+    const summary = await garrisonStatus(roster, { force, member: self });
 
     return NextResponse.json({
       ok: true,
@@ -76,6 +107,8 @@ export async function GET(req: NextRequest) {
       onlineCount: summary.onlineCount,
       maxPlayers: summary.maxPlayers,
       map: summary.map,
+      /** Боец сессии найден среди игроков — зелёный бейдж «в бою» */
+      selfOnline: summary.selfOnline,
       clanMembersOnline: summary.clanMembersOnline.map((entry) => ({
         id: entry.id,
         callsign: entry.callsign,
@@ -98,6 +131,8 @@ export async function GET(req: NextRequest) {
       onlineCount: 0,
       maxPlayers: 0,
       map: null,
+      /** Сервер не опрошен — «я в бою» утверждать нельзя */
+      selfOnline: false,
       clanMembersOnline: [],
       clanOnlineCount: 0,
       notice: "Не удалось опросить сервер",

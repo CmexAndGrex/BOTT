@@ -244,7 +244,18 @@ async function handleLogin(req: NextRequest, profile: DiscordProfile): Promise<N
     return setMemberCookie(response, session, req);
   }
 
-  const response = redirectTo(req, "/apply?discord=1");
+  // Ни аккаунта панели, ни бойца с таким Discord: показываем это ЯВНО на
+  // странице входа. Раньше здесь был молчаливый редирект на /apply, и вход
+  // выглядел как «Discord не находит пользователя»: человек не понимал, что
+  // его Discord не привязан к бойцу в ШДС, и что делать дальше.
+  //
+  // Контакт Discord всё равно сохраняем в cookie: если человек пойдёт подавать
+  // рапорт, поля ID и аватара заполнятся сами — то есть прежняя возможность
+  // подать заявку сохраняется, но теперь о причине сообщено.
+  const response = redirectTo(
+    req,
+    `/login?error=${encodeURIComponent("discord_not_linked")}`
+  );
   response.cookies.set({
     name: MEMBER_OAUTH_PENDING_COOKIE,
     value: packDiscordProfile(profile),

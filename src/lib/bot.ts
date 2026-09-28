@@ -43,9 +43,43 @@ import {
   rejectRecruitApplication,
   rejectServiceReport,
 } from "@/lib/review";
+import { discordQueue, queueOptionsFromSettings } from "@/lib/discord-queue";
+import { LAST_ROLE_SYNC_KEY, roleSyncSchedule } from "@/lib/role-sync";
 
 declare global {
   var __redopsBotClient: Client | undefined;
+  /** Обработчики процесса уже поставлены: защита от дублирования слушателей */
+  var __atkProcessGuards: boolean | undefined;
+  /** Таймер фоновой сверки ролей уже запущен */
+  var __atkRoleSyncTimer: ReturnType<typeof setInterval> | undefined;
+  /** Сверка ролей уже выполняется: повторный запуск не нужен */
+  var __atkRoleSyncRunning: boolean | undefined;
+}
+
+/* ------------------------------------------------------------------ */
+/* Очередь запросов к Discord: параметры из настроек                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Применяет к общей очереди параметры из настроек панели.
+ *
+ * Нужно, чтобы администратор мог убавить нагрузку, не перезапуская контейнер:
+ * настройки читаются на каждом цикле сверки. Ошибка чтения настроек не критична
+ * — очередь продолжит работать с текущими параметрами.
+ */
+async function applyQueueSettings(): Promise<void> {
+  try {
+    const map = await getSettings();
+    discordQueue().configure(
+      queueOptionsFromSettings({
+        concurrency: map.get("discord_rate_concurrency"),
+        intervalMs: map.get("discord_rate_interval_ms"),
+        attempts: map.get("discord_rate_attempts"),
+      })
+    );
+  } catch {
+    /* настройки недоступны — оставляем текущие параметры очереди */
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -577,6 +611,82 @@ async function checkVacations(client: Client, config?: BotConfig) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Фоновая сверка ролей Discord с базой панели                          */
+/* ------------------------------------------------------------------ */
+
+/** Тик проверки расписания сверки, мс: сама сверка идёт своим интервалом */
+const ROLE_SYNC_TICK_MS = 60 * 1000;
+
+/**
+ * Один цикл сверки с защитой от наложения.
+ *
+ * Флаг `__atkRoleSyncRunning` обязателен: сверка состава — это сотни запросов к
+ * Discord, и если она не успела завершиться к следующему тику (например, из-за
+ * пауз после 429), второй запуск только удвоил бы нагрузку и снова привёл к
+ * лимиту.
+ */
+async function runRoleSyncCycle(source: string): Promise<void> {
+  if (globalThis.__atkRoleSyncRunning) return;
+  globalThis.__atkRoleSyncRunning = true;
+  try {
+    await applyQueueSettings();
+    // Динамический импорт: модуль сверки тянет за собой модуль Discord REST,
+    // который не нужен, пока сверка выключена или пока бот ещё не подключился.
+    const { syncGuildRoles } = await import("@/lib/role-sync-runtime");
+    const result = await syncGuildRoles({ source });
+    if (!result.ok && result.error) {
+      console.error(`[bot] Сверка ролей: ${result.error}`);
+    }
+  } catch (e) {
+    console.error(
+      "[bot] Сверка ролей не выполнена:",
+      e instanceof Error ? e.message : e
+    );
+  } finally {
+    globalThis.__atkRoleSyncRunning = false;
+  }
+}
+
+/**
+ * Запускает фоновую сверку ролей.
+ *
+ * Интервал и сам факт запуска определяет настройка: сверка меняет роли живым
+ * людям, и по умолчанию она выключена. Отметка `_last_role_sync` не даёт ей
+ * запуститься сразу после каждого перезапуска контейнера — иначе при частых
+ * деплоях весь состав пересчитывался бы снова и снова.
+ */
+function startRoleSyncLoop(): void {
+  if (globalThis.__atkRoleSyncTimer) return;
+
+  globalThis.__atkRoleSyncTimer = setInterval(() => {
+    void (async () => {
+      try {
+        const map = await getSettings(true);
+        const schedule = roleSyncSchedule(map);
+        if (!schedule.enabled) return;
+
+        const last = Date.parse(map.get(LAST_ROLE_SYNC_KEY) || "") || 0;
+        if (Date.now() - last < schedule.intervalMin * 60 * 1000) return;
+
+        await runRoleSyncCycle("schedule");
+      } catch (e) {
+        // Планировщик не должен падать: ошибка чтения настроек — не повод
+        // останавливать проверку отпусков и остальные фоновые задачи.
+        console.error("[bot] Планировщик сверки ролей:", e instanceof Error ? e.message : e);
+      }
+    })();
+  }, ROLE_SYNC_TICK_MS);
+
+  // unref: фоновый таймер не удерживает процесс живым (как в scheduler.ts)
+  globalThis.__atkRoleSyncTimer.unref?.();
+  console.log(
+    `[bot] Фоновая сверка ролей запущена (проверка расписания раз в ${
+      ROLE_SYNC_TICK_MS / 1000
+    } с; включается настройкой «Сверка ролей»)`
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Инициализация бота                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -614,7 +724,95 @@ export function initBot() {
         );
       }
     })();
+
+    applyQueueSettings().catch(() => {});
+    startRoleSyncLoop();
   });
+
+  /* -------------------------------------------------------------- */
+  /* 0. Отказоустойчивость: связь, лимиты и «последний рубеж»        */
+  /* -------------------------------------------------------------- */
+
+  /**
+   * Слушатели проблем связи.
+   *
+   * Раньше в боте не было ни одного: разрыв WebSocket или лимит Discord
+   * оставались невидимыми в журнале, а необработанное событие `error` у EventEmitter
+   * вообще завершает процесс — то есть падала вся панель, а не только бот.
+   * Теперь каждое событие логируется, а реконнектом занимается сам discord.js:
+   * у него для этого есть встроенный механизм с backoff, и «помогать» ему
+   * повторным login() не нужно — два подключения одного бота конфликтуют.
+   */
+  client.on("error", (error) => {
+    console.error("[bot] Ошибка клиента Discord:", error instanceof Error ? error.message : error);
+  });
+
+  client.on("warn", (message) => {
+    console.warn("[bot] Предупреждение Discord:", message);
+  });
+
+  client.on("shardDisconnect", (event, shardId) => {
+    console.warn(
+      `[bot] Шард ${shardId}: соединение закрыто (код ${event?.code ?? "—"}). ` +
+        `discord.js переподключится автоматически.`
+    );
+  });
+
+  client.on("shardError", (error, shardId) => {
+    console.error(
+      `[bot] Шард ${shardId}: ошибка соединения —`,
+      error instanceof Error ? error.message : error
+    );
+  });
+
+  client.on("shardReconnecting", (shardId) => {
+    console.log(`[bot] Шард ${shardId}: переподключение…`);
+  });
+
+  client.on("shardResume", (shardId, replayedEvents) => {
+    console.log(
+      `[bot] Шард ${shardId}: связь восстановлена, досланных событий — ${replayedEvents}`
+    );
+  });
+
+  /**
+   * Событие общего лимита Discord.
+   *
+   * Это сигнал, что запросов стало слишком много: убавляем параллелизм на ходу
+   * и запоминаем паузу. Само ожидание выполняет @discordjs/rest (он держит
+   * очередь гейтвейного клиента), а мы лишь не подливаем масла в огонь.
+   */
+  client.rest.on("rateLimited", (info) => {
+    console.warn(
+      `[bot] Лимит Discord: маршрут ${info.route}, повтор через ${info.timeToReset} мс` +
+        (info.global ? " (глобальный)" : "")
+    );
+  });
+
+  // Последний рубеж: необработанные исключения и отказы промисов.
+  //
+  // Панель и бот живут в одном процессе, поэтому «обычный» краш здесь означает
+  // недоступность веб-интерфейса для всего подразделения. Такие ошибки всё равно
+  // означают дефект — их громко пишем в журнал, но процесс не роняем: задачи по
+  // расписанию и обработка заявок должны продолжиться.
+  //
+  // Обработчики ставятся один раз (флаг в globalThis): initBot может вызваться
+  // повторно при перезагрузке модулей в dev-режиме, и накопленные слушатели
+  // дублировали бы каждое сообщение в логе.
+  if (!globalThis.__atkProcessGuards) {
+    globalThis.__atkProcessGuards = true;
+
+    process.on("unhandledRejection", (reason) => {
+      console.error(
+        "[bot] Необработанный отказ промиса:",
+        reason instanceof Error ? reason.stack || reason.message : reason
+      );
+    });
+
+    process.on("uncaughtException", (error) => {
+      console.error("[bot] Необработанное исключение:", error?.stack || error?.message || error);
+    });
+  }
 
   /* -------------------------------------------------------------- */
   /* 1. Приём заявок (ШДС/отпуск) и команд на роли                  */

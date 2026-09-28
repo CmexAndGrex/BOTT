@@ -1,5 +1,11 @@
 import { getSettings, resolveToken } from "@/lib/settings";
 import { assertDiscordId } from "@/lib/validation";
+import {
+  DiscordApiError,
+  discordQueue,
+  parseRetryAfterMs,
+  queueOptionsFromSettings,
+} from "@/lib/discord-queue";
 
 const DISCORD_API = "https://discord.com/api/v10";
 
@@ -59,6 +65,40 @@ async function discordRequest<T = unknown>(
   path: string,
   init: RequestInit = {}
 ): Promise<T> {
+  // Параметры очереди читаем из настроек: администратор может убавить
+  // параллелизм, если сервер уже ловит 429 на других задачах. Ошибка чтения
+  // настроек здесь не критична — работаем с текущими параметрами очереди.
+  try {
+    const map = await getSettings();
+    discordQueue().configure(
+      queueOptionsFromSettings({
+        concurrency: map.get("discord_rate_concurrency"),
+        intervalMs: map.get("discord_rate_interval_ms"),
+        attempts: map.get("discord_rate_attempts"),
+      })
+    );
+  } catch {
+    /* настройки недоступны — оставляем параметры как есть */
+  }
+
+  // Каждый запрос проходит через общую очередь: она держит лимит запросов к
+  // Discord, а при 429 сама выдерживает Retry-After и повторяет попытку.
+  return discordQueue().run(labelForPath(path), () => sendRequest<T>(path, init));
+}
+
+/**
+ * Метка маршрута для логов и диагностики.
+ *
+ * ID из пути вырезаются: по журналу не должно быть видно, кого именно правит
+ * бот, но должно быть видно, что это за операция (иначе разбор инцидента
+ * «почему упали выдачи ролей» невозможен).
+ */
+function labelForPath(path: string): string {
+  return path.replace(/\d{5,}/g, ":id");
+}
+
+/** Одна попытка HTTP-запроса к Discord без повторов и без очереди */
+async function sendRequest<T>(path: string, init: RequestInit): Promise<T> {
   const res = await fetch(`${DISCORD_API}${path}`, {
     ...init,
     headers: {
@@ -68,17 +108,37 @@ async function discordRequest<T = unknown>(
     },
     cache: "no-store",
   });
+
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     let hint = body.slice(0, 300);
+    let code: number | null = null;
+    let bodyRetryAfter: unknown = null;
     try {
       const parsed = JSON.parse(body);
       if (parsed?.message) hint = parsed.message;
+      if (typeof parsed?.code === "number") code = parsed.code;
+      bodyRetryAfter = parsed?.retry_after;
     } catch {
-      /* noop */
+      /* тело не JSON — покажем как есть */
     }
-    throw new Error(`Discord API (${res.status}): ${hint}`);
+
+    // 429: Discord прямо говорит, сколько ждать. Отдаём значение в ошибку —
+    // очередь выдержит паузу и повторит запрос, а не упадёт с «REST error».
+    const retryAfterMs =
+      res.status === 429
+        ? parseRetryAfterMs(res.headers.get("retry-after"), bodyRetryAfter)
+        : null;
+
+    throw new DiscordApiError(`Discord API (${res.status}): ${hint}`, {
+      status: res.status,
+      code,
+      retryAfterMs,
+      path: labelForPath(path),
+    });
   }
+
+  if (res.status === 204) return null as T;
   return (await res.json().catch(() => null)) as T;
 }
 
@@ -192,7 +252,31 @@ export async function addReaction(
   );
 }
 
-/** Роли участника гильдии через REST (null — если участник не найден/ошибка) */
+/**
+ * Роли сервера: id, имя и признак managed (роль бота/интеграции).
+ *
+ * Нужны сверке ролей: `managed` решает, можно ли вообще трогать роль, а имя —
+ * то, по чему администратор ищет запись в журнале. Кэша здесь нет намеренно:
+ * состав ролей меняется редко, но именно поэтому «устаревший кэш» и приводил бы
+ * к попыткам выдать удалённую роль. Один запрос на цикл сверки — приемлемая цена.
+ */
+export async function getGuildRoles(
+  guildId: string
+): Promise<{ id: string; name: string; managed: boolean }[]> {
+  const g = assertDiscordId(guildId, "ID сервера Discord");
+  const roles = await discordRequest<{ id?: string; name?: string; managed?: boolean }[]>(
+    `/guilds/${g}/roles`
+  );
+  if (!Array.isArray(roles)) return [];
+  return roles
+    .filter((r): r is { id: string; name: string; managed?: boolean } =>
+      Boolean(r?.id && r?.name)
+    )
+    .map((r) => ({ id: r.id, name: r.name, managed: r.managed === true }));
+}
+
+/**
+ * Роли участника гильдии через REST (null — если участник не найден/ошибка) */
 export async function getGuildMemberRoles(
   guildId: string,
   userId: string

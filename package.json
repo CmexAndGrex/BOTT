@@ -12,6 +12,7 @@
     "test": "node --import ./tests/setup.mjs --test \"tests/**/*.test.ts\"",
     "verify:sheet": "node scripts/verify-sheet.mjs",
     "bootstrap:admin": "node scripts/bootstrap-admin.ts",
+    "dev:seed": "node scripts/dev-seed.ts",
     "schemas:check": "node scripts/check-schemas.mjs",
     "schemas:prepare": "node scripts/prepare-schemas.mjs",
     "ci": "npm run test && npm run typecheck && npm run lint && npm run build"

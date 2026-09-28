@@ -8,7 +8,8 @@
  *
  * Модуль разделён на две части намеренно:
  *   * ЧИСТЫЕ функции (buildInfoQuery, buildPlayerQuery, parseInfoResponse,
- *     parsePlayerResponse, stripClanTag, matchPlayersToMembers) не трогают сеть —
+ *     parsePlayerResponse, stripClanTag, normalizePlayerName, matchCallsign,
+ *     matchPlayersToMembers) не трогают сеть —
  *     их проверяют тесты на реальных байтовых ответах, без поднятого сервера;
  *   * queryServer() собирает всё вместе: UDP-обмен с таймаутом и кэш.
  * Так ошибка в разборе буфера (например, сдвиг на байт из-за кириллицы в нике)
@@ -354,6 +355,71 @@ export function normalizePlayerName(value: unknown): string {
     .toLowerCase();
 }
 
+/**
+ * Клан-тег или пометка состояния в ЛЮБЫХ скобках по краям ника.
+ *
+ * Квадратных скобок мало: тег пишут и круглыми — «(RED) Скиф», и фигурными —
+ * «{ATK} Скиф», и без снятия такого тега боец на сервере «не находится», хотя
+ * он в игре. Группа с цифрами остаётся частью ника: цифр в тегах подразделений
+ * нет, а в названиях техники они есть постоянно («Т-72Б3 (2016)»), и срезать
+ * их значило бы потерять позывной.
+ */
+const EDGE_TAG_HEAD = /^[{[(]([^)\]}]{0,16})[)\]}]+\s*/;
+const EDGE_TAG_TAIL = /\s*[{[(]([^)\]}]{0,16})[)\]}]$/;
+
+/**
+ * Украшения по краям ника: кавычки, «ёлочки», маркеры и одинокие скобки.
+ *
+ * Набор перечислен явно, а не через «не буква»: в позывных встречаются буквы
+ * других алфавитов, и широкое правило срезало бы их у края ника — «Їжак» стал бы
+ * «жак». Незакрытые скобки («(RED Скиф») перечисление снимает, а знаки
+ * препинания внутри ника и так сворачиваются в normalizePlayerName.
+ */
+const EDGE_DECOR = /^[«»"'\u201C\u201D\u201E`()[\]{}<>*~|\/\\]+|[«»"'\u201C\u201D\u201E`()[\]{}<>*~|\/\\]+$/g;
+
+/** Снять один тег с края ника; группу с цифрами оставляем как есть */
+function dropEdgeTag(name: string): string {
+  const keepDigits = (match: string, tag: string) => (/\d/.test(tag) ? match : "");
+  return name.replace(EDGE_TAG_HEAD, keepDigits).replace(EDGE_TAG_TAIL, keepDigits);
+}
+
+/** Снятие тегов и пометок в любых скобках — до трёх слоёв: «[ATK] Скиф (AFK)» → «Скиф» */
+function stripEdgeTags(rawName: string): string {
+  let name = rawName;
+  for (let i = 0; i < 3; i++) {
+    const next = dropEdgeTag(name).trim();
+    if (next === name) break;
+    name = next;
+  }
+  return name;
+}
+
+/**
+ * Ключ сравнения ника с позывным.
+ *
+ * Отличие от normalizePlayerName: снимаются теги в любых скобках по краям ника и
+ * «украшения» вроде кавычек, поэтому «(RED) Скиф» и «Скиф» дают один ключ.
+ * Регистр, «ё → е» и свёртка знаков препинания — из normalizePlayerName.
+ */
+function callsignKey(value: unknown): string {
+  const raw = String(value ?? "").replace(/\u00A0/g, " ").trim();
+  if (!raw) return "";
+  return normalizePlayerName(stripEdgeTags(raw).replace(EDGE_DECOR, ""));
+}
+
+/**
+ * Сопоставление ника игрока с позывным бойца.
+ *
+ * True, если после очистки обе стороны совпали: «[ATK] Скиф», «(RED) Скиф.» и
+ * «СКИФ» — один и тот же боец. Пустой позывной не совпадает ни с чем: иначе
+ * боец без позывного «нашёлся» бы на любом сервере и получил ложный «в бою».
+ */
+export function matchCallsign(playerName: unknown, callsign: unknown): boolean {
+  const player = callsignKey(playerName);
+  const fighter = callsignKey(callsign);
+  return Boolean(player) && player === fighter;
+}
+
 /** Боец состава для сопоставления (минимально необходимое) */
 export type RosterEntry = {
   id: number;
@@ -365,9 +431,10 @@ export type RosterEntry = {
 /**
  * Кто из состава сейчас на сервере.
  *
- * Сопоставление — по нормализованному позывному. Порядок результата сохраняется
- * как на сервере (список игроков), потому что подразделение показывает его
- * как есть («кто сейчас в игре»), а не сортирует по званию.
+ * Сопоставление — по ключу callsignKey (нормализация + снятие тегов в любых
+ * скобках по краям ника). Порядок результата сохраняется как на сервере (список
+ * игроков), потому что подразделение показывает его как есть («кто сейчас в
+ * игре»), а не сортирует по званию.
  */
 export function matchPlayersToMembers(
   players: readonly ServerPlayer[],
@@ -375,7 +442,7 @@ export function matchPlayersToMembers(
 ): RosterEntry[] {
   const byName = new Map<string, RosterEntry>();
   for (const entry of roster) {
-    const key = normalizePlayerName(entry.callsign);
+    const key = callsignKey(entry.callsign);
     // Первый в табеле важнее: дубликат позывного не должен «перебивать» запись,
     // которую уже нашли (однофамильцы с одинаковым позывным в ШДС встречаются).
     if (key && !byName.has(key)) byName.set(key, entry);
@@ -385,7 +452,7 @@ export function matchPlayersToMembers(
   const seen = new Set<number>();
 
   for (const player of players) {
-    const key = normalizePlayerName(player.name || stripClanTag(player.rawName));
+    const key = callsignKey(player.name || stripClanTag(player.rawName));
     if (!key) continue;
     const entry = byName.get(key);
     if (!entry || seen.has(entry.id)) continue;
@@ -394,6 +461,26 @@ export function matchPlayersToMembers(
   }
 
   return found;
+}
+
+/**
+ * Есть ли сам боец среди игроков сервера.
+ *
+ * Отдельно от matchPlayersToMembers: там нужен табель целиком, а здесь — ответ
+ * на один вопрос бойца «я сейчас на ВЧ?». Ответ ищется и по нику на сервере (с
+ * любым тегом и служебной пометкой), и по записи в найденном составе: если
+ * позывной в сессии и позывной в табеле написаны по-разному, боец всё равно
+ * должен увидеть себя в бою.
+ */
+export function selfOnServer(
+  players: readonly ServerPlayer[],
+  member: { id: number; callsign: string }
+): boolean {
+  if (players.some((player) => matchCallsign(player.rawName, member.callsign))) return true;
+  const matched = matchPlayersToMembers(players, [
+    { id: member.id, callsign: member.callsign, rank: "", division: null },
+  ]);
+  return matched.length > 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -569,7 +656,9 @@ export async function queryServer(
  * Сводка «Кто на ВЧ» для кабинета: живые бойцы подразделения.
  *
  * Помимо сопоставления здесь считаются данные для интерфейса: сколько всего
- * людей на сервере и сколько из них — свои.
+ * людей на сервере, сколько из них — свои и находится ли на сервере сам боец
+ * (member), от чьего имени запрошена сводка. Без member статус «в бою» не
+ * считается вовсе — сводка остаётся составом подразделения.
  */
 export type VchSummary = {
   /** Сервер ответил (неважно, есть ли на нём свои) */
@@ -582,20 +671,41 @@ export type VchSummary = {
   clanMembersOnline: RosterEntry[];
   /** Ники, которые не удалось сопоставить с составом */
   unknownPlayers: string[];
+  /** Сам боец, от чьего имени запрошена сводка, найден на сервере */
+  selfOnline: boolean;
   error?: string;
+};
+
+/** Боец, чей статус на сервере интересует виджет (минимально необходимое) */
+export type SelfMember = {
+  id: number;
+  /** Позывной из сессии: он же имя бойца в табеле и в ШДС */
+  callsign: string;
 };
 
 export async function garrisonStatus(
   roster: readonly RosterEntry[],
-  options: { config?: A2SConfig | null; timeoutMs?: number; force?: boolean; now?: number } = {}
+  options: {
+    config?: A2SConfig | null;
+    timeoutMs?: number;
+    force?: boolean;
+    now?: number;
+    /** Боец сессии: добавляет в сводку ответ «я сейчас на сервере?» */
+    member?: SelfMember | null;
+  } = {}
 ): Promise<VchSummary> {
   const result = await queryServer(options);
 
   const clanMembersOnline = matchPlayersToMembers(result.players, roster);
-  const matched = new Set(clanMembersOnline.map((entry) => normalizePlayerName(entry.callsign)));
+  const matched = new Set(clanMembersOnline.map((entry) => callsignKey(entry.callsign)));
   const unknownPlayers = result.players
     .map((player) => player.name || stripClanTag(player.rawName))
-    .filter((name) => name && !matched.has(normalizePlayerName(name)));
+    .filter((name) => name && !matched.has(callsignKey(name)));
+
+  const member = options.member ?? null;
+  // Сервер оффлайн — бойца на нём заведомо нет: без проверки online устаревший
+  // или пустой список игроков дал бы ложный зелёный «в бою».
+  const selfOnline = member && result.online ? selfOnServer(result.players, member) : false;
 
   return {
     online: result.online,
@@ -604,6 +714,7 @@ export async function garrisonStatus(
     map: result.map,
     clanMembersOnline,
     unknownPlayers,
+    selfOnline,
     ...(result.error ? { error: result.error } : {}),
   };
 }

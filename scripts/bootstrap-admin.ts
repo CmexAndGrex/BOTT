@@ -146,6 +146,15 @@ export async function bootstrapAdmin(
       [member.id, discordId, passwordHash, "Volkov"]
     );
     memberSynced = { id: member.id, callsign: member.callsign || "Volkov", name: member.name };
+
+    // Связка аккаунта панели с бойцом: она открывает личный кабинет по сессии
+    // панели (users.member_id, см. src/lib/member-auth.ts). Без неё командир
+    // после входа по логину и паролю видел в /profile заглушку «войдите в
+    // личный кабинет», хотя боец в табеле есть.
+    await pool.query("UPDATE users SET member_id = $2 WHERE username = $1", [
+      username,
+      member.id,
+    ]);
   }
 
   return { username, discordId, password, userCreated, memberSynced };

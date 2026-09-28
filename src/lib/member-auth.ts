@@ -17,7 +17,7 @@ import { NextResponse } from "next/server";
 import { SignJWT, jwtVerify } from "jose";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { memberSessions, members } from "@/db/schema";
+import { memberSessions, members, users } from "@/db/schema";
 import { getJwtSecret } from "@/lib/auth";
 import { getAuthUser, isSecureRequest } from "@/lib/api-auth";
 import {
@@ -27,6 +27,7 @@ import {
   type MemberRole,
   type MemberStatus,
 } from "@/lib/recruits";
+import { pickMemberForPanelAccount, CABINET_STATE_MESSAGES, type CabinetState, type PanelMemberCandidate } from "@/lib/panel-link";
 
 /* ------------------------------------------------------------------ */
 /* Константы                                                           */
@@ -143,21 +144,14 @@ async function verifyMemberToken(token: string): Promise<MemberTokenPayload | nu
     return null;
   }
 }
+/** Карточка бойца из БД вместе с версией токена (нужна для сверки отзыва) */
+type LoadedMember = { member: SessionMember; tokenVersion: number };
+
 /**
- * Текущий боец по cookie. null — токена нет, он просрочен, подделан, отозван
- * или боец удалён/отклонён.
- *
- * Роль и статус читаются из БД, а не из токена: понижение прав, одобрение
- * рапорта и исключение действуют немедленно, без перевыпуска cookie. Токены,
- * выданные до смены пароля, отсекаются по memberTokenVersion.
+ * Читает карточку бойца по id в виде, нужном кабинету.
+ * null — бойца нет или у него нет доступа (рапорт на рассмотрении / исключён).
  */
-export async function getSessionMember(req: NextRequest): Promise<SessionMember | null> {
-  const token = req.cookies.get(MEMBER_COOKIE)?.value;
-  if (!token) return null;
-
-  const payload = await verifyMemberToken(token);
-  if (!payload || typeof payload.memberId !== "number") return null;
-
+async function loadSessionMember(memberId: number): Promise<LoadedMember | null> {
   const [row] = await db
     .select({
       id: members.id,
@@ -173,28 +167,184 @@ export async function getSessionMember(req: NextRequest): Promise<SessionMember 
       createdAt: members.createdAt,
     })
     .from(members)
-    .where(eq(members.id, payload.memberId));
+    .where(eq(members.id, memberId));
 
   if (!row) return null;
-
-  const tokenVersion = typeof payload.tokenVersion === "number" ? payload.tokenVersion : 0;
-  if (tokenVersion !== row.memberTokenVersion) return null;
   // Сессии непринятого рапорта и исключённого бойца недействительны
   if (row.status === "dismissed" || row.status === "pending") return null;
 
   return {
-    id: row.id,
-    callsign: row.callsign || "",
-    discordId: row.discordId,
-    rank: row.rank,
-    unit: row.unit,
-    status: row.status,
-    role: row.role,
-    avatarUrl: row.avatarUrl,
-    hasPassword: !!row.passwordHash,
-    hasDiscord: !!row.discordId && row.discordId !== MANUAL_DISCORD_ID,
-    createdAt: row.createdAt,
+    member: {
+      id: row.id,
+      callsign: row.callsign || "",
+      discordId: row.discordId,
+      rank: row.rank,
+      unit: row.unit,
+      status: row.status,
+      role: row.role,
+      avatarUrl: row.avatarUrl,
+      hasPassword: !!row.passwordHash,
+      hasDiscord: !!row.discordId && row.discordId !== MANUAL_DISCORD_ID,
+      createdAt: row.createdAt,
+    },
+    tokenVersion: row.memberTokenVersion,
   };
+}
+
+/**
+ * Боец, связанный с учётной записью панели, по данным самой учётной записи.
+ *
+ * Вынесено отдельно от getPanelSessionMember, потому что этим же правилом
+ * пользуется вход: на момент выдачи cookie сессии панели её ещё нет в запросе,
+ * и «прочитать сессию» невозможно — а связать бойца нужно именно тогда, чтобы
+ * кабинет открылся сразу, без второго входа.
+ *
+ * Порядок: явная связка users.member_id, затем подтверждённый Discord ID, затем
+ * позывной (правило в panel-link.ts). Отсутствие связи — это null, а не ошибка:
+ * у администратора может не быть записи в табеле.
+ */
+export async function findMemberForPanelAccount(account: {
+  username: string;
+  memberId?: number | null;
+  discordId?: string | null;
+}): Promise<SessionMember | null> {
+  if (account.memberId) {
+    const linked = await loadSessionMember(account.memberId);
+    // Связка есть, но боец потерял доступ (исключён, рапорт на рассмотрении) —
+    // дальше не ищем: подменять одного бойца другим по совпадению позывного
+    // значило бы показать чужое личное дело.
+    return linked?.member ?? null;
+  }
+
+  const roster = await db
+    .select({
+      id: members.id,
+      callsign: members.callsign,
+      name: members.name,
+      discordId: members.discordId,
+      status: members.status,
+      role: members.role,
+    })
+    .from(members);
+
+  const candidate: PanelMemberCandidate | null = pickMemberForPanelAccount(
+    { username: account.username, discordId: account.discordId ?? null },
+    roster
+  );
+  if (!candidate) return null;
+
+  const loaded = await loadSessionMember(candidate.id);
+  return loaded?.member ?? null;
+}
+
+/**
+ * Боец, связанный с учётной записью панели, по сессии панели.
+ *
+ * Зачем: командир или администратор входит в панель (логин и пароль, Discord
+ * или dev-вход) и должен видеть своё личное дело, не вводя данные второй раз.
+ * Раньше связка искалась только при входе через Discord, поэтому после входа по
+ * паролю /profile показывал заглушку «войдите в личный кабинет» — а кнопка
+ * «Войти» вела на /login и возвращала туда же (цикл из отчёта).
+ *
+ * Права проверяются по сессии панели: роль берётся из БД в getAuthUser, значит
+ * понижение прав действует немедленно. Гость и боец без прав штаба связи не
+ * получают: сессия панели у них и не появится.
+ */
+export async function getPanelSessionMember(req: NextRequest): Promise<SessionMember | null> {
+  const user = await getAuthUser(req);
+  if (!user || (user.role !== "admin" && user.role !== "officer")) return null;
+
+  const [account] = await db
+    .select({ memberId: users.memberId, discordId: users.discordId })
+    .from(users)
+    .where(eq(users.username, user.username ?? ""));
+  if (!account) return null;
+
+  return findMemberForPanelAccount({
+    username: user.username ?? "",
+    memberId: account.memberId,
+    discordId: account.discordId,
+  });
+}
+
+/**
+ * Открывает кабинет бойцу, связанному с только что вошедшей учётной записью.
+ *
+ * Вызывается роутами входа в панель сразу после выдачи cookie панели: одна
+ * сессия панели даёт и личное дело. Cookie кабинета при этом настоящая
+ * (выпускается сервером и сверяется с БД), а не «право на чтение» — иначе смена
+ * пароля или исключение бойца не отзывали бы доступ.
+ *
+ * null — связи нет или боец не в строю. Это НЕ ошибка входа: сессия панели уже
+ * выдана, и вход не должен рушиться из-за отсутствия записи в табеле.
+ */
+export async function attachCabinetSession(
+  response: NextResponse,
+  req: NextRequest,
+  account: { username: string; memberId?: number | null; discordId?: string | null },
+  kind: MemberLoginKind = "password"
+): Promise<SessionMember | null> {
+  try {
+    const member = await findMemberForPanelAccount(account);
+    if (!member) return null;
+    // Кабинет открывается только зачисленным: кандидату со статусом pending
+    // личное дело не показывается (правило hasProfileAccess — одно на проект).
+    if (!hasProfileAccess(member.status)) return null;
+
+    const [row] = await db
+      .select({ memberTokenVersion: members.memberTokenVersion })
+      .from(members)
+      .where(eq(members.id, member.id));
+    if (!row) return null;
+
+    const session = await issueMemberSession(
+      {
+        id: member.id,
+        callsign: member.callsign,
+        role: member.role,
+        memberTokenVersion: row.memberTokenVersion,
+      },
+      kind,
+      { ip: requestIp(req) }
+    );
+    setMemberCookie(response, session, req);
+    return member;
+  } catch (e) {
+    // Кабинет — дополнение к входу в панель: сбой в нём не должен отменять
+    // уже состоявшийся вход (человек просто откроет кабинет отдельно).
+    console.error("[member-auth] Не удалось открыть кабинет по сессии панели:", e);
+    return null;
+  }
+}
+
+/**
+ * Текущий боец по cookie. null — токена нет, он просрочен, подделан, отозван
+ * или боец удалён/отклонён.
+ *
+ * Роль и статус читаются из БД, а не из токена: понижение прав, одобрение
+ * рапорта и исключение действуют немедленно, без перевыпуска cookie. Токены,
+ * выданные до смены пароля, отсекаются по memberTokenVersion.
+ *
+ * Если cookie кабинета нет или она недействительна, пробуем сессию панели:
+ * командир, вошедший в панель, — тот же человек, и требовать от него второго
+ * входа значило бы показывать ему заглушку вместо собственного личного дела.
+ */
+export async function getSessionMember(req: NextRequest): Promise<SessionMember | null> {
+  const token = req.cookies.get(MEMBER_COOKIE)?.value;
+  if (token) {
+    const payload = await verifyMemberToken(token);
+    if (payload && typeof payload.memberId === "number") {
+      const loaded = await loadSessionMember(payload.memberId);
+      if (loaded) {
+        const tokenVersion = typeof payload.tokenVersion === "number" ? payload.tokenVersion : 0;
+        if (tokenVersion === loaded.tokenVersion) return loaded.member;
+      }
+      // Токен отозван или боец потерял доступ — сессия панели всё ещё может
+      // быть действующей, поэтому не выходим сразу, а идём в общую ветку.
+    }
+  }
+
+  return getPanelSessionMember(req);
 }
 /* ------------------------------------------------------------------ */
 /* Гварды                                                              */
@@ -233,6 +383,50 @@ export async function requireActiveMember(req: NextRequest): Promise<MemberAuthR
     };
   }
   return result;
+}
+
+/**
+ * Доступ к личному кабинету с различимым состоянием.
+ *
+ * Отличие от requireActiveMember: тот на любую неудачу отвечает одним и тем же
+ * «войдите в личный кабинет» (401). Из-за этого вошедший в панель командир без
+ * связки видел заглушку с кнопкой «Войти» и попадал в цикл: /profile → /login →
+ * /profile. Здесь состояние названо точно, и страница может предложить верное
+ * действие: войти, связать аккаунт с бойцом в «Доступах» или обратиться к штабу.
+ */
+export type CabinetAccessResult =
+  | { ok: true; member: SessionMember }
+  | { ok: false; state: Exclude<CabinetState, "ok">; response: NextResponse };
+
+export async function requireCabinetMember(req: NextRequest): Promise<CabinetAccessResult> {
+  const member = await getSessionMember(req);
+  if (member) {
+    if (hasProfileAccess(member.status)) return { ok: true, member };
+    return {
+      ok: false,
+      state: "no_access",
+      response: NextResponse.json(
+        { ok: false, state: "no_access", error: CABINET_STATE_MESSAGES.no_access },
+        { status: 403 }
+      ),
+    };
+  }
+
+  // Сессии кабинета нет: различаем «гость» и «штаб без связки с бойцом».
+  // Второе — не ошибка входа: человек авторизован, но его учётная запись панели
+  // не привязана к записи в табеле, и личного дела у неё попросту нет.
+  const user = await getAuthUser(req);
+  const staff = user?.role === "admin" || user?.role === "officer";
+  const state: Exclude<CabinetState, "ok"> = staff ? "not_linked" : "no_session";
+
+  return {
+    ok: false,
+    state,
+    response: NextResponse.json(
+      { ok: false, state, error: CABINET_STATE_MESSAGES[state] },
+      { status: staff ? 409 : 401 }
+    ),
+  };
 }
 
 /**

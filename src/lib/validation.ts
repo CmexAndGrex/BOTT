@@ -282,6 +282,31 @@ export function browserOrigin(headers: Headers, fallbackHost = "localhost:3000")
   return `${proto}://${host}`;
 }
 /**
+ * Локальный путь возврата после входа (?next=/profile).
+ *
+ * Зачем: клик «Войти» на /profile вёл на /login, а после входа человек попадал
+ * на «/» или снова на кабинет — то есть в цикл «/profile → /login → /profile»
+ * из отчёта. Возврат на исходную страницу его устраняет.
+ *
+ * Принимаем ТОЛЬКО локальный путь (начинается с одного «/»): значение вида
+ * «//evil.com» или «https://evil.com» браузер трактует как чужой адрес, и
+ * возврат после входа стал бы открытым редиректом — удобным для фишинга, ведь
+ * ссылка выглядит как наш домен. Схемы, обратные слеши и переводы строк
+ * отсекаем явно (браузеры нормализуют «/\» и «\» в «//»).
+ */
+export function safeRedirectPath(raw: unknown, fallback = "/"): string {
+  const value = typeof raw === "string" ? raw.trim().slice(0, 300) : "";
+  if (!value) return fallback;
+  // Ровно один ведущий слеш: «//host» и «/\host» — это чужой origin
+  if (!value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) return fallback;
+  // Управляющие символы (в т.ч. перевод строки) в Location недопустимы
+  if (/[\u0000-\u001f\u007f]/.test(value)) return fallback;
+  // Схема внутри пути («/x?u=https://evil») безопасна: она остаётся путём на
+  // нашем домене, поэтому проверять её не нужно — важно лишь начало строки.
+  return value;
+}
+
+/**
  * Приводит ссылку к http(s); null — если она невалидна или небезопасна.
  *
  * Отсекаем ссылки с логином/паролем (`https://user:pass@host` — маскировка

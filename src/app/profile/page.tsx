@@ -25,16 +25,14 @@ import { Section, Spinner } from "@/components/ui";
 import {
   DossierHeader,
   GarrisonWidget,
-  ReportModal,
   ServiceHistory,
   VehicleAccessGrid,
   type DossierMember,
   type DossierReport,
   type DossierService,
 } from "@/components/dossier-panel";
-import type { SessionMember } from "@/components/reports-panel";
+import { useReportLauncher } from "@/components/report-launcher";
 import { PASSWORD_POLICY_HINT } from "@/lib/password-policy";
-import { validateReportPayload, type ServiceReportType } from "@/lib/reports";
 import { AGE_MAX, AGE_MIN, SPECIALIZATIONS } from "@/lib/recruits";
 import type { VehicleAccessReport } from "@/lib/vehicles";
 
@@ -55,6 +53,8 @@ type DossierResponse = {
   vehicles: VehicleAccessReport;
   reports: DossierReport[];
   error?: string;
+  /** Состояние доступа (при отказе): no_session | not_linked | no_access */
+  state?: string;
 };
 
 export default function ProfilePage() {
@@ -77,9 +77,27 @@ function DossierPageInner() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [flash, setFlash] = useState("");
-  const [gate, setGate] = useState("");
-  const [reportOpen, setReportOpen] = useState(false);
-  const [sending, setSending] = useState(false);
+  /**
+   * Состояние доступа к кабинету: пусто — доступ есть.
+   *
+   * Значения различимы намеренно. Раньше любой отказ (401) показывал одну
+   * заглушку «Войдите в личный кабинет, чтобы увидеть личное дело» с кнопкой
+   * «Войти», и авторизованный командир, чья учётная запись не была связана с
+   * бойцом, ходил по кругу: /profile → /login → /profile → та же заглушка.
+   * Теперь для штаба без связки показывается не «войдите», а «свяжите аккаунт»,
+   * и вместо кнопки входа — переход в «Доступы», где связка и ставится.
+   */
+  const [gate, setGate] = useState<"" | "no_session" | "not_linked" | "no_access">("");
+  /**
+   * Подача рапорта — через глобальное окно из сайдбара.
+   *
+   * Раньше страница держала своё состояние модалки и свой обработчик отправки:
+   * тот же код, что и в сайдбаре, только в двух местах. Теперь окно одно
+   * (report-launcher.tsx), а страница лишь просит его открыть и, после
+   * успешной отправки, обновляет досье — чтобы новый рапорт сразу появился в
+   * «Мои рапорты».
+   */
+  const { openReport } = useReportLauncher();
 
   // Смена пароля
   const [currentPassword, setCurrentPassword] = useState("");
@@ -119,14 +137,21 @@ function DossierPageInner() {
       const res = await fetch("/api/member/dossier", { cache: "no-store" });
       const data = (await res.json()) as DossierResponse;
 
-      // 401/403 — разные ситуации, и бойцу нужно разное сообщение: «войдите» или
-      // «кабинет доступен зачисленным». Показываем экран входа, а не «сбой сети».
+      // Коды разные, и бойцу (или командиру) нужно разное действие:
+      // 401 — сессии нет вовсе, надо войти;
+      // 409 — вход выполнен, но учётная запись панели не связана с бойцом;
+      // 403 — боец есть, но он не зачислен (рапорт на рассмотрении/отклонён).
+      // Показываем экран состояния, а не «сбой сети».
       if (res.status === 401) {
-        setGate("Войдите в личный кабинет, чтобы увидеть личное дело");
+        setGate("no_session");
+        return;
+      }
+      if (res.status === 409 || data?.state === "not_linked") {
+        setGate("not_linked");
         return;
       }
       if (res.status === 403) {
-        setGate("Личное дело доступно бойцам, зачисленным в подразделение");
+        setGate("no_access");
         return;
       }
       if (!data?.ok) {
@@ -162,43 +187,15 @@ function DossierPageInner() {
     return () => window.clearTimeout(timer);
   }, [load]);
 
-  /** Подача рапорта из модального окна: тот же путь, что и на /reports */
-  const handleSubmit = async (
-    type: ServiceReportType,
-    payload: unknown,
-    reset: () => void
-  ): Promise<void> => {
-    setError("");
-    setFlash("");
-
-    // Проверка общим валидатором: формулировки ошибок совпадают с ответом API
-    const validation = validateReportPayload(type, payload);
-    if (!validation.ok) {
-      setError(validation.error);
-      return;
-    }
-
-    setSending(true);
-    try {
-      const res = await fetch("/api/member/reports", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type, payload: validation.payload }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        setError(data.error || "Не удалось подать рапорт");
-        return;
-      }
-      setFlash(data.notice || "Рапорт отправлен");
-      reset();
-      setReportOpen(false);
-      await load();
-    } catch {
-      setError("Сбой сети");
-    } finally {
-      setSending(false);
-    }
+  /**
+   * Открытие окна подачи рапорта из шапки личного дела.
+   *
+   * После успешной отправки досье перезагружается (onSubmitted) — новый рапорт
+   * сразу виден в таблице «Мои рапорты», а счётчик «на рассмотрении» обновлён.
+   * Ошибки и успех показывает само окно: страница их больше не дублирует.
+   */
+  const handleOpenReport = () => {
+    openReport({ onSubmitted: () => void load() });
   };
 
   const handleLinkDiscord = async () => {
@@ -299,17 +296,50 @@ function DossierPageInner() {
   }
 
   if (gate) {
+    /**
+     * Экран состояния кабинета.
+     *
+     * «Войти» показываем только когда сессии действительно нет. Для остальных
+     * состояний кнопка входа была бы ловушкой: человек уже авторизован (штаб без
+     * связки) или вообще не может войти (рапорт на рассмотрении) — и клик
+     * возвращал бы его на ту же страницу. Это и есть цикл из отчёта.
+     */
+    const isGuest = gate === "no_session";
+    const title = isGuest ? "Личный кабинет" : "Личное дело";
+    const text =
+      gate === "no_session"
+        ? "Войдите в личный кабинет, чтобы увидеть личное дело"
+        : gate === "not_linked"
+          ? "Вы вошли в панель, но её учётная запись не связана с бойцом в табеле. " +
+            "Свяжите аккаунт с бойцом в разделе «Доступы» — после этого кабинет откроется сразу."
+          : "Личное дело доступно бойцам, зачисленным в подразделение";
+
     return (
       <div className="mx-auto max-w-md pt-10 text-center">
         <div className="card p-6">
           <ShieldAlert size={32} className="mx-auto mb-3" style={{ color: "var(--dim)" }} />
-          <h1 className="display text-lg font-bold mb-1.5">Личный кабинет</h1>
+          <h1 className="display text-lg font-bold mb-1.5">{title}</h1>
           <p className="text-sm mb-4" style={{ color: "var(--muted)" }}>
-            {gate}
+            {text}
           </p>
-          <Link href="/login" className="btn btn-primary px-4 py-2">
-            Войти
-          </Link>
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            {isGuest ? (
+              // Возврат на кабинет после входа (?next=/profile): без него вход
+              // уводил в панель, и человек шёл в кабинет заново — по кругу.
+              <Link href="/login?next=%2Fprofile" className="btn btn-primary px-4 py-2">
+                Войти
+              </Link>
+            ) : gate === "not_linked" ? (
+              <Link href="/users" className="btn btn-primary px-4 py-2">
+                Открыть «Доступы»
+              </Link>
+            ) : null}
+            {!isGuest && (
+              <Link href="/" className="btn px-4 py-2" style={{ color: "var(--muted)" }}>
+                На обзор
+              </Link>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -327,20 +357,6 @@ function DossierPageInner() {
       </div>
     );
   }
-
-  // Модальному окну нужны те же данные, что и /reports: каталог нормативов
-  // выбирается по подразделению, поэтому передаём карточку бойца
-  const sessionMember: SessionMember = {
-    id: dossier.member.id,
-    callsign: dossier.member.callsign,
-    rank: dossier.member.rank,
-    unit: dossier.member.unit,
-    status: dossier.member.status,
-    statusLabel: dossier.service.label,
-    role: "member",
-    roleLabel: "",
-    discordId: dossier.member.discordId,
-  };
 
   const summary = dossier.serviceSummary;
   const noticeError = error || (urlNotice?.kind === "err" ? urlNotice.text : "");
@@ -374,7 +390,7 @@ function DossierPageInner() {
       <DossierHeader
         member={dossier.member}
         service={dossier.service}
-        onReport={() => setReportOpen(true)}
+        onReport={handleOpenReport}
         onLogout={handleLogout}
       />
 
@@ -386,7 +402,7 @@ function DossierPageInner() {
         <StatTile label="нормативов сдано" value={String(summary.qualifications.length)} />
       </div>
 
-      <GarrisonWidget onNotice={setFlash} />
+      <GarrisonWidget onNotice={setFlash} memberId={dossier.member.id} />
 
       <VehicleAccessGrid report={dossier.vehicles} />
 
@@ -527,18 +543,6 @@ function DossierPageInner() {
           </div>
         </form>
       </Section>
-
-      <ReportModal
-        open={reportOpen}
-        member={sessionMember}
-        onSubmit={handleSubmit}
-        onClose={() => setReportOpen(false)}
-      />
-      {sending && (
-        <p className="text-center text-[11.5px]" style={{ color: "var(--dim)" }}>
-          Отправляем рапорт…
-        </p>
-      )}
     </div>
   );
 }

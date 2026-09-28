@@ -14,7 +14,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { desc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { members, serviceReports } from "@/db/schema";
-import { requireActiveMember } from "@/lib/member-auth";
+import { requireCabinetMember } from "@/lib/member-auth";
 import { readReportPayload, summarizeReport, type ReportPayload } from "@/lib/reports";
 import {
   reportStatusView,
@@ -36,7 +36,7 @@ function examsOf(report: DossierReportRow, payload: ReportPayload): string[] {
 }
 
 export async function GET(req: NextRequest) {
-  const auth = await requireActiveMember(req);
+  const auth = await requireCabinetMember(req);
   if (!auth.ok) return auth.response;
 
   try {

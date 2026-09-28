@@ -399,6 +399,94 @@ export default function SettingsPage() {
               </p>
             </div>
             <hr className="divider" />
+            <div className="label">Сверка ролей Discord с базой панели</div>
+            <p className="text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
+              Бот сверяет звания, подразделения, отпуск и должности бойцов с ролями на
+              сервере и приводит их в соответствие. Кастомные роли («Игроман», «Модератор»)
+              не трогаются, роли ботов — тоже. По умолчанию сверка выключена: сначала
+              посмотрите отчёт в режиме проверки, чтобы увидеть, что именно будет изменено.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <div className="flex items-center gap-3">
+                  <span className="label">вкл</span>
+                  <Toggle
+                    on={settings.role_sync_enabled === "true"}
+                    onChange={(v) => set("role_sync_enabled", v ? "true" : "false")}
+                  />
+                  <span className="text-[12.5px]">Фоновая сверка ролей</span>
+                </div>
+                <div className="mt-3 flex items-center gap-3">
+                  <span className="label">проверка</span>
+                  <Toggle
+                    on={settings.role_sync_dry_run === "true"}
+                    onChange={(v) => set("role_sync_dry_run", v ? "true" : "false")}
+                  />
+                  <span className="text-[12.5px]">Роли не менять</span>
+                </div>
+                <p className="mt-2 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
+                  В режиме проверки бот считает расхождения и пишет отчёт в журнал, но
+                  ничего не меняет. Выключите его, когда убедитесь в правильности отчёта.
+                </p>
+              </div>
+              <div>
+                <div className="label mb-1.5">Как часто сверять, минут (5–1440)</div>
+                <input
+                  className="input input-mono"
+                  value={settings.role_sync_interval_min}
+                  onChange={(e) => set("role_sync_interval_min", e.target.value.replace(/[^\d]/g, ""))}
+                />
+                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                  Меньше 5 минут — слишком часто: сверка опрашивает Discord по каждому бойцу.
+                </p>
+              </div>
+            </div>
+            <div>
+              <div className="label mb-1.5">Должности: соответствие «должность = ID роли»</div>
+              <textarea
+                className="textarea"
+                style={{ minHeight: 74 }}
+                placeholder={"Механик-водитель = 1090320507288699020\nНаводчик = 1090320811572875314"}
+                value={settings.post_role_map}
+                onChange={(e) => set("post_role_map", e.target.value)}
+              />
+              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
+                По строке на пару, роль указывается ID (имя роли командир может изменить).
+                Если должность в карточке бойца снята или заменена — прежняя роль снимается.
+              </p>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <div className="label mb-1.5">Запросов к Discord одновременно</div>
+                <input
+                  className="input input-mono"
+                  value={settings.discord_rate_concurrency}
+                  onChange={(e) => set("discord_rate_concurrency", e.target.value.replace(/[^\d]/g, ""))}
+                />
+              </div>
+              <div>
+                <div className="label mb-1.5">Пауза между запросами, мс</div>
+                <input
+                  className="input input-mono"
+                  value={settings.discord_rate_interval_ms}
+                  onChange={(e) => set("discord_rate_interval_ms", e.target.value.replace(/[^\d]/g, ""))}
+                />
+              </div>
+              <div>
+                <div className="label mb-1.5">Попыток при 429/5xx</div>
+                <input
+                  className="input input-mono"
+                  value={settings.discord_rate_attempts}
+                  onChange={(e) => set("discord_rate_attempts", e.target.value.replace(/[^\d]/g, ""))}
+                />
+              </div>
+            </div>
+            <p className="text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
+              Лимиты Discord: очередь сама выдерживает паузу из ответа 429 (Retry-After) и
+              повторяет запрос с нарастающей задержкой. Если сервер часто отвечает лимитом —
+              уменьшите число одновременных запросов и увеличьте паузу.
+            </p>
+            <hr className="divider" />
             <div>
               <div className="label mb-1.5">ID Google-таблицы (ШДС)</div>
               <input

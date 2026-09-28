@@ -15,8 +15,8 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-/** Текущее состояние: 10 errors + 4 warnings. Уменьшайте по мере исправлений. */
-const BASELINE = 14;
+/** Текущее состояние: 7 errors + 4 warnings. Уменьшайте по мере исправлений. */
+const BASELINE = 11;
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const budget = Number(process.env.LINT_BUDGET ?? BASELINE);

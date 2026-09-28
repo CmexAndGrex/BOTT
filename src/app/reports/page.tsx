@@ -3,16 +3,24 @@
 /**
  * Подача рапорта в личном кабинете бойца (/reports).
  *
- * Один маршрут на все типы: тип приходит из адреса (/reports/exam), форма
- * перерисовывается под него. Проверка на клиенте идёт тем же валидатором, что и
- * на сервере (validateReportPayload), поэтому боец видит требование сразу, а не
- * после отправки, и формулировки ошибок совпадают с ответом API.
+ * Один маршрут на все типы: тип приходит из query-параметра (/reports?type=exam),
+ * форма перерисовывается под него. Проверка на клиенте идёт тем же валидатором,
+ * что и на сервере (validateReportPayload), поэтому боец видит требование сразу,
+ * а не после отправки, и формулировки ошибок совпадают с ответом API.
+ *
+ * Раньше тип жил в пути (/reports/exam), но динамического сегмента у страницы
+ * нет — любой такой адрес отдавал 404. Теперь выбор типа меняет query-параметр
+ * без перезагрузки страницы, а старые ссылки ловит редирект /reports/[type].
+ *
+ * Подать рапорт можно и не уходя со страницы: кнопка в сайдбаре открывает то же
+ * модальное окно (report-launcher.tsx) поверх любой страницы.
  */
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
-import { CheckCircle2, ClipboardList, RefreshCw, ThumbsDown } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { CheckCircle2, ClipboardList, FilePlus2, RefreshCw, ThumbsDown } from "lucide-react";
 import { Spinner } from "@/components/ui";
+import { useReportLauncher } from "@/components/report-launcher";
 import {
   MyReports,
   ReportForm,
@@ -23,7 +31,7 @@ import { REPORT_TYPE_META, validateReportPayload, type ServiceReportType } from 
 import { STATUS_LABELS } from "@/lib/recruits";
 
 export default function ReportsPage() {
-  // useParams требует границы Suspense при пререндере страницы
+  // useParams/useSearchParams требуют границы Suspense при пререндере страницы
   return (
     <React.Suspense
       fallback={
@@ -38,15 +46,22 @@ export default function ReportsPage() {
 }
 
 function ReportsInner() {
-  const params = useParams<{ type?: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const { openReport } = useReportLauncher();
 
-  /** Тип из адреса. Неизвестный — «не выбран»: страница не падает с 404 */
+  /**
+   * Тип из адреса. Неизвестный — «не выбран»: страница не падает с 404.
+   *
+   * Шаг выбора типа держим в локальном состоянии, а не только в адресе: клик по
+   * карточке типа обязан показывать форму мгновенно, без ожидания навигации,
+   * но при этом адрес обновляется — ссылкой на конкретный тип можно поделиться.
+   */
   const typeFromUrl = useMemo<ServiceReportType | null>(() => {
-    const raw = Array.isArray(params?.type) ? params.type[0] : params?.type;
+    const raw = searchParams.get("type");
     const found = REPORT_TYPE_META.find((m) => m.type === raw);
     return found ? found.type : null;
-  }, [params]);
+  }, [searchParams]);
 
   const [member, setMember] = useState<SessionMember | null>(null);
   const [reports, setReports] = useState<ReportRow[]>([]);
@@ -120,6 +135,18 @@ function ReportsInner() {
     }
   };
 
+  /**
+   * Выбор типа рапорта.
+   *
+   * `null` — вернуться к списку типов (кнопка «Другой тип»). Тип живёт в
+   * query-параметре, а не в пути: /reports?type=exam. Адрес меняем через
+   * router.replace — без записи в историю, чтобы кнопка «назад» не гоняла
+   * бойца по шагам выбора типа.
+   */
+  const handlePickType = (next: ServiceReportType | null) => {
+    router.replace(next ? `/reports?type=${next}` : "/reports", { scroll: false });
+  };
+
   if (loading) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center">
@@ -144,9 +171,20 @@ function ReportsInner() {
             подразделение: {member?.unit || "не назначено"}
           </p>
         </div>
-        <button onClick={() => void load()} className="btn btn-sm" disabled={loading}>
-          <RefreshCw size={14} /> Обновить
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Быстрая подача тем же окном, что и в сайдбаре: страница остаётся
+              на месте, история подач обновится после успешной отправки */}
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            onClick={() => openReport({ onSubmitted: () => void load() })}
+          >
+            <FilePlus2 size={14} /> Подать рапорт
+          </button>
+          <button onClick={() => void load()} className="btn btn-sm" disabled={loading}>
+            <RefreshCw size={14} /> Обновить
+          </button>
+        </div>
       </header>
 
       {flash && (
@@ -170,7 +208,7 @@ function ReportsInner() {
         member={member}
         type={typeFromUrl}
         sending={sending}
-        onPickType={(next) => router.push(`/reports/${next}`)}
+        onPickType={handlePickType}
         onSubmit={handleSubmit}
       />
 

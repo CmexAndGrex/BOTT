@@ -10,7 +10,7 @@
  * резервным способом на случай недоступности Discord.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { eq, isNotNull } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { logs, members, users } from "@/db/schema";
 import { requireRole } from "@/lib/api-auth";
@@ -33,14 +33,22 @@ export async function GET(req: NextRequest) {
         username: users.username,
         role: users.role,
         discordId: users.discordId,
+        // Связка с бойцом: по ней аккаунт панели открывает личный кабинет
+        // (см. member-auth.getPanelSessionMember). Интерфейсу нужна, чтобы
+        // показать, какой боец уже привязан к этой учётной записи.
+        memberId: users.memberId,
       })
       .from(users)
       .orderBy(users.id);
 
     /**
-     * Бойцы состава с привязанным Discord — кандидаты на связку с аккаунтом.
-     * Только те, у кого Discord уже есть: без него вход через Discord
-     * невозможен, и предлагать такого бойца в списке связки было бы обманом.
+     * Бойцы состава — кандидаты на связку с аккаунтом панели.
+     *
+     * Раньше список ограничивался теми, у кого есть Discord ID (вход через
+     * Discord — единственный способ связать аккаунт с бойцом). Теперь связка
+     * хранится явно (users.member_id) и сама открывает личный кабинет, поэтому
+     * показываем весь состав: командир без Discord тоже должен попадать в свой
+     * кабинет после входа по логину и паролю.
      */
     const roster = await db
       .select({
@@ -52,16 +60,23 @@ export async function GET(req: NextRequest) {
         status: members.status,
       })
       .from(members)
-      .where(isNotNull(members.discordId))
       .orderBy(members.name);
 
     const byDiscordId = new Map(roster.map((row) => [row.discordId, row]));
+    const byMemberId = new Map(roster.map((row) => [row.id, row]));
 
     return NextResponse.json({
       users: accounts.map((account) => ({
         ...account,
-        // Боец, которому принадлежит этот Discord ID (если есть в составе)
-        linkedMember: account.discordId ? byDiscordId.get(account.discordId) ?? null : null,
+        // Боец, которому принадлежит аккаунт: сперва явная связка, затем
+        // совпадение по Discord ID (она появляется при входе через Discord и до
+        // записи member_id показывала бы «не связан»). byMemberId нужен, чтобы
+        // отдать позывной и статус по id из users.member_id.
+        linkedMember: account.memberId
+          ? byMemberId.get(account.memberId) ?? null
+          : account.discordId
+            ? byDiscordId.get(account.discordId) ?? null
+            : null,
       })),
       members: roster.map((row) => ({ ...row, roleLabel: ROLE_LABELS[row.role] })),
     });
@@ -98,12 +113,13 @@ export async function PATCH(req: NextRequest) {
         username: users.username,
         role: users.role,
         discordId: users.discordId,
+        memberId: users.memberId,
       })
       .from(users)
       .where(eq(users.username, username));
     if (!account) return NextResponse.json({ error: "Аккаунт не найден" }, { status: 404 });
 
-    const set: { role?: string; discordId?: string | null } = {};
+    const set: { role?: string; discordId?: string | null; memberId?: number | null } = {};
     const changes: string[] = [];
     const details: Record<string, string> = { "Логин": account.username };
     let warning = "";
@@ -211,6 +227,13 @@ export async function PATCH(req: NextRequest) {
         .where(eq(members.id, member.id));
       linkedMember = { id: member.id, role: memberRole };
 
+      // Связка аккаунта с бойцом: она же открывает личный кабинет по сессии
+      // панели (см. member-auth.getPanelSessionMember). Без записи этой связи
+      // командир после входа видел в /profile заглушку «войдите в кабинет».
+      if (account.memberId !== member.id) {
+        set.memberId = member.id;
+        changes.push(`связку с бойцом ${member.callsign || member.name}`);
+      }
       details["Боец"] = member.callsign || member.name;
       details["Уровень доступа бойца"] = ROLE_LABELS[memberRole];
       if (member.role !== memberRole) {

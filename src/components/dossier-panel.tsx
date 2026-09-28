@@ -10,8 +10,8 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import {
-  Badge, Clock3, Crosshair, FileText, Gauge, Lock, LockOpen, MessageCircle, Palmtree,
-  RadioTower, RefreshCw, Send, ShieldCheck, Truck, Users, Wrench, X,
+  Badge, CheckCircle2, Clock3, Crosshair, FileText, Gauge, Lock, LockOpen, MessageCircle, Palmtree,
+  RadioTower, RefreshCw, Send, ShieldAlert, ShieldCheck, Truck, Users, Wrench, X,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Section, Spinner, fmtDate } from "@/components/ui";
@@ -201,6 +201,8 @@ export type VchResponse = {
   onlineCount: number;
   maxPlayers: number;
   map: string | null;
+  /** Боец сессии найден среди игроков сервера */
+  selfOnline: boolean;
   clanMembersOnline: { id: number; callsign: string; rank: string; division: string | null }[];
   clanOnlineCount: number;
   notice: string | null;
@@ -210,11 +212,30 @@ export type VchResponse = {
 /**
  * Бейдж дежурства.
  *
+ * Три различимых состояния, и они не смешиваются: боец на сервере («в бою»,
+ * зелёный, с картой и миссией), сервер отвечает без него (население сервера),
+ * сервер недоступен (заглушка). Раньше любое из них показывалось одним серым
+ * «нет данных»: боец, который уже в игре, не видел подтверждения, а выключенный
+ * сервер выглядел ошибкой.
+ *
  * Опрашивается раз в минуту — ровно как TTL кэша на сервере: чаще смысла нет
  * (данные всё равно те же), реже боец не увидит свежий состав. Кнопка
  * «Обновить» шлёт ?force=1 и перебивает кэш.
  */
-export function GarrisonWidget({ onNotice }: { onNotice?: (text: string) => void }) {
+export function GarrisonWidget({
+  onNotice,
+  memberId,
+}: {
+  onNotice?: (text: string) => void;
+  /**
+   * Id бойца сессии: его строка в списке помечается «вы».
+   *
+   * Необязателен намеренно — виджет остаётся рабочим и без досье (страница может
+   * отрисовать его до загрузки личного дела), а сам статус «в бою» считает
+   * сервер по сессии, а не браузер.
+   */
+  memberId?: number;
+}) {
   const [data, setData] = useState<VchResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -250,6 +271,9 @@ export function GarrisonWidget({ onNotice }: { onNotice?: (text: string) => void
 
   const onDuty = data?.clanMembersOnline ?? [];
   const serverOnline = Boolean(data?.online);
+  const selfOnline = Boolean(data?.online && data?.selfOnline);
+  /** Карта/миссия сервера — показывается и «в бою», и в строке населения */
+  const mapLabel = data?.map ? `карта: ${data.map}` : null;
 
   return (
     <Section
@@ -263,21 +287,38 @@ export function GarrisonWidget({ onNotice }: { onNotice?: (text: string) => void
     >
       <div className="flex flex-col gap-4 p-5">
         <div className="flex flex-wrap items-center gap-3">
-          {/* Живой бейдж: зелёный — есть свои на сервере, синий — сервер отвечает,
-              но своих нет, серо-стальной — данных нет вовсе */}
+          {/* Живой бейдж: зелёный — боец на сервере, зелёный с числом — свои без
+              него, синий — сервер отвечает, но своих нет, серо-стальной — сервер
+              недоступен или данных нет вовсе */}
           <span
             className={`badge ${
-              onDuty.length > 0 ? "badge-green" : serverOnline ? "badge-info" : "badge-reserve"
+              selfOnline
+                ? "badge-green"
+                : onDuty.length > 0
+                  ? "badge-green"
+                  : serverOnline
+                    ? "badge-info"
+                    : "badge-reserve"
             }`}
           >
-            <RadioTower size={12} />
-            {loading
-              ? "опрос…"
-              : onDuty.length > 0
-                ? `на ВЧ: ${onDuty.length}`
-                : serverOnline
-                  ? "своих на сервере нет"
-                  : "нет данных"}
+            {selfOnline ? (
+              <>
+                <span className="dot dot-ok pulse-dot" />
+                <Crosshair size={12} />
+                в бою / на сервере
+              </>
+            ) : (
+              <>
+                <RadioTower size={12} />
+                {loading
+                  ? "опрос…"
+                  : onDuty.length > 0
+                    ? `на ВЧ: ${onDuty.length}`
+                    : serverOnline
+                      ? `Сервер онлайн (Игроков: ${data?.onlineCount ?? 0})`
+                      : "Сервер недоступен"}
+              </>
+            )}
           </span>
 
           {serverOnline && (
@@ -287,9 +328,9 @@ export function GarrisonWidget({ onNotice }: { onNotice?: (text: string) => void
               {data?.maxPlayers ? ` / ${data.maxPlayers}` : ""}
             </span>
           )}
-          {data?.map && (
+          {mapLabel && (
             <span className="chip" style={{ fontSize: "0.72rem" }}>
-              карта: {data.map}
+              {mapLabel}
             </span>
           )}
         </div>
@@ -307,7 +348,16 @@ export function GarrisonWidget({ onNotice }: { onNotice?: (text: string) => void
               >
                 <span className="dot dot-ok pulse-dot" />
                 <div className="min-w-0">
-                  <div className="truncate text-[13px] font-semibold">{entry.callsign}</div>
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-[13px] font-semibold">{entry.callsign}</span>
+                    {/* Своя строка в списке: боец сразу видит себя, а не выискивает
+                        позывной глазами */}
+                    {memberId === entry.id && (
+                      <span className="badge badge-green" style={{ fontSize: "0.6rem" }}>
+                        вы
+                      </span>
+                    )}
+                  </div>
                   <div className="truncate text-[11px]" style={{ color: "var(--dim)" }}>
                     {[entry.rank, entry.division].filter(Boolean).join(" · ") || "—"}
                   </div>
@@ -316,14 +366,14 @@ export function GarrisonWidget({ onNotice }: { onNotice?: (text: string) => void
             ))}
           </div>
         ) : (
-          // Пустое состояние показывается и при выключенном сервере, и когда на
-          // нём никого из своих: факты разные, но вывод для бойца один
+          // Пустое состояние: факты разные (сервер молчит / на нём нет своих), но
+          // вывод для бойца один — в списке дежурства его нет
           <p className="text-[12.5px] leading-relaxed" style={{ color: "var(--muted)" }}>
             {loading
               ? "Опрашиваем сервер…"
               : serverOnline
                 ? "На сервере сейчас никого из подразделения — заходите, будете первым."
-                : data?.notice || "Сервер не отвечает. Данные о дежурстве временно недоступны."}
+                : data?.notice || "Сервер недоступен. Данные о дежурстве временно недоступны."}
           </p>
         )}
       </div>
@@ -585,11 +635,32 @@ export const DOSSIER_REPORT_TABS: readonly ServiceReportType[] = ["exam", "vacat
 export function ReportModal({
   open,
   member,
+  tab,
+  onTabChange,
+  sending = false,
+  error = "",
+  notice = "",
   onSubmit,
   onClose,
 }: {
   open: boolean;
   member: SessionMember | null;
+  /**
+   * Активная вкладка окна.
+   *
+   * Состояние держит вызывающая сторона (лаунчер в сайдбаре или страница
+   * кабинета), а не само окно: так «открыть сразу на нужной вкладке» — обычная
+   * смена состояния в обработчике клика, без синхронизации пропсов эффектом
+   * (setState в эффекте дал бы лишний рендер и замечание react-hooks).
+   */
+  tab: ServiceReportType;
+  onTabChange: (type: ServiceReportType) => void;
+  /** Идёт отправка: кнопки формы блокируются */
+  sending?: boolean;
+  /** Ошибка отправки (показывается внутри окна) */
+  error?: string;
+  /** Сообщение об успехе (окно закрывается само, текст нужен до закрытия) */
+  notice?: string;
   onSubmit: (
     type: ServiceReportType,
     payload: unknown,
@@ -597,8 +668,6 @@ export function ReportModal({
   ) => Promise<void> | void;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<ServiceReportType>("exam");
-
   // Esc закрывает окно — привычный способ выйти из модального окна
   useEffect(() => {
     if (!open) return;
@@ -673,7 +742,7 @@ export function ReportModal({
                     key={type}
                     type="button"
                     className="chip"
-                    onClick={() => setTab(type)}
+                    onClick={() => onTabChange(type)}
                     style={
                       active
                         ? {
@@ -690,12 +759,40 @@ export function ReportModal({
               })}
             </div>
 
+            {/* Сообщения внутри окна: окно может закрыться само после успеха,
+                поэтому ошибка видна именно здесь, а не на странице */}
+            {error && (
+              <div
+                className="mx-5 mt-4 flex items-center gap-2 rounded-xl px-3 py-2.5"
+                style={{ background: "rgba(255,61,61,.08)", border: "1px solid rgba(255,61,61,.35)" }}
+              >
+                <ShieldAlert size={15} style={{ color: "var(--red)", flex: "none" }} />
+                <span className="text-[12.5px]" style={{ color: "var(--red)" }}>
+                  {error}
+                </span>
+              </div>
+            )}
+            {notice && (
+              <div
+                className="mx-5 mt-4 flex items-center gap-2 rounded-xl px-3 py-2.5"
+                style={{ background: "rgba(61,220,132,.08)", border: "1px solid rgba(61,220,132,.35)" }}
+              >
+                <CheckCircle2 size={15} style={{ color: "var(--green)", flex: "none" }} />
+                <span className="text-[12.5px]" style={{ color: "var(--muted)" }}>
+                  {notice}
+                </span>
+              </div>
+            )}
+
             <div className="px-5 pb-5 pt-4">
               <ReportForm
                 member={member}
                 type={tab}
-                sending={false}
-                onPickType={(next) => setTab(next)}
+                sending={sending}
+                // «Другой тип» внутри окна: вкладки уже переключаются чипами выше,
+                // поэтому null (возврат к списку типов) здесь просто игнорируется —
+                // закрывать окно ради выбора типа не нужно
+                onPickType={(next) => { if (next) onTabChange(next); }}
                 onSubmit={onSubmit}
               />
               <p className="mt-3 text-[11.5px]" style={{ color: "var(--dim)" }}>

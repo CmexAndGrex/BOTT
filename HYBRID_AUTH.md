@@ -39,6 +39,33 @@ OAuth2 вычисляется из фактического адреса зап�
 `X-Forwarded-Proto`/`X-Forwarded-Host`), при необходимости задаётся
 `DISCORD_REDIRECT_URI`.
 
+### Связка учётной записи панели с бойцом
+
+Вход в панель открывает **и личный кабинет**, если учётная запись связана с
+бойцом. Связка хранится в `users.member_id` (уникальна, `ON DELETE SET NULL`) и
+заполняется тремя путями: Dev-Login, раздел **Доступы** → «Связка с бойцом»
+(`linkMemberId`), и `scripts/bootstrap-admin.ts`. Если колонка пуста, боец
+определяется по подтверждённому `discord_id` (приоритет) или по позывному —
+правило живёт в `src/lib/panel-link.ts` и покрыто тестами.
+
+Зачем: раньше связка возникала только при входе через Discord, поэтому командир,
+вошедший по логину и паролю, открывал `/profile` и видел заглушку «Войдите в
+личный кабинет». Кнопка «Войти» вела на `/login`, после входа человек снова
+попадал на ту же заглушку — цикл. Теперь:
+
+- вход в панель (`/api/auth`), Dev-Login и OAuth2 выпускают cookie кабинета
+  связанному бойцу (`attachCabinetSession`), а `getSessionMember` умеет
+  разрешать бойца и по сессии панели;
+- состояния кабинета различимы: `no_session` (401, «войдите») против
+  `not_linked` (409, «свяжите аккаунт с бойцом в Доступах») — второй больше не
+  предлагает войти повторно, потому что человек уже вошёл;
+- отказ middleware ведёт на `/login?next=<путь>`, и после входа страница входа
+  возвращает туда же (`safeRedirectPath` отсекает чужие домены — иначе это был
+  бы открытый редирект).
+
+Пункт меню: **Личный кабинет** (`/profile`, иконка `IdCard`) — виден любой
+действующей сессии, подсвечивается активным на странице кабинета.
+
 ### Путь новобранца
 
 1. `/apply` — анкета: позывной, пароль, возраст, опыт в Arma 3, специализация,
@@ -113,8 +140,10 @@ DISCORD_CLIENT_SECRET=
 К `division_members` добавлены: `callsign` (unique), `password_hash`, `rank`,
 `unit`, `status`, `role`, `avatar_url`, `application_data` (jsonb),
 `member_token_version`, `created_at`. Новая таблица `member_sessions` — журнал
-входов (кто, каким способом, с какого IP). К `users` добавлена колонка
-`discord_id` (varchar(32), nullable, unique) — связка аккаунта панели с Discord.
+входов (кто, каким способом, с какого IP). К `users` добавлены колонки
+`discord_id` (varchar(32), nullable, unique) — связка с Discord, и
+`member_id` (integer, nullable, unique, `ON DELETE SET NULL`) — связка с бойцом,
+по которой сессия панели открывает личный кабинет.
 
 Схема применяется автоматически: Docker-сервис `migrate` вызывает
 `drizzle-kit push`. Для уже работающей базы, обновляемой вручную, есть
@@ -123,7 +152,11 @@ DISCORD_CLIENT_SECRET=
 ```bash
 psql "$DATABASE_URL" -f scripts/migrations/2026-09-hybrid-auth.sql
 psql "$DATABASE_URL" -f scripts/migrations/2026-09-panel-discord-link.sql
+psql "$DATABASE_URL" -f scripts/migrations/2026-09-panel-member-link.sql
 ```
+
+Последняя миграция не только добавляет колонку, но и заполняет связку для уже
+существующих аккаунтов: сперва по совпадению `discord_id`, затем по позывному.
 
 Миграция идемпотентна (повторный запуск ничего не ломает) и переводит бойцов,
 уже находящихся в строю, из `pending` в `active`.
@@ -155,3 +188,18 @@ npm run test        # тесты, включая tests/recruits.test.ts
 npm run lint        # бюджет замечаний ESLint
 npm run build       # production-сборка
 ```
+
+Сценарий кабинета целиком проверяется двумя скриптами (им нужен запущенный
+стенд и заполненная база — `npm run dev:seed`):
+
+```bash
+# Серверная часть: редиректы, cookie, коды ответов
+node --import ./tests/setup.mjs scripts/verify-profile-flow.mjs http://localhost:3000
+
+# Клиентская часть: пункт меню, подсветка, отрисовка досье (headless Chrome)
+node scripts/verify-profile-browser.mjs http://localhost:3000
+```
+
+Браузерная проверка управляет Chrome/Edge напрямую по протоколу DevTools, без
+дополнительных зависимостей. Если браузера нет в стандартных путях, укажите свой
+в `CANDIDATES` внутри скрипта.

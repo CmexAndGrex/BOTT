@@ -8,6 +8,7 @@ import {
   logPanelLogin,
   setPanelCookie,
 } from "@/lib/api-auth";
+import { attachCabinetSession } from "@/lib/member-auth";
 
 type RateRecord = { attempts: number; lockUntil: number; at: number };
 const rateLimitMap = new Map<string, RateRecord>();
@@ -102,7 +103,25 @@ export async function POST(req: NextRequest) {
     await logPanelLogin(user.username, "вход в панель по паролю", { ip });
 
     const response = NextResponse.json({ ok: true, role: user.role });
-    return setPanelCookie(response, token, req);
+    setPanelCookie(response, token, req);
+
+    // Стандартный вход в систему и личный кабинет открывает сразу: аккаунт
+    // панели связан с бойцом (users.member_id или Discord ID/позывной).
+    // Без этого командир после входа видел на /profile заглушку «войдите в
+    // личный кабинет», а клик «Войти» возвращал его на /login — цикл из отчёта.
+    const member = await attachCabinetSession(response, req, {
+      username: user.username,
+      memberId: user.memberId,
+      discordId: user.discordId,
+    });
+    if (member) {
+      await logPanelLogin(user.username, "кабинет открыт по сессии панели", {
+        "Позывной": member.callsign,
+        "IP": ip,
+      });
+    }
+
+    return response;
   } catch (e) {
     return NextResponse.json({ error: "Ошибка сервера" }, { status: 500 });
   }

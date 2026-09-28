@@ -21,6 +21,7 @@ import {
   Database,
   HardDrive,
   RefreshCw,
+  ShieldCheck,
   Timer,
   Trash2,
   XCircle,
@@ -126,7 +127,7 @@ function Fact({ label, value }: { label: string; value: React.ReactNode }) {
 export default function MaintenancePanel() {
   const [health, setHealth] = useState<Health | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<null | "backup" | "sync" | "prune">(null);
+  const [busy, setBusy] = useState<null | "backup" | "sync" | "prune" | "roles-dry" | "roles-apply">(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   /** Счётчик перезагрузки: увеличение повторяет запрос состояния */
   const [reloadToken, setReloadToken] = useState(0);
@@ -183,7 +184,12 @@ export default function MaintenancePanel() {
    * неудачи различаются по действию — они заданы ТЗ.
    */
   const run = useCallback(
-    async (kind: "backup" | "sync" | "prune", endpoint: string, successText: string, errorText: string) => {
+    async (
+      kind: "backup" | "sync" | "prune" | "roles-dry" | "roles-apply",
+      endpoint: string,
+      successText: string,
+      errorText: string
+    ) => {
       setBusy(kind);
       setNotice(null);
       try {
@@ -376,6 +382,54 @@ export default function MaintenancePanel() {
             }
           />
         </div>
+
+        {/* Сверка ролей Discord: отдельная карточка, потому что действие меняет
+            права живых людей — и «проверить» здесь не менее важно, чем «применить» */}
+        <ActionCard
+          title="Сверка ролей Discord"
+          hint="Приводит роли бойцов в соответствие с базой панели: звание, подразделение, отпуск, должность. Кастомные роли и роли ботов не трогаются. В фоне запускается по расписанию из настроек."
+          status={
+            <div className="text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
+              Сначала запустите проверку: бот покажет, что именно собирается изменить, и
+              запишет отчёт в журнал — роли при этом не меняются.
+            </div>
+          }
+          action={
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                className="btn btn-sm"
+                disabled={busy !== null}
+                onClick={() =>
+                  run(
+                    "roles-dry",
+                    "/api/admin/maintenance/roles?mode=dry",
+                    "Проверка завершена — смотрите журнал",
+                    "Ошибка проверки ролей"
+                  )
+                }
+              >
+                {busy === "roles-dry" ? <Spinner /> : <ShieldCheck size={13} />}
+                Проверить без изменений
+              </button>
+              <button
+                className="btn btn-sm btn-primary"
+                disabled={busy !== null}
+                title="Применить изменения ролей на сервере Discord"
+                onClick={() =>
+                  run(
+                    "roles-apply",
+                    "/api/admin/maintenance/roles?mode=apply",
+                    "Сверка ролей выполнена",
+                    "Ошибка сверки ролей"
+                  )
+                }
+              >
+                {busy === "roles-apply" ? <Spinner /> : <RefreshCw size={13} />}
+                Применить сейчас
+              </button>
+            </div>
+          }
+        />
 
         {/* Состояние и занятое место */}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

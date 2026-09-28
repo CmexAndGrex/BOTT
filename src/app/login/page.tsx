@@ -11,8 +11,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Radar, ShieldAlert, MessageCircle, KeyRound, Info } from "lucide-react";
+import { Radar, ShieldAlert, MessageCircle, KeyRound, Info, FlaskConical, UserRound } from "lucide-react";
 import { Spinner } from "@/components/ui";
+import { safeRedirectPath } from "@/lib/validation";
 
 /** Расшифровка кодов ошибок входа (ключи совпадают с ?error= из callback) */
 const ERROR_TEXT: Record<string, string> = {
@@ -21,6 +22,8 @@ const ERROR_TEXT: Record<string, string> = {
   oauth_failed: "Не удалось завершить вход через Discord. Попробуйте позже",
   oauth_session: "Сессия входа потеряна. Войдите заново",
   discord_taken: "Этот Discord уже привязан к другому аккаунту",
+  // Discord подтверждён, но бойца с таким ID в табеле нет — объясняем, что делать
+  discord_not_linked: "Ваш Discord аккаунт не привязан к бойцу в ШДС. Обратитесь к штабу",
   pending: "Ваш рапорт находится на рассмотрении штаба",
   dismissed: "Рапорт отклонён. Свяжитесь с командирским составом",
 };
@@ -43,8 +46,27 @@ function LoginForm() {
   const [loading, setLoading] = useState(false);
   const [discordLoading, setDiscordLoading] = useState(false);
   const [discordReady, setDiscordReady] = useState<boolean | null>(null);
+  /** Учётные записи для быстрого входа: пусто — блок «Dev Login» не показываем */
+  const [devAccounts, setDevAccounts] = useState<
+    { key: string; label: string; hint: string; callsign: string; rank: string; unit: string }[]
+  >([]);
+  const [devBusy, setDevBusy] = useState<string>("");
   const router = useRouter();
   const searchParams = useSearchParams();
+
+  /**
+   * Куда уйти после успешного входа.
+   *
+   * По умолчанию — как раньше: боец в кабинет, штаб в панель. Если страница
+   * пришла с `?next=` (например, боец нажал «Войти» на /profile), возвращаемся
+   * туда: без этого вход уводил на «/», и человек, кликнувший «Войти» в
+   * кабинете, снова попадал в кабинет через меню — цикл из отчёта.
+   *
+   * Путь проверяется safeRedirectPath: значение приходит из адреса, а значит
+   * может быть чужим доменом («//evil.com»), и возврат после входа превратился
+   * бы в открытый редирект.
+   */
+  const nextPath = safeRedirectPath(searchParams.get("next"), "");
 
   /**
    * Сообщения из адреса (?error=... после возврата из Discord, ?applied=1 после
@@ -79,6 +101,67 @@ function LoginForm() {
       window.clearTimeout(timer);
     };
   }, []);
+
+  /**
+   * Список кнопок Dev Login.
+   *
+   * Спрашиваем сервер, а не сверяем NODE_ENV на клиенте: переменная окружения
+   * в браузер не попадает (если не объявлена как NEXT_PUBLIC_), а решение о
+   * доступности отладочного входа обязан принимать сервер. Нет блока в ответе
+   * (или 404) — значит режим боевой, и ничего лишнего на форме не появится.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      fetch("/api/auth/dev-login", { cache: "no-store" })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (!cancelled && data?.ok && Array.isArray(data.accounts)) {
+            setDevAccounts(data.accounts);
+          }
+        })
+        .catch(() => {
+          // Отладочный блок — не критичный: молча остаёмся без него
+        });
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
+
+  /**
+   * Быстрый вход под dev-аккаунтом.
+   *
+   * Сессию выпускает сервер (подписанный JWT + запись в БД): подстановка cookie
+   * на клиенте не сработала бы — гварды читают роль и статус из базы.
+   */
+  const handleDevLogin = useCallback(
+    async (key: string) => {
+      setError("");
+      setNotice("");
+      setDevBusy(key);
+      try {
+        const res = await fetch("/api/auth/dev-login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ as: key }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          setError(data.error || "Не удалось выполнить dev-вход");
+          return;
+        }
+        router.push(nextPath || data.redirectTo || "/profile");
+        router.refresh();
+      } catch {
+        setError("Сбой сети");
+      } finally {
+        setDevBusy("");
+      }
+    },
+    [router, nextPath]
+  );
 
   const handleDiscord = useCallback(async () => {
     setError("");
@@ -123,7 +206,7 @@ function LoginForm() {
       const memberData = await memberRes.json();
 
       if (memberData.ok) {
-        router.push("/profile");
+        router.push(nextPath || "/profile");
         router.refresh();
         return;
       }
@@ -143,12 +226,30 @@ function LoginForm() {
       const panelData = await panelRes.json();
 
       if (panelData.ok) {
-        router.push("/");
+        // Штаб после входа идёт в панель («/»), но если он пришёл из кабинета
+        // (?next=/profile), возвращаем его туда: вход в панель открывает и
+        // личное дело сразу, второй раз вводить данные не нужно.
+        router.push(nextPath || "/");
         router.refresh();
         return;
       }
 
-      setError(panelData.error || memberData.error || "Неверный позывной или пароль");
+      // Обе ветки (боец и панель) отказали — это неверные учётные данные.
+      // Плашку показываем с формулировкой ТЗ, а не с серверной строкой: у
+      // member-login и /api/auth тексты разные, и боец видел бы то один, то
+      // другой. Технические причины (429 — блокировка, 500 — сбой) оставляем
+      // серверными: их подменять нельзя, иначе потеряется смысл ответа.
+      const serverMessage =
+        (typeof panelData.error === "string" && panelData.error) ||
+        (typeof memberData.error === "string" && memberData.error) ||
+        "";
+      const isTechnical =
+        panelRes.status === 500 ||
+        memberRes.status === 500 ||
+        panelRes.status === 429 ||
+        memberRes.status === 429;
+
+      setError(isTechnical && serverMessage ? serverMessage : "Неверный позывной или пароль");
     } catch {
       setError("Сбой сети");
     } finally {
@@ -254,6 +355,45 @@ function LoginForm() {
             Войти по паролю
           </button>
         </form>
+
+        {/* Режим разработки: быстрый вход под готовыми аккаунтами.
+            Блок появляется только когда сервер подтвердил доступность
+            (/api/auth/dev-login отвечает 404 вне NODE_ENV != production) */}
+        {devAccounts.length > 0 && (
+          <div
+            className="mt-6 rounded-xl border px-3 py-3"
+            style={{ borderColor: "rgba(110,160,255,.28)", background: "rgba(110,160,255,.07)" }}
+          >
+            <div className="mb-2 flex items-center gap-2">
+              <FlaskConical size={14} style={{ color: "var(--blue)" }} />
+              <span className="label" style={{ color: "var(--blue)" }}>
+                Режим разработки (Dev Login)
+              </span>
+            </div>
+            <div className="flex flex-col gap-2">
+              {devAccounts.map((account) => (
+                <button
+                  key={account.key}
+                  type="button"
+                  className="btn w-full flex-col items-start gap-0.5 px-3 py-2 text-left"
+                  onClick={() => void handleDevLogin(account.key)}
+                  disabled={devBusy !== ""}
+                >
+                  <span className="flex items-center gap-2 text-[12.5px] font-semibold">
+                    {devBusy === account.key ? <Spinner /> : <UserRound size={14} />}
+                    {account.label}
+                  </span>
+                  <span className="text-[11px]" style={{ color: "var(--dim)" }}>
+                    {account.callsign} · {account.rank} · {account.unit}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px]" style={{ color: "var(--dim)" }}>
+              {devAccounts[0]?.hint}
+            </p>
+          </div>
+        )}
 
         <div className="mt-6 border-t pt-4 text-center" style={{ borderColor: "var(--stroke-soft)" }}>
           <Link href="/apply" className="text-[13px] font-semibold" style={{ color: "var(--red)" }}>

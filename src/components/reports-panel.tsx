@@ -75,7 +75,13 @@ export function ReportForm({
   member: SessionMember | null;
   type: ServiceReportType | null;
   sending: boolean;
-  onPickType: (type: ServiceReportType) => void;
+  /**
+   * Выбор типа рапорта. `null` — «вернуться к списку типов»: так работает
+   * кнопка «Другой тип». Раньше она передавала текущий же тип, а страница
+   * /reports переходила на /reports/exam — маршрута с таким сегментом нет,
+   * и клик давал 404.
+   */
+  onPickType: (type: ServiceReportType | null) => void;
   onSubmit: (
     type: ServiceReportType,
     payload: unknown,
@@ -93,7 +99,7 @@ export function ReportForm({
       title={`${meta.icon} ${meta.label}`}
       eyebrow="подача рапорта"
       action={
-        <button type="button" className="btn btn-sm" onClick={() => onPickType(type)}>
+        <button type="button" className="btn btn-sm" onClick={() => onPickType(null)}>
           Другой тип
         </button>
       }

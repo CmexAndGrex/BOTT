@@ -1,0 +1,5 @@
+# Language and Communication Rules
+- All explanations, summaries, status updates, and reports MUST be written in Russian.
+- All code comments and commit messages must be in Russian or standard English.
+- Under NO circumstances use Chinese characters or Chinese language in output or reasoning.
+- Keep terminal commands and code identifiers in standard English/code syntax.

@@ -28,6 +28,13 @@ const SETTING_NAMES: Record<string, string> = {
   reserve_role_id: "ID роли «Запас»", reserve_sheet_name: "название листа «Запас»",
   guild_id: "ID сервера Discord",
   allowed_webhook_ids: "разрешённые вебхуки заявок",
+  role_sync_enabled: "фоновую сверку ролей Discord",
+  role_sync_dry_run: "режим проверки сверки ролей",
+  role_sync_interval_min: "интервал сверки ролей",
+  post_role_map: "соответствие «должность = роль»",
+  discord_rate_concurrency: "число одновременных запросов к Discord",
+  discord_rate_interval_ms: "паузу между запросами к Discord",
+  discord_rate_attempts: "число попыток при лимитах Discord",
 };
 
 export async function GET(req: NextRequest) {
