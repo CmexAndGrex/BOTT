@@ -19,13 +19,30 @@ import {
   Search, Unlink, Users, XCircle,
 } from "lucide-react";
 import { Avatar, Section, Spinner, Toggle, fmtDate } from "@/components/ui";
+import { DiscordIdCell, type DiscordIdSaveResult } from "@/components/discord-id-cell";
 
-type Member = { id: number; name: string; handle: string | null; rankName: string | null; post: string | null; hours: number; vacation: boolean; discordId: string | null; active: boolean; updatedAt: string; };
+/**
+ * Строка табеля.
+ *
+ * callsign и unit нужны ячейке Discord ID: роут правки ищет бойца по этим
+ * значениям в листе Google Таблицы (позывной — как зовёт его ШДС, подразделение
+ * — как называется лист), поэтому в типе они обязательны, хотя в разметке
+ * строки не показываются.
+ */
+type Member = { id: number; name: string; handle: string | null; callsign: string | null; unit: string | null; rankName: string | null; post: string | null; hours: number; vacation: boolean; discordId: string | null; active: boolean; updatedAt: string; };
 type Notice = { ok: boolean; text: string } | null;
 
 /** Роли, которым доступны приватные поля состава (панель или кабинет) */
 const STAFF_ROLES = ["admin", "officer"];
 
+/**
+ * Поле правки Discord ID для командира панели (без записи в Google Таблицу).
+ *
+ * Новый путь правки (модальное окно + синхронизация с ШДС) доступен только
+ * администратору, поэтому у командира остаётся прежний ввод: он правит привязку
+ * в панели через PATCH /api/members/[id]. Убирать эту возможность нельзя — она
+ * была и остаётся рабочей, а запись во внешнюю таблицу — отдельное полномочие.
+ */
 function DiscordIdInput({ value, onSave }: { value: string; onSave: (v: string) => Promise<void>; }) {
   const [local, setLocal] = useState(value);
   const [saving, setSaving] = useState(false);
@@ -73,6 +90,12 @@ export default function MembersPage() {
    * интерфейс, который отвечает «Нет доступа».
    */
   const canEditPanel = STAFF_ROLES.includes(role);
+  /**
+   * Правка Discord ID с записью в Google Таблицу ШДС — полномочие администратора
+   * (PATCH /api/admin/roster/[id]/discord-id требует роль admin). Администратор
+   * получает модальное окно в колонке, командир — прежнее поле ввода панели.
+   */
+  const isAdmin = role === "admin";
 
   const reload = useCallback(async () => {
     const [m, s, me] = await Promise.all([
@@ -107,6 +130,49 @@ export default function MembersPage() {
       else { setNotice({ ok: false, text: data.error || "Не удалось сохранить" }); }
     } catch { setNotice({ ok: false, text: "Сбой сети при сохранении" }); } 
     finally { setBusyIds((prev) => { const next = new Set(prev); next.delete(id); return next; }); }
+  };
+
+  /**
+   * Правка Discord ID администратором: база панели + Google Таблица ШДС.
+   *
+   * Оптимистичное обновление: значение в строке подставляется сразу, а сводка
+   * «Без Discord ID» пересчитывается сама — она выводится из того же массива
+   * members, поэтому перезагрузка страницы не нужна. Если сервер отказал,
+   * возвращаем прежнее значение и показываем причину; если правка в базе прошла,
+   * а таблица не обновилась — предупреждение (не ложный «успех»).
+   */
+  const saveDiscordId = async (id: number, discordId: string): Promise<DiscordIdSaveResult> => {
+    const previous = members ?? [];
+    setBusyIds((prev) => new Set(prev).add(id));
+    // Оптимистичная подстановка: пустая строка = снятая привязка (null)
+    setMembers((prev) =>
+      (prev ?? []).map((m) => (m.id === id ? { ...m, discordId: discordId || null } : m))
+    );
+
+    try {
+      const res = await fetch(`/api/admin/roster/${id}/discord-id`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ discordId }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setMembers(previous);
+        setNotice({ ok: false, text: data.error || "Не удалось сохранить Discord ID" });
+        return { ok: false, error: data.error };
+      }
+      // Строка берётся из ответа сервера: там и нормализованное значение, и updatedAt
+      setMembers((prev) => (prev ?? []).map((m) => (m.id === id ? data.member : m)));
+      if (data.warning) setNotice({ ok: true, text: data.warning });
+      else setNotice({ ok: true, text: data.sheets?.message || "Discord ID сохранён" });
+      return { ok: true, warning: data.warning ?? null };
+    } catch {
+      setMembers(previous);
+      setNotice({ ok: false, text: "Сбой сети при сохранении Discord ID" });
+      return { ok: false, error: "Сбой сети" };
+    } finally {
+      setBusyIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+    }
   };
 
   const sync = async () => {
@@ -234,11 +300,18 @@ export default function MembersPage() {
                       </td>
 
                       {/* Discord ID: только штабу — остальным колонка не отрисовывается.
-                          Правки доступны сессии панели; командиру из кабинета
-                          поле показываем только для чтения (без обмана) */}
+                          Администратор правит значение через окно (запись и в панель,
+                          и в Google Таблицу ШДС); командиру доступен прежний ввод
+                          панели; командиру из кабинета поле показываем только для
+                          чтения (без обмана) */}
                       {canSeePrivate && (
                         <td>
-                          {canEditPanel ? (
+                          {isAdmin ? (
+                            <DiscordIdCell
+                              member={{ id: m.id, name: m.name, callsign: m.callsign, unit: m.unit, discordId: m.discordId }}
+                              onSave={saveDiscordId}
+                            />
+                          ) : canEditPanel ? (
                             <DiscordIdInput value={m.discordId ?? ""} onSave={(v) => patch(m.id, { discordId: v })} />
                           ) : (
                             <span className="mono text-[12.5px]" style={{ color: m.discordId ? "var(--text)" : "var(--dim)" }}>

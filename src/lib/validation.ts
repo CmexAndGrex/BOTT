@@ -48,6 +48,56 @@ export function normalizeDiscordSnowflake(value: unknown): string | null {
 }
 
 /* ------------------------------------------------------------------ */
+/* Ручная привязка Discord ID из табеля «Состав»                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Границы длины Discord Snowflake ID при ручном вводе из панели.
+ *
+ * Почему уже, чем isDiscordId (5–25): тот стоит на границе Discord API, где
+ * значение приходит от самого Discord и важно лишь «это цифры, а не путь».
+ * Здесь значение вводит человек, и слишком короткая строка («12345») — это
+ * почти наверняка опечатка: такой ID не существует, а бот потом молча не
+ * упомянет бойца. Действующие снежинки Discord — 17–19 цифр.
+ */
+export const ROSTER_DISCORD_ID_MIN_LENGTH = 17;
+export const ROSTER_DISCORD_ID_MAX_LENGTH = 19;
+
+/** Итог проверки введённого ID: значение (null — очистка) либо текст ошибки */
+export type RosterDiscordIdResult =
+  | { ok: true; value: string | null }
+  | { ok: false; error: string };
+
+/**
+ * Проверка Discord ID, введённого вручную в табеле «Состав».
+ *
+ * Правило одно для интерфейса и роута (как validateEquipment в «Арсенале»):
+ * форма показывает требование сразу, а сервер отвечает той же формулировкой —
+ * две копии проверки разошлись бы, и панель отклоняла бы то, что принимает API.
+ *
+ * Пустое значение — это не ошибка, а осознанная очистка: штаб так снимает
+ * привязку (боец сменил Discord). Значение вроде «<@123…>» принимается: при
+ * копипасте из Discord человек захватывает упоминание целиком, и требовать
+ * снять «@» руками — лишняя работа для штаба.
+ */
+export function validateRosterDiscordId(value: unknown): RosterDiscordIdResult {
+  const text = String(value ?? "").trim();
+  if (!text) return { ok: true, value: null };
+
+  const digits = text.replace(/[^\d]/g, "");
+  if (!digits) {
+    return { ok: false, error: "Discord ID состоит только из цифр" };
+  }
+  if (digits.length < ROSTER_DISCORD_ID_MIN_LENGTH || digits.length > ROSTER_DISCORD_ID_MAX_LENGTH) {
+    return {
+      ok: false,
+      error: `Discord ID — от ${ROSTER_DISCORD_ID_MIN_LENGTH} до ${ROSTER_DISCORD_ID_MAX_LENGTH} цифр (введено ${digits.length})`,
+    };
+  }
+  return { ok: true, value: digits };
+}
+
+/* ------------------------------------------------------------------ */
 /* Учётные записи панели: роли и приватность полей состава             */
 /* ------------------------------------------------------------------ */
 

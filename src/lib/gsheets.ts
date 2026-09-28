@@ -792,3 +792,73 @@ async function logSheetsEvent(
   }
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Правка состава панелью: колонка Discord ID                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Обновление ячейки Discord ID на листе подразделения без заявки ШДС.
+ *
+ * Зачем отдельная функция, а не вызов applyShdsRequest: тот принимает
+ * ParsedRequest («Редакция ШДС», звание, экзамены…) и выполняет сценарий
+ * целиком — например «Добавление в ШДС» кладёт бойца в свободную строку
+ * «Вакант» и заливает имя. Для правки одного столбца это неверно: боец уже
+ * стоит в таблице, менять надо ровно одну ячейку.
+ *
+ * Колонка та же, что у сценария А (три столбца правее колонки имени) —
+ * сверено со scripts/verify-sheet.mjs, который читает её так же.
+ */
+export async function syncDiscordIdToSheet(params: {
+  /** Подразделение бойца: оно же название листа («Танковая рота» / «Артиллерийский дивизион») */
+  unit: string;
+  /**
+   * Кандидаты имени бойца в таблице.
+   *
+   * Список, а не одно имя: в табеле панели боец записан ФИО из rs-red.com, а в
+   * ШДС нередко стоит позывной (и наоборот — сценарий «Добавление в ШДС» пишет
+   * туда именно callsign). Перебор двух вариантов избавляет штаб от ошибки
+   * «боец не найден» там, где панель и таблица зовут человека по-разному.
+   */
+  names: readonly string[];
+  /** Новый Discord ID; пустая строка очищает ячейку */
+  discordId: string;
+}): Promise<ShdsResult> {
+  const unit = params.unit.trim();
+  if (!unit) {
+    return { ok: false, error: "Бойцу не назначено подразделение — неизвестно, в какой лист писать" };
+  }
+  const names = params.names.map((n) => (n || "").trim()).filter(Boolean);
+  if (!names.length) {
+    return { ok: false, error: "Неизвестно имя бойца для поиска строки в таблице" };
+  }
+
+  try {
+    const sheet = await getSheet(unit);
+    const layout = resolveLayout(unit);
+    await loadArea(sheet, layout.overall.top, layout.overall.bottom);
+
+    let row: number | null = null;
+    for (const name of names) {
+      row = findNameRow(sheet, layout, name);
+      if (row) break;
+    }
+    if (!row) {
+      throw new Error(`Боец «${names.join("» / «")}» не найден на листе «${sheet.title}»`);
+    }
+
+    const discordCell = cellAt(sheet, row, colLetter(colIndex(layout.nameCol) + 3));
+    discordCell.value = params.discordId;
+    applyStdFormat(discordCell);
+    await sheet.saveUpdatedCells();
+
+    return {
+      ok: true,
+      message: params.discordId
+        ? `Discord ID записан в лист «${sheet.title}» (строка ${row})`
+        : `Discord ID очищен в листе «${sheet.title}» (строка ${row})`,
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}

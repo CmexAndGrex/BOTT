@@ -12,6 +12,8 @@ const protectedPaths = [
   "/api/extension.zip", "/api/users",
   // Обслуживание системы: резервные копии, синхронизация ШДС, очистка данных
   "/api/admin/maintenance",
+  // Правка Discord ID из табеля «Состав»: меняет и базу панели, и Google Таблицу
+  "/api/admin/roster",
 ];
 
 /**
@@ -39,6 +41,9 @@ const cookieAuthApiPaths = [
   // Обслуживание системы: кнопки бэкапа/синхронизации/очистки меняют состояние
   // базы и диска, значит чужой сайт не должен иметь возможности их нажать
   "/api/admin/maintenance",
+  // Правка Discord ID: запрос меняет запись бойца и внешний документ, поэтому
+  // межсайтовый PATCH отклоняется (роут проверяет источник и сам)
+  "/api/admin/roster",
 ];
 
 /**
@@ -303,7 +308,10 @@ export async function middleware(req: NextRequest) {
       // необратимы, поэтому командира сюда не пускаем ещё на входе. Роут
       // дублирует проверку (requireMaintenance) — обход middleware не должен
       // открывать доступ.
-      pathname.startsWith("/api/admin/maintenance");
+      pathname.startsWith("/api/admin/maintenance") ||
+      // Правка Discord ID с записью в Google Таблицу ШДС — полномочие
+      // администратора; роут дублирует проверку (requireRole) 
+      pathname.startsWith("/api/admin/roster");
 
     if (isAdminArea && role !== "admin") {
       if (isApi) {
