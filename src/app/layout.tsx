@@ -12,7 +12,8 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#05060b",
+  // Цвет системной панели браузера — в тон глубокой подложке (#090a0c)
+  themeColor: "#090a0c",
 };
 
 export default function RootLayout({

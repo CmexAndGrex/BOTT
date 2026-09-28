@@ -387,8 +387,8 @@ function ExamForm({
               key={exam.code}
               className="rounded-xl px-3 py-2.5"
               style={{
-                border: `1px solid ${active ? "rgba(255,61,61,.45)" : "var(--stroke-soft)"}`,
-                background: active ? "rgba(255,61,61,.06)" : "transparent",
+                border: `1px solid ${active ? "rgba(239,68,68,.45)" : "var(--stroke-soft)"}`,
+                background: active ? "rgba(239,68,68,.06)" : "transparent",
               }}
             >
               <label className="flex items-center gap-2.5 cursor-pointer">

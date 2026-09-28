@@ -163,7 +163,7 @@ export function DossierHeader({
               type="button"
               className="btn btn-sm"
               onClick={onLogout}
-              style={{ background: "rgba(255,61,61,0.1)", borderColor: "transparent", color: "var(--red)" }}
+              style={{ background: "color-mix(in srgb, var(--red) 10%, transparent)", borderColor: "transparent", color: "var(--red)" }}
             >
               Выйти
             </button>
@@ -342,8 +342,8 @@ export function GarrisonWidget({
                 key={entry.id}
                 className="flex items-center gap-3 rounded-xl px-3 py-2.5"
                 style={{
-                  border: "1px solid rgba(61,220,132,.22)",
-                  background: "rgba(61,220,132,.05)",
+                  border: "1px solid rgba(16,185,129,.22)",
+                  background: "rgba(16,185,129,.05)",
                 }}
               >
                 <span className="dot dot-ok pulse-dot" />
@@ -408,8 +408,8 @@ function VehicleTile({ card }: { card: VehicleCard }) {
     <div
       className="flex flex-col gap-2 rounded-xl px-3.5 py-3"
       style={{
-        border: `1px solid ${unlocked ? "rgba(61,220,132,.28)" : "var(--stroke-soft)"}`,
-        background: unlocked ? "rgba(61,220,132,.05)" : "rgba(255,255,255,.015)",
+        border: `1px solid ${unlocked ? "rgba(16,185,129,.28)" : "var(--stroke-soft)"}`,
+        background: unlocked ? "rgba(16,185,129,.05)" : "rgba(255,255,255,.015)",
       }}
     >
       <div className="flex items-start gap-2.5">
@@ -480,7 +480,7 @@ export function VehicleAccessGrid({ report }: { report: VehicleAccessReport }) {
 
   const chipStyle = (active: boolean) =>
     active
-      ? { background: "var(--red-soft)", borderColor: "rgba(255,61,61,.45)", color: "#fff" }
+      ? { background: "var(--red-soft)", borderColor: "rgba(239,68,68,.45)", color: "#fff" }
       : undefined;
 
   if (report.division === "unknown") {
@@ -531,7 +531,7 @@ export function VehicleAccessGrid({ report }: { report: VehicleAccessReport }) {
         {report.progress.next && (
           <div
             className="flex flex-col gap-2 rounded-xl px-3.5 py-3"
-            style={{ background: "rgba(255,255,255,.02)" }}
+            style={{ background: "rgba(255,255,255,.025)" }}
           >
             <div className="flex flex-wrap items-center gap-2 text-[12px]">
               <span className="label">следующий допуск</span>
@@ -689,7 +689,7 @@ export function ReportModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4"
-          style={{ background: "rgba(0,0,0,0.62)", backdropFilter: "blur(4px)" }}
+          style={{ background: "var(--overlay)", backdropFilter: "blur(4px)" }}
           onClick={onClose}
         >
           <motion.div
@@ -699,9 +699,9 @@ export function ReportModal({
             transition={{ type: "spring", stiffness: 380, damping: 30 }}
             className="card my-6 w-full max-w-[720px]"
             style={{
-              background: "rgba(10,12,20,0.97)",
+              background: "var(--modal)",
               backdropFilter: "blur(14px)",
-              borderColor: "rgba(255,61,61,0.28)",
+              borderColor: "rgba(239,68,68,0.28)",
             }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -750,7 +750,7 @@ export function ReportModal({
                       active
                         ? {
                             background: "var(--red-soft)",
-                            borderColor: "rgba(255,61,61,.45)",
+                            borderColor: "rgba(239,68,68,.45)",
                             color: "#fff",
                           }
                         : undefined
@@ -767,7 +767,7 @@ export function ReportModal({
             {error && (
               <div
                 className="mx-5 mt-4 flex items-center gap-2 rounded-xl px-3 py-2.5"
-                style={{ background: "rgba(255,61,61,.08)", border: "1px solid rgba(255,61,61,.35)" }}
+                style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.35)" }}
               >
                 <ShieldAlert size={15} style={{ color: "var(--red)", flex: "none" }} />
                 <span className="text-[12.5px]" style={{ color: "var(--red)" }}>
@@ -778,7 +778,7 @@ export function ReportModal({
             {notice && (
               <div
                 className="mx-5 mt-4 flex items-center gap-2 rounded-xl px-3 py-2.5"
-                style={{ background: "rgba(61,220,132,.08)", border: "1px solid rgba(61,220,132,.35)" }}
+                style={{ background: "rgba(16,185,129,.08)", border: "1px solid rgba(16,185,129,.35)" }}
               >
                 <CheckCircle2 size={15} style={{ color: "var(--green)", flex: "none" }} />
                 <span className="text-[12.5px]" style={{ color: "var(--muted)" }}>

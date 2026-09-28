@@ -214,8 +214,8 @@ export default function MembersPage() {
     { label: "Активных бойцов", value: active.length, icon: Users, tint: "#7c9aff" },
     { label: "В отпуске", value: onVacation, icon: Palmtree, tint: "#ffb020" },
     ...(canSeePrivate
-      ? [{ label: "Без Discord ID", value: withoutDiscord, icon: Ghost, tint: "#ff3d3d" }]
-      : [{ label: "Выбывших в списке", value: all.length - active.length, icon: Ghost, tint: "#ff3d3d" }]),
+      ? [{ label: "Без Discord ID", value: withoutDiscord, icon: Ghost, tint: "#ef4444" }]
+      : [{ label: "Выбывших в списке", value: all.length - active.length, icon: Ghost, tint: "#ef4444" }]),
   ];
 
   return (
@@ -241,7 +241,7 @@ export default function MembersPage() {
 
       <AnimatePresence>
         {notice && (
-          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="card flex items-start gap-2.5 px-4 py-3" style={{ borderColor: notice.ok ? "rgba(61,220,132,.4)" : "rgba(255,61,61,.45)" }}>
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="card flex items-start gap-2.5 px-4 py-3" style={{ borderColor: notice.ok ? "rgba(16,185,129,.4)" : "rgba(239,68,68,.45)" }}>
             {notice.ok ? <CheckCircle2 size={16} className="mt-0.5" style={{ color: "var(--green)", flex: "none" }} /> : <XCircle size={16} className="mt-0.5" style={{ color: "var(--red)", flex: "none" }} />}
             <span className="text-[13px]" style={{ color: "var(--muted)" }}>{notice.text}</span>
           </motion.div>
@@ -265,7 +265,7 @@ export default function MembersPage() {
         }
       >
         <div className="flex flex-wrap items-center gap-2 px-5 pt-4">
-          <button className={`chip ${onlyDebtors ? "" : ""}`} style={onlyDebtors ? { borderColor: "rgba(255,61,61,.5)", background: "var(--red-soft)", color: "#fff" } : { cursor: "pointer" }} onClick={() => setOnlyDebtors((v) => !v)}><span className={`dot ${onlyDebtors ? "dot-err" : "dot-dim"}`} />Только должники (&lt; {norm} ч)</button>
+          <button className={`chip ${onlyDebtors ? "" : ""}`} style={onlyDebtors ? { borderColor: "rgba(239,68,68,.5)", background: "var(--red-soft)", color: "#fff" } : { cursor: "pointer" }} onClick={() => setOnlyDebtors((v) => !v)}><span className={`dot ${onlyDebtors ? "dot-err" : "dot-dim"}`} />Только должники (&lt; {norm} ч)</button>
           <button className="chip" style={showInactive ? { borderColor: "rgba(255,176,32,.5)", background: "var(--amber-soft)", color: "#fff" } : { cursor: "pointer" }} onClick={() => setShowInactive((v) => !v)}><span className={`dot ${showInactive ? "dot-warn" : "dot-dim"}`} />Показать выбывших</button>
         </div>
 

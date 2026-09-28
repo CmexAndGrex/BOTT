@@ -165,7 +165,7 @@ function DiscordIdDialog({
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4"
-      style={{ background: "rgba(0,0,0,0.62)", backdropFilter: "blur(4px)" }}
+      style={{ background: "var(--overlay)", backdropFilter: "blur(4px)" }}
       onClick={onClose}
       role="dialog"
       aria-modal="true"
@@ -178,9 +178,9 @@ function DiscordIdDialog({
         transition={{ type: "spring", stiffness: 380, damping: 30 }}
         className="card my-10 w-full max-w-[460px]"
         style={{
-          background: "rgba(10,12,20,0.97)",
+          background: "var(--modal)",
           backdropFilter: "blur(14px)",
-          borderColor: "rgba(255,61,61,0.28)",
+          borderColor: "rgba(239,68,68,0.28)",
         }}
         onClick={(e) => e.stopPropagation()}
       >

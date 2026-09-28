@@ -73,8 +73,10 @@ export default function BackgroundSlideshow() {
           className="fx-slide-img"
         />
       </AnimatePresence>
-      {/* Затемнение поверх фото, чтобы текст и карточки оставались читаемыми */}
+      {/* Двойное затемнение поверх фото: линейный градиент прижимает низ (там
+          таблицы), радиальный оставляет читаемый центр кадра */}
       <div className="fx-slide-overlay" />
+      <div className="fx-slide-vignette" />
     </div>
   );
 }

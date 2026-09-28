@@ -48,17 +48,27 @@ export type DivisionStats = {
 
 export type PctColor = {
   name: "green" | "yellow" | "red";
+  /** Цвет Embed в Discord — фирменная тройка бота, менять её нельзя */
   hex: number;
+  /** Цвет интерфейса панели — из палитры deep dark темы */
   css: string;
   label: string;
 };
 
+/**
+ * Цвет показателя нормы.
+ *
+ * hex и css намеренно разные. hex уходит в Embed Discord (tasks.ts) — это
+ * фирменные цвета бота, их смена разошлась бы с остальными его сообщениями.
+ * css рисует кольцо и график панели, поэтому берёт акценты сайта: изумрудный,
+ * янтарный и тактический красный.
+ */
 export function pctColor(p: number): PctColor {
   if (p >= 60)
-    return { name: "green", hex: 0x3ddc84, css: "#3ddc84", label: "Норма выполняется" };
+    return { name: "green", hex: 0x3ddc84, css: "#34d399", label: "Норма выполняется" };
   if (p >= 50)
     return { name: "yellow", hex: 0xffb020, css: "#ffb020", label: "Норма на грани" };
-  return { name: "red", hex: 0xff3d3d, css: "#ff3d3d", label: "Норма провалена" };
+  return { name: "red", hex: 0xff3d3d, css: "#ef4444", label: "Норма провалена" };
 }
 
 export function computeStats(

@@ -84,9 +84,13 @@ export function CopyButton({
       className="btn btn-sm"
       style={
         done
-          ? { borderColor: "rgba(61,220,132,.55)", background: "var(--green-soft)", color: "var(--green)" }
+          ? { borderColor: "rgba(16,185,129,.55)", background: "var(--green-soft)", color: "var(--green)" }
           : accent
-            ? { borderColor: `${accent}44`, background: `${accent}14`, color: accent }
+            ? {
+                borderColor: `color-mix(in srgb, ${accent} 28%, transparent)`,
+                background: `color-mix(in srgb, ${accent} 8%, transparent)`,
+                color: accent,
+              }
             : undefined
       }
     >
@@ -111,7 +115,11 @@ export function LoadoutCard({ row, onOpen }: { row: ArmoryRow; onOpen: () => voi
       >
         <div
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
-          style={{ background: `${accent}18`, color: accent, border: `1px solid ${accent}33` }}
+          style={{
+            background: `color-mix(in srgb, ${accent} 10%, transparent)`,
+            color: accent,
+            border: `1px solid color-mix(in srgb, ${accent} 22%, transparent)`,
+          }}
         >
           <DivisionIcon division={row.division} size={17} />
         </div>
@@ -122,7 +130,11 @@ export function LoadoutCard({ row, onOpen }: { row: ArmoryRow; onOpen: () => voi
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
             <span
               className="badge"
-              style={{ background: `${accent}18`, color: accent, border: `1px solid ${accent}33` }}
+              style={{
+                background: `color-mix(in srgb, ${accent} 10%, transparent)`,
+                color: accent,
+                border: `1px solid color-mix(in srgb, ${accent} 22%, transparent)`,
+              }}
             >
               {meta.short}
             </span>
@@ -256,7 +268,7 @@ function MiscList({ items, accent }: { items: string[]; accent: string }) {
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {items.map((item) => (
-            <span key={item} className="chip" style={{ borderColor: `${accent}33` }}>
+            <span key={item} className="chip" style={{ borderColor: `color-mix(in srgb, ${accent} 22%, transparent)` }}>
               <Package size={11} style={{ color: accent }} />
               {item}
             </span>
@@ -312,7 +324,11 @@ export function LoadoutDetail({
       <header className="flex items-start gap-3">
         <div
           className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl"
-          style={{ background: `${accent}18`, color: accent, border: `1px solid ${accent}33` }}
+          style={{
+            background: `color-mix(in srgb, ${accent} 10%, transparent)`,
+            color: accent,
+            border: `1px solid color-mix(in srgb, ${accent} 22%, transparent)`,
+          }}
         >
           <DivisionIcon division={row.division} size={20} />
         </div>
@@ -321,7 +337,11 @@ export function LoadoutDetail({
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
             <span
               className="badge"
-              style={{ background: `${accent}18`, color: accent, border: `1px solid ${accent}33` }}
+              style={{
+                background: `color-mix(in srgb, ${accent} 10%, transparent)`,
+                color: accent,
+                border: `1px solid color-mix(in srgb, ${accent} 22%, transparent)`,
+              }}
             >
               {meta.short}
             </span>
@@ -390,7 +410,7 @@ export function LoadoutDetail({
               type="button"
               onClick={() => onTab(item.key)}
               className="chip"
-              style={active ? { background: `${accent}18`, borderColor: `${accent}55`, color: accent } : undefined}
+              style={active ? { background: `color-mix(in srgb, ${accent} 10%, transparent)`, borderColor: `color-mix(in srgb, ${accent} 34%, transparent)`, color: accent } : undefined}
             >
               <Icon size={12} />
               {item.label}
@@ -445,7 +465,7 @@ export function LoadoutDetail({
         <pre
           className="mono mt-3 max-h-40 overflow-auto rounded-lg p-3 text-[11px]"
           style={{
-            background: "rgba(8,10,18,.85)",
+            background: "var(--field)",
             color: "var(--muted)",
             whiteSpace: "pre-wrap",
             wordBreak: "break-all",
@@ -462,7 +482,7 @@ export function LoadoutDetail({
         <pre
           className="mono mt-3 max-h-40 overflow-auto rounded-lg p-3 text-[11px]"
           style={{
-            background: "rgba(8,10,18,.85)",
+            background: "var(--field)",
             color: "var(--muted)",
             whiteSpace: "pre-wrap",
             wordBreak: "break-all",

@@ -329,7 +329,7 @@ function DossierPageInner() {
       {noticeError && (
         <div
           className="card flex items-center gap-2.5 px-4 py-3"
-          style={{ borderColor: "rgba(255,61,61,.45)" }}
+          style={{ borderColor: "rgba(239,68,68,.45)" }}
         >
           <ShieldAlert size={16} style={{ color: "var(--red)" }} />
           <span className="text-[13px]" style={{ color: "var(--red)" }}>
@@ -340,7 +340,7 @@ function DossierPageInner() {
       {noticeOk && (
         <div
           className="card flex items-center gap-2.5 px-4 py-3"
-          style={{ borderColor: "rgba(61,220,132,.4)" }}
+          style={{ borderColor: "rgba(16,185,129,.4)" }}
         >
           <CheckCircle2 size={16} style={{ color: "var(--green)" }} />
           <span className="text-[13px]" style={{ color: "var(--muted)" }}>

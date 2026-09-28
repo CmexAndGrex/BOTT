@@ -89,7 +89,7 @@ export default function ControlPage() {
   // Вспомогательная функция для рендера ячейки недели
   const renderCell = (isVacation: boolean, hours: number) => {
     if (isVacation) {
-      return <span className="badge" style={{ background: "rgba(61,220,132,0.15)", color: "var(--green)", borderColor: "rgba(61,220,132,0.3)" }}>Отпуск</span>;
+      return <span className="badge" style={{ background: "rgba(16,185,129,0.15)", color: "var(--green)", borderColor: "rgba(16,185,129,0.3)" }}>Отпуск</span>;
     }
     const isOk = hours >= norm;
     return <span className="mono font-bold" style={{ color: isOk ? "var(--green)" : "var(--red)" }}>{hours.toFixed(1)} ч</span>;
@@ -109,7 +109,7 @@ export default function ControlPage() {
 
       <AnimatePresence>
         {notice && (
-          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="card flex items-start gap-2.5 px-4 py-3" style={{ borderColor: notice.ok ? "rgba(61,220,132,.4)" : "rgba(255,61,61,.45)" }}>
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="card flex items-start gap-2.5 px-4 py-3" style={{ borderColor: notice.ok ? "rgba(16,185,129,.4)" : "rgba(239,68,68,.45)" }}>
             {notice.ok ? <CheckCircle2 size={16} className="mt-0.5" style={{ color: "var(--green)", flex: "none" }} /> : <XCircle size={16} className="mt-0.5" style={{ color: "var(--red)", flex: "none" }} />}
             <span className="text-[13px]" style={{ color: "var(--muted)" }}>{notice.text}</span>
           </motion.div>
@@ -189,7 +189,7 @@ export default function ControlPage() {
                           
                           <button 
                             className="btn" 
-                            style={{ padding: "0.4rem 0.6rem", fontSize: "0.75rem", background: "var(--red-soft)", color: "#fff", borderColor: "rgba(255,61,61,.5)" }}
+                            style={{ padding: "0.4rem 0.6rem", fontSize: "0.75rem", background: "var(--red-soft)", color: "#fff", borderColor: "rgba(239,68,68,.5)" }}
                             disabled={busyIds.has(f.id)}
                             onClick={() => issueWarning(f.id, 2)}
                           >

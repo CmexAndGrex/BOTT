@@ -194,7 +194,7 @@ function ExamsInner() {
       </header>
 
       {error && (
-        <div className="card flex items-center gap-2.5 px-4 py-3" style={{ borderColor: "rgba(255,61,61,.45)" }}>
+        <div className="card flex items-center gap-2.5 px-4 py-3" style={{ borderColor: "rgba(239,68,68,.45)" }}>
           <ShieldAlert size={16} style={{ color: "var(--red)" }} />
           <span className="text-[13px]" style={{ color: "var(--red)" }}>
             {error}
@@ -245,7 +245,7 @@ function ExamsInner() {
                   title={item.blocked ? item.blockedHint : undefined}
                   style={
                     isActive
-                      ? { background: "var(--red-soft)", borderColor: "rgba(255,61,61,.45)", color: "#fff" }
+                      ? { background: "var(--red-soft)", borderColor: "rgba(239,68,68,.45)", color: "#fff" }
                       : undefined
                   }
                 >
@@ -358,8 +358,8 @@ function ExamRow({
     <div
       className="flex flex-col gap-2 rounded-xl px-3 py-2.5"
       style={{
-        border: `1px solid ${status.passed ? "rgba(61,220,132,.35)" : "var(--stroke-soft)"}`,
-        background: status.passed ? "rgba(61,220,132,.05)" : "transparent",
+        border: `1px solid ${status.passed ? "rgba(16,185,129,.35)" : "var(--stroke-soft)"}`,
+        background: status.passed ? "rgba(16,185,129,.05)" : "transparent",
       }}
     >
       <div className="flex flex-wrap items-center gap-2">

@@ -187,7 +187,7 @@ export default function UsersPage() {
           ) : (
             <table className="w-full text-left border-collapse" style={{ minWidth: 780 }}>
               <thead>
-                <tr className="border-b border-white/5 text-[11.5px] uppercase tracking-wider" style={{ color: "var(--muted)" }}>
+                <tr className="border-b border-[var(--stroke-soft)] text-[11.5px] uppercase tracking-wider" style={{ color: "var(--muted)" }}>
                   <th className="pb-3 pl-2">Логин</th>
                   <th className="pb-3">Уровень прав</th>
                   <th className="pb-3">Discord ID</th>
@@ -197,8 +197,8 @@ export default function UsersPage() {
               </thead>
               <tbody>
                 {accounts.map((acc) => (
-                  <tr key={acc.id} className="border-b border-white/5 last:border-0 align-top">
-                    <td className="py-3 pl-2 font-mono font-bold text-[14px] text-[#eef1f7]">{acc.username}</td>
+                  <tr key={acc.id} className="border-b border-[var(--stroke-soft)] last:border-0 align-top">
+                    <td className="py-3 pl-2 font-mono font-bold text-[14px] text-[var(--text)]">{acc.username}</td>
                     <td className="py-3">
                       <select
                         className="select"

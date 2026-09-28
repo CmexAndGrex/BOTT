@@ -257,7 +257,7 @@ export default function MaintenancePanel() {
           <div
             className="flex items-center gap-2.5 rounded-xl border px-3.5 py-2.5"
             style={{
-              borderColor: notice.ok ? "rgba(61,220,132,.4)" : "rgba(255,61,61,.45)",
+              borderColor: notice.ok ? "rgba(16,185,129,.4)" : "rgba(239,68,68,.45)",
               background: "rgba(255,255,255,.02)",
             }}
           >

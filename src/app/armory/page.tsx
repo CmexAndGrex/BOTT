@@ -270,7 +270,7 @@ export default function ArmoryPage() {
                 onClick={() => setTab(item.key)}
                 className="chip"
                 style={
-                  active ? { background: `${accent}18`, borderColor: `${accent}55`, color: accent } : undefined
+                  active ? { background: `color-mix(in srgb, ${accent} 10%, transparent)`, borderColor: `color-mix(in srgb, ${accent} 34%, transparent)`, color: accent } : undefined
                 }
               >
                 {item.label}
@@ -314,14 +314,14 @@ export default function ArmoryPage() {
       </div>
 
       {flash && (
-        <div className="card flex items-center gap-2.5 px-4 py-3" style={{ borderColor: "rgba(61,220,132,.4)" }}>
+        <div className="card flex items-center gap-2.5 px-4 py-3" style={{ borderColor: "rgba(16,185,129,.4)" }}>
           <span className="text-[13px]" style={{ color: "var(--muted)" }}>
             {flash}
           </span>
         </div>
       )}
       {error && (
-        <div className="card flex items-center gap-2.5 px-4 py-3" style={{ borderColor: "rgba(255,61,61,.45)" }}>
+        <div className="card flex items-center gap-2.5 px-4 py-3" style={{ borderColor: "rgba(239,68,68,.45)" }}>
           <span className="text-[13px]" style={{ color: "var(--red)" }}>
             {error}
           </span>

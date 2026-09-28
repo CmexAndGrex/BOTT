@@ -276,7 +276,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
             style={{
               width: 68,
               height: 68,
-              boxShadow: "0 0 35px 10px rgba(255,61,61,0.18)",
+              boxShadow: "0 0 35px 10px rgba(239,68,68,0.18)",
               borderRadius: "50%",
               overflow: "hidden"
             }}
@@ -432,7 +432,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
                 className="btn btn-sm btn-icon"
                 title="Выйти из аккаунта"
                 aria-label="Выйти из аккаунта"
-                style={{ color: "var(--red)", borderColor: "transparent", background: "rgba(255,61,61,0.1)" }}
+                style={{ color: "var(--red)", borderColor: "transparent", background: "rgba(239,68,68,0.1)" }}
               >
                 <LogOut size={14} />
               </button>
@@ -465,7 +465,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
               key={item.href}
               href={item.href}
               className="btn btn-sm"
-              style={active ? { borderColor: "rgba(255,61,61,.5)", background: "var(--red-soft)", color: "#fff" } : undefined}
+              style={active ? { borderColor: "rgba(239,68,68,.5)", background: "var(--red-soft)", color: "#fff" } : undefined}
             >
               {item.label}
             </Link>

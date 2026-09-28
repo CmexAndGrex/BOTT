@@ -85,14 +85,15 @@ export default function LogsPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          {/* Главные вкладки */}
-          <div className="flex gap-1.5 bg-[#121214] p-1 rounded-xl border border-gray-800">
+          {/* Главные вкладки: поверхность «поля», а не сине-серый ящик —
+              тот же графит/асфальт, что и остальные переключатели панели */}
+          <div className="flex gap-1.5 rounded-xl border border-hairline bg-field p-1">
             <button
               onClick={() => { setMainTab("system"); setExpandedId(null); }}
               className="chip transition-all"
               style={
                 mainTab === "system"
-                  ? { borderColor: "rgba(255,61,61,.5)", background: "var(--red-soft)", color: "#fff", cursor: "pointer" }
+                  ? { borderColor: "rgba(239,68,68,.5)", background: "var(--red-soft)", color: "#fff", cursor: "pointer" }
                   : { cursor: "pointer", color: "var(--muted)" }
               }
             >
@@ -103,7 +104,7 @@ export default function LogsPage() {
               className="chip transition-all"
               style={
                 mainTab === "edit"
-                  ? { borderColor: "rgba(255,61,61,.5)", background: "var(--red-soft)", color: "#fff", cursor: "pointer" }
+                  ? { borderColor: "rgba(239,68,68,.5)", background: "var(--red-soft)", color: "#fff", cursor: "pointer" }
                   : { cursor: "pointer", color: "var(--muted)" }
               }
             >
@@ -125,7 +126,7 @@ export default function LogsPage() {
                   className="chip"
                   style={
                     filter === f.key
-                      ? { borderColor: "rgba(255,61,61,.5)", background: "var(--red-soft)", color: "#fff", cursor: "pointer" }
+                      ? { borderColor: "rgba(239,68,68,.5)", background: "var(--red-soft)", color: "#fff", cursor: "pointer" }
                       : { cursor: "pointer" }
                   }
                   onClick={() => setFilter(f.key)}
@@ -160,7 +161,12 @@ export default function LogsPage() {
               if (isEdit) {
                 const isExpanded = expandedId === log.id;
                 return (
-                  <div key={log.id} className="flex flex-col py-3.5 border-b border-gray-800/40 last:border-none">
+                  // Разделитель строк — из токенов темы, последняя строка без линии
+                  <div
+                    key={log.id}
+                    className="flex flex-col py-3.5 border-b last:border-none"
+                    style={{ borderColor: "var(--stroke-soft)" }}
+                  >
                     <div
                       onClick={() => log.details && toggleRow(log.id)}
                       className={`flex items-center justify-between gap-4 transition-colors ${
@@ -175,7 +181,7 @@ export default function LogsPage() {
                           <span className="text-[13px] font-semibold text-red-400">
                             {log.author || "Командир"}
                           </span>
-                          <span className="text-[13px] text-gray-200">
+                          <span className="text-[13px]" style={{ color: "var(--text)" }}>
                             {log.action || log.title}
                           </span>
                         </div>
@@ -202,7 +208,7 @@ export default function LogsPage() {
                           color: "var(--muted)",
                         }}
                       >
-                        <div className="font-sans text-xs font-semibold text-gray-300 mb-2.5">
+                        <div className="font-sans text-xs font-semibold mb-2.5" style={{ color: "var(--muted)" }}>
                           Детали изменения:
                         </div>
                         <div className="font-mono text-[11px] space-y-1.5 pb-0.5" style={{ lineHeight: "1.8" }}>
@@ -210,7 +216,7 @@ export default function LogsPage() {
                             Object.entries(log.details).map(([key, value]) => (
                               <div key={key} className="flex gap-2">
                                 <span style={{ color: "var(--dim)" }}>• {key}:</span>
-                                <span className="text-gray-200">{String(value)}</span>
+                                <span style={{ color: "var(--text)" }}>{String(value)}</span>
                               </div>
                             ))
                           ) : (
@@ -251,8 +257,8 @@ export default function LogsPage() {
                       <div
                         className="mt-1.5 rounded-lg border px-2.5 py-1.5 font-mono text-[11px] leading-relaxed"
                         style={{
-                          borderColor: "rgba(255,61,61,.3)",
-                          background: "rgba(255,61,61,.06)",
+                          borderColor: "rgba(239,68,68,.3)",
+                          background: "rgba(239,68,68,.06)",
                           color: "#ff9c9c",
                         }}
                       >

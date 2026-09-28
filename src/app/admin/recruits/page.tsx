@@ -184,7 +184,7 @@ return (
         <div
           className="rounded-xl border px-3 py-2 text-sm"
           style={{
-            borderColor: "rgba(61,220,132,.3)",
+            borderColor: "rgba(16,185,129,.3)",
             background: "var(--green-soft)",
             color: "var(--green)",
           }}
@@ -201,7 +201,7 @@ return (
             className="btn btn-sm"
             style={
               filter === item.key
-                ? { borderColor: "rgba(255,61,61,.5)", background: "var(--red-soft)", color: "#fff" }
+                ? { borderColor: "rgba(239,68,68,.5)", background: "var(--red-soft)", color: "#fff" }
                 : undefined
             }
           >
@@ -355,7 +355,7 @@ return (
                   style={{
                     color: "var(--red)",
                     borderColor: "transparent",
-                    background: "rgba(255,61,61,0.1)",
+                    background: "rgba(239,68,68,0.1)",
                   }}
                 >
                   <ThumbsDown size={14} /> Отклонить

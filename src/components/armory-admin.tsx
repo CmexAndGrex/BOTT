@@ -457,7 +457,7 @@ export function ArmoryAdminForm({
       {message && (
         <p
           className="card px-4 py-3 text-[12.5px]"
-          style={{ borderColor: "rgba(255,61,61,.45)", color: "var(--red)" }}
+          style={{ borderColor: "rgba(239,68,68,.45)", color: "var(--red)" }}
         >
           {message}
         </p>

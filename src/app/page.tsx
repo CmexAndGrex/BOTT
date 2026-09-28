@@ -122,7 +122,7 @@ export default function DashboardPage() {
 
   const norm = stats?.norm ?? 10;
   const debtors = (members ?? []).filter((m) => m.active && !m.vacation && Math.floor(m.hours) < norm).sort((a, b) => a.hours - b.hours);
-  const colorCss = stats?.color.css ?? "#ff3d3d";
+  const colorCss = stats?.color.css ?? "#ef4444";
   const chartData = (stats?.history ?? []).map((h) => ({ date: fmtDate(h.createdAt), percent: h.percent }));
 
   return (
@@ -184,8 +184,8 @@ export default function DashboardPage() {
         <div className="grid gap-5 sm:grid-cols-2 lg:col-span-7">
           {[
             { key: "total", label: "Всего бойцов", value: stats?.live.total, icon: Users, tint: "#7c9aff", hint: "в подразделении" },
-            { key: "zero", label: "С 0 часов", value: stats?.live.zeroHours, icon: Hourglass, tint: "#ff3d3d", hint: "людей в подразделении" },
-            { key: "passed", label: `Норма ≥ ${norm} ч`, value: stats?.live.passed, icon: Target, tint: "#3ddc84", hint: "выполнили норму" },
+            { key: "zero", label: "С 0 часов", value: stats?.live.zeroHours, icon: Hourglass, tint: "#ef4444", hint: "людей в подразделении" },
+            { key: "passed", label: `Норма ≥ ${norm} ч`, value: stats?.live.passed, icon: Target, tint: "#34d399", hint: "выполнили норму" },
             { key: "vacation", label: "В отпуске", value: stats?.live.onVacation, icon: Palmtree, tint: "#ffb020", hint: "не пингуются" },
           ].map((s, i) => (
             <motion.div key={s.key} initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.08 + i * 0.06, duration: 0.5, ease: [0.22, 0.8, 0.24, 1] }}>
@@ -210,11 +210,11 @@ export default function DashboardPage() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid stroke="rgba(255,255,255,0.05)" vertical={false} />
-                <XAxis dataKey="date" tick={{ fill: "#5d657a", fontSize: 11 }} axisLine={false} tickLine={false} interval="preserveStartEnd" minTickGap={30} />
-                <YAxis domain={[0, 100]} tick={{ fill: "#5d657a", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
+                <XAxis dataKey="date" tick={{ fill: "#7d8798", fontSize: 11 }} axisLine={false} tickLine={false} interval="preserveStartEnd" minTickGap={30} />
+                <YAxis domain={[0, 100]} tick={{ fill: "#7d8798", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
                 <Tooltip content={<ChartTooltip />} />
                 <ReferenceLine y={50} stroke="#ffb020" strokeDasharray="5 5" strokeOpacity={0.55} />
-                <ReferenceLine y={60} stroke="#3ddc84" strokeDasharray="5 5" strokeOpacity={0.55} />
+                <ReferenceLine y={60} stroke="#34d399" strokeDasharray="5 5" strokeOpacity={0.55} />
                 <Area type="monotone" dataKey="percent" stroke={colorCss} strokeWidth={2.4} fill="url(#pctFill)" dot={{ r: 2.5, fill: colorCss, strokeWidth: 0 }} activeDot={{ r: 4, fill: "#fff" }} />
               </AreaChart>
             </ResponsiveContainer>
@@ -283,7 +283,7 @@ export default function DashboardPage() {
       <div className="fixed bottom-5 right-5 z-50 flex w-[min(380px,90vw)] flex-col gap-2">
         <AnimatePresence>
           {toasts.map((t) => (
-            <motion.div key={t.id} initial={{ opacity: 0, x: 40, scale: 0.96 }} animate={{ opacity: 1, x: 0, scale: 1 }} exit={{ opacity: 0, x: 30, scale: 0.96 }} className="card px-4 py-3" style={{ borderColor: t.ok ? "rgba(61,220,132,.4)" : "rgba(255,61,61,.45)" }}>
+            <motion.div key={t.id} initial={{ opacity: 0, x: 40, scale: 0.96 }} animate={{ opacity: 1, x: 0, scale: 1 }} exit={{ opacity: 0, x: 30, scale: 0.96 }} className="card px-4 py-3" style={{ borderColor: t.ok ? "rgba(16,185,129,.4)" : "rgba(239,68,68,.45)" }}>
               <div className="flex items-start gap-2.5">
                 {t.ok ? <CheckCircle2 size={16} className="mt-0.5" style={{ color: "var(--green)", flex: "none" }} /> : <XCircle size={16} className="mt-0.5" style={{ color: "var(--red)", flex: "none" }} />}
                 <div className="min-w-0"><div className="text-[13px] font-bold">{t.title}</div>{t.detail && <div className="mt-0.5 text-[11.5px] leading-relaxed" style={{ color: "var(--muted)" }}>{t.detail}</div>}</div>

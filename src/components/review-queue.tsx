@@ -164,7 +164,7 @@ function DecisionBar({
         onClick={() => onDecide(id, "reject")}
         className="btn btn-sm"
         disabled={inFlight}
-        style={{ color: "var(--red)", borderColor: "transparent", background: "rgba(255,61,61,0.1)" }}
+        style={{ color: "var(--red)", borderColor: "transparent", background: "rgba(239,68,68,0.1)" }}
       >
         <ThumbsDown size={14} /> Отклонить
       </button>

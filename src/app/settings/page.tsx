@@ -206,7 +206,7 @@ export default function SettingsPage() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
             className="card flex items-center gap-2.5 px-4 py-3"
-            style={{ borderColor: notice.ok ? "rgba(61,220,132,.4)" : "rgba(255,61,61,.45)" }}
+            style={{ borderColor: notice.ok ? "rgba(16,185,129,.4)" : "rgba(239,68,68,.45)" }}
           >
             {notice.ok ? (
               <CheckCircle2 size={16} style={{ color: "var(--green)" }} />
@@ -892,8 +892,8 @@ export default function SettingsPage() {
                       flex: "none",
                       fontSize: 11,
                       background: "var(--red-soft)",
-                      color: "#ff7b7b",
-                      border: "1px solid rgba(255,61,61,.3)",
+                      color: "#fca5a5",
+                      border: "1px solid rgba(239,68,68,.3)",
                     }}
                   >
                     {i + 1}
