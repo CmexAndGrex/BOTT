@@ -53,7 +53,16 @@ export const COMMON_ROLE_IDS = {
 } as const;
 
 /**
- * Все роли клана (проверка «роли не сняты» для вышедших бойцов).
+ * Роль «Берет»: выдаётся за сданный экзамен на берет.
+ *
+ * Именно имя, а не ID: роль живёт на сервере подразделения, и её ID зависит от
+ * сервера. Точный ID можно задать настройкой `beret_role_id`, а без неё роль
+ * ищется по имени (см. findRoleIdByName) — так же поступает синхронизация ролей
+ * для должностей и отпуска.
+ */
+export const BERET_ROLE_NAME = "Берет";
+
+/** Все роли клана (проверка «роли не сняты» для вышедших бойцов).
  * «Друг АТК» сюда НЕ входит — это роль бывшего бойца.
  */
 export const CLAN_ROLE_IDS: Set<string> = new Set([
@@ -63,6 +72,50 @@ export const CLAN_ROLE_IDS: Set<string> = new Set([
   COMMON_ROLE_IDS.RANKS_CATEGORY,
   COMMON_ROLE_IDS.RECRUIT,
 ]);
+
+/**
+ * ID роли по имени на сервере.
+ *
+ * Имя роли командир может поправить, а настройку с ID — забыть; поэтому в обоих
+ * случаях сначала берётся явная настройка, а поиск по имени служит запасным
+ * путём. Сравнение без учёта регистра, «ё» и лишних пробелов: «Берёт» и «БЕРЕТ»
+ * должны находиться одинаково.
+ */
+export function findRoleIdByName(
+  roles: readonly { id: string; name: string }[],
+  name: string
+): string | null {
+  const needle = normalizeRoleName(name);
+  if (!needle) return null;
+  return roles.find((role) => normalizeRoleName(role.name) === needle)?.id ?? null;
+}
+
+/** Имя роли в сравнимом виде: регистр, «ё/е», пробелы */
+export function normalizeRoleName(value: string): string {
+  return String(value ?? "")
+    .replace(/\u00A0/g, " ")
+    .replace(/ё/gi, "е")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * ID роли «Берет»: явная настройка, иначе поиск по имени на сервере.
+ *
+ * Функция не ходит в Discord сама — список ролей передаёт вызывающий. Так
+ * правило проверяется тестами без сети, а боевой код (review.ts и сверка ролей)
+ * пользуется одной и той же логикой: «зашитый» ID роли уехал бы на другой сервер
+ * вместе с ролью, а имя командир может поправить.
+ */
+export function resolveBeretRoleId(
+  configuredId: string | null | undefined,
+  roles: readonly { id: string; name: string }[]
+): string | null {
+  const explicit = (configuredId || "").trim();
+  if (/^\d{5,}$/.test(explicit)) return explicit;
+  return findRoleIdByName(roles, BERET_ROLE_NAME);
+}
 
 /** Роли, запрещённые к выдаче/снятию */
 const PROTECTED_ROLE_NAMES = ["модератор", "администратор"];

@@ -393,6 +393,8 @@ function activeMember(overrides: Partial<RoleSyncMember> = {}): RoleSyncMember {
     status: "active",
     active: true,
     vacation: false,
+    // По умолчанию берет не сдан: тесты роли «Берет» задают признак явно
+    beretPassed: false,
     ...overrides,
   };
 }

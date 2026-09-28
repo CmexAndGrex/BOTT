@@ -10,16 +10,23 @@
  * Названия нормативов совпадают с каталогом рапортов (reports.ts), а тот — с
  * шапками листов ШДС: при одобрении рапорта бот закрашивает столбец по названию
  * (matchExamColumns), поэтому переименование здесь = молча не зачтённый
- * норматив. Часть нормативов раздела (спецкурсы, «Берет», «КБМ») отдельного
- * столбца в листе не имеет — такие помечаются признаком inShds = false, и
- * отметку по ним штаб ставит вручную.
+ * норматив. «Ручных» отметок больше нет: у каждого норматива шкалы есть свой
+ * столбец в листе роты или дивизиона.
  *
  * Шкала специальностей каскадная: «Наводчик-оператор» включает ВСЕ экзамены
  * мехвода, «КБМ / Испытатель» — все экзамены мехвода и наводчика. Так допуск к
  * следующей специальности виден на одной шкале вместе с базовыми экзаменами, а
  * прогресс не «сбрасывается» при переходе на вкладку выше.
+ *
+ * Две ступени зависят от других нормативов, а не от своего рапорта:
+ *   * «Берет» — закрывается сам, когда сданы все четыре норматива экзамена на
+ *     берет (см. isBeretPassed): столбец в листе закрашивает бот при одобрении
+ *     последнего из них, а бойцу выдаётся серверная роль «Берет»;
+ *   * «Допуск на РСЗО» — высшая ступень дивизиона: пока берет не сдан, вкладка
+ *     помечается заблокированной с подсказкой, хотя прогресс по нормативам
+ *     виден (см. beretGate в ExamSpeciality).
  */
-import { examCatalog, normalizeExamCode } from "@/lib/reports";
+import { BERET_CODE, BERET_EXAM_CODES, columnExamFor, normalizeExamCode } from "@/lib/reports";
 import { vehicleDivision } from "@/lib/vehicles";
 
 /* ------------------------------------------------------------------ */
@@ -52,6 +59,14 @@ export type ExamRequirement = {
   title: string;
   code: string;
   aliases?: readonly string[];
+  /**
+   * Производный норматив: рапортом не сдаётся, засчитывается по другим.
+   *
+   * Сейчас так устроен «Берет»: он закрывается сам, когда сданы все четыре
+   * норматива экзамена на берет, поэтому кнопки «Сдать норматив» у него быть не
+   * должно (валидатор такой рапорт и не примет).
+   */
+  derived?: boolean;
 };
 
 export type ExamSpeciality = {
@@ -61,6 +76,19 @@ export type ExamSpeciality = {
   /** Короткое пояснение под заголовком */
   hint: string;
   requirements: readonly ExamRequirement[];
+  /**
+   * Ступень требует сданного берета. Само требование «Берет» уже входит в
+   * `requirements` (иначе прогресс не отражал бы условие), а признак нужен,
+   * чтобы отличить «не хватает норматива» от «ступень пока закрыта»: интерфейс
+   * показывает по нему заблокированную вкладку с подсказкой.
+   */
+  requiresBeret?: boolean;
+  /**
+   * Подсказка блокировки ступени: пока не выполнено условие, вкладка помечается
+   * заблокированной. Сейчас так устроен «Допуск на РСЗО» — он требует сдачи
+   * экзамена на берет. Пустая строка/отсутствие — ступень доступна сразу.
+   */
+  blockedHint?: string;
 };
 
 /* --- Общие наборы -------------------------------------------------- */
@@ -72,14 +100,26 @@ const MECHANIC_DRIVER: ExamRequirement = {
   aliases: ["Сдача на мехвода", "Сдача на мех. водителя", "Сдача на мехводителя"],
 };
 
-/** Экзамен на берет: одинаков у роты и дивизиона, столбцов в листах ШДС нет */
-const BERET_EXAMS: readonly ExamRequirement[] = [
-  { title: "Топография", code: "Топография" },
-  { title: "Связь", code: "Связь" },
-  { title: "Строевая подготовка", code: "Строевая подготовка" },
-  { title: "Должностные лица", code: "Должностные лица" },
-  { title: "Берет", code: "Берет" },
-];
+/** Нормативы экзамена на берет в виде требований шкалы (без самого «Берета») */
+const BERET_STEPS: readonly ExamRequirement[] = BERET_EXAM_CODES.map((code) => ({
+  title: code,
+  code,
+}));
+
+/**
+ * Экзамен на берет: четыре норматива со своими столбцами в листах обоих
+ * подразделений плюс итоговый «Берет», который закрывается автоматически.
+ *
+ * Итоговый норматив идёт последним: боец видит, что он не сдаётся отдельно, а
+ * засчитывается после четырех предыдущих.
+ */
+const BERET_BADGE_STEP: ExamRequirement = {
+  title: "Берет",
+  code: BERET_CODE,
+  derived: true,
+};
+
+const BERET_EXAMS: readonly ExamRequirement[] = [...BERET_STEPS, BERET_BADGE_STEP];
 
 /* --- Танковая рота ------------------------------------------------- */
 
@@ -113,7 +153,7 @@ const TR_GUNNER: readonly ExamRequirement[] = [
 const TR_TESTER: readonly ExamRequirement[] = [
   ...TR_GUNNER,
   { title: "КБМ испытателя", code: "КБМ Испыт." },
-  { title: "Уставы общие", code: "Уставы общие" },
+  { title: "Уставы общие", code: "Уставы (общевойсковые)" },
   { title: "КБМ", code: "КБМ" },
 ];
 
@@ -172,25 +212,30 @@ const TANK_SPECIALITIES: readonly ExamSpeciality[] = [
 
 /* --- Артиллерийский дивизион --------------------------------------- */
 
-/** База миномётчика: допуск на миномёты */
+/** База миномётчика: допуск на миномёты — шесть нормативов столбцов J–O */
 const AD_MORTAR: readonly ExamRequirement[] = [
   { title: "Физическая подготовка", code: "Физ. Подготовка" },
   { title: "ТТХ (миномёты)", code: "ТТХ (минометы)" },
   { title: "Миномётное дело (обучение)", code: "Миномётное дело (обучение)" },
   {
-    title: "Миномётное дело (экзамен)",
-    code: "Миномётное дело (Экзамен)",
-    aliases: ["Минометное дело (экзамен)", "Миномётное дело (экзамен)"],
-  },
-  {
     title: "Тест по теории",
     code: "Прохождение теста по теории",
     aliases: ["Тест теория", "Прохождение теста"],
   },
+  {
+    title: "Миномётное дело (экзамен)",
+    code: "Миномётное дело (Экзамен)",
+    aliases: ["Минометное дело (экзамен)", "Миномётное дело (экзамен)"],
+  },
   { title: "ПМП", code: "ПМП" },
 ];
 
-/** САУ и гаубицы: все миномёты плюс ствольная артиллерия и вождение */
+/**
+ * САУ и гаубицы: все миномёты плюс семь нормативов ствольной артиллерии.
+ *
+ * Каскад обязателен по ТЗ: без шести миномётных нормативов допуск к САУ не
+ * выдаётся, поэтому список начинается с них.
+ */
 const AD_SPG: readonly ExamRequirement[] = [
   ...AD_MORTAR,
   {
@@ -205,7 +250,7 @@ const AD_SPG: readonly ExamRequirement[] = [
   {
     title: "Арт. дело (обучение)",
     code: "Артиллерийское дело (обучение)",
-    aliases: ["Артиллирийское Дело (обучение)", "Арт. дело обучение"],
+    aliases: ["Артиллирийское Дело (обучение)", "Арт. дело обучение", "Арт. дело (обучение)"],
   },
   {
     title: "Арт. дело (экзамен)",
@@ -221,7 +266,15 @@ const AD_SPG: readonly ExamRequirement[] = [
   },
 ];
 
-/** РСЗО: всё, что нужно САУ, плюс реактивная артиллерия */
+/**
+ * РСЗО — высшая ступень дивизиона: всё, что нужно САУ, плюс реактивная
+ * артиллерия и «Берет».
+ *
+ * «Берет» включён в список осознанно: он входит в требования ступени, а
+ * признак requiresBeret ниже превращает вкладку в заблокированную, пока берет
+ * не сдан (условие выдаётся подсказкой, а не молчаливым «не сдано» на последней
+ * строке).
+ */
 const AD_MLRS: readonly ExamRequirement[] = [
   ...AD_SPG,
   {
@@ -236,6 +289,7 @@ const AD_MLRS: readonly ExamRequirement[] = [
     aliases: ["РСЗО (экзамен)", "РСЗО"],
   },
   { title: "Техника АТК", code: "Техника АТК" },
+  BERET_BADGE_STEP,
 ];
 
 const ARTILLERY_SPECIALITIES: readonly ExamSpeciality[] = [
@@ -256,13 +310,16 @@ const ARTILLERY_SPECIALITIES: readonly ExamSpeciality[] = [
     title: "Допуск на РСЗО",
     hint: "Все нормативы САУ плюс реактивная артиллерия",
     requirements: AD_MLRS,
+    // Высшая ступень: берётся только с сданным беретом
+    requiresBeret: true,
+    blockedHint: "Требуется сдача Экзамена на берет",
   },
   {
     key: "specials",
-    title: "Спецкурсы",
+    title: "Дополнительно / Спецкурсы",
     hint: "Отдельные курсы дивизиона: уставы, ПВО и БПЛА",
     requirements: [
-      { title: "Уставы общие", code: "Уставы общие" },
+      { title: "Уставы (общевойсковые)", code: "Уставы (общевойсковые)" },
       { title: "ПВО", code: "ПВО" },
       { title: "БПЛА", code: "БПЛА" },
     ],
@@ -314,10 +371,10 @@ export type ExamRequirementStatus = {
   /**
    * Есть ли у норматива столбец в листе ШДС подразделения бойца.
    *
-   * false — рапорт подать можно, но автозакраски столбца не будет: отметку штаб
-   * ставит вручную. Признак считается по каталогу рапортов (reports.ts), а не
-   * проставляется вручную, поэтому расхождение с реальной шапкой листа видно
-   * сразу — и в интерфейсе, и в тестах.
+   * Считается по каталогу рапортов (reports.ts), а не проставляется вручную,
+   * поэтому расхождение с реальной шапкой листа видно сразу — и в интерфейсе, и
+   * в тестах. Для нормативов шкалы признак всегда true: своих столбцов в листах
+   * не имеет лишь производный «Берет», и он закрывается по другим нормативам.
    */
   inShds: boolean;
 };
@@ -336,6 +393,13 @@ export type SpecialityProgress = {
   missing: string[];
   /** Подпись прогресс-бара: «Сдано: 5 из 12 нормативов (41%)» */
   summary: string;
+  /**
+   * Ступень закрыта до сдачи берета: нормативы могут быть сданы, но вкладка
+   * помечается заблокированной, а в подсказке — почему.
+   */
+  blocked: boolean;
+  /** Подсказка блокировки (пусто, если ступень доступна) */
+  blockedHint: string;
 };
 
 /** Все написания, которые засчитывают норматив */
@@ -361,27 +425,58 @@ export function matchQualification(
   return passed.find((item) => keys.has(normalizeExamCode(item.code))) ?? null;
 }
 
-/** Есть ли у норматива столбец в листе ШДС указанного подразделения */
-export function hasShdsColumn(
-  unit: string | null | undefined,
-  requirement: ExamRequirement
+/**
+ * Сдан ли экзамен на берет целиком: все четыре норматива закрыты.
+ *
+ * «Берет» — производный норматив: своего рапорта у него нет, и отдельного
+ * решения штаба не требуется. Как только сданы «Топография», «Связь»,
+ * «Строевая подготовка» и «Должностные лица», берет считается закрытым: бот
+ * закрашивает столбец «Берет» в листе, а бойцу выдаётся серверная роль «Берет»
+ * (см. role-sync.ts).
+ *
+ * Норматив, отмеченный в таблице вручную (столбец «Берет» уже закрашен), тоже
+ * засчитывается: проверка идёт по названию через общий matchQualification.
+ */
+export function isBeretPassed(passed: readonly ExamPassed[]): boolean {
+  if (matchQualification(BERET_BADGE_STEP, passed)) return true;
+  return BERET_STEPS.every((step) => Boolean(matchQualification(step, passed)));
+}
+
+/**
+ * Ступень заблокирована до сдачи берета.
+ *
+ * Пока условие не выполнено, вкладка «Допуск на РСЗО» помечается
+ * заблокированной с подсказкой «Требуется сдача Экзамена на берет» — иначе боец
+ * видел бы лишь несданный «Берет» последней строкой и не понимал, что дело в
+ * нём.
+ */
+export function isSpecialityBlocked(
+  speciality: ExamSpeciality,
+  passed: readonly ExamPassed[]
 ): boolean {
-  const needle = normalizeExamCode(requirement.code);
-  return examCatalog(unit).exams.some((exam) => normalizeExamCode(exam.code) === needle);
+  if (speciality.requiresBeret !== true) return false;
+  return !isBeretPassed(passed);
 }
 
 /**
  * Статус одного норматива.
  *
  * Оценка и дата берутся из одобренного рапорта: в ШДС бот закрашивает столбец и
- * вписывает оценку, а дата решения штаба и есть дата сдачи.
+ * вписывает оценку, а дата решения штаба и есть дата сдачи. Исключение —
+ * производный «Берет»: он закрывается по четырём нормативам экзамена.
  */
 export function requirementStatus(
   requirement: ExamRequirement,
   unit: string | null | undefined,
   passed: readonly ExamPassed[]
 ): ExamRequirementStatus {
-  const found = matchQualification(requirement, passed);
+  const derived = normalizeExamCode(requirement.code) === normalizeExamCode(BERET_CODE);
+  const found = derived
+    ? isBeretPassed(passed)
+      ? { grade: null, at: beretPassedAt(passed) }
+      : null
+    : matchQualification(requirement, passed);
+
   return {
     requirement,
     passed: Boolean(found),
@@ -389,6 +484,31 @@ export function requirementStatus(
     at: found?.at ? String(found.at) : null,
     inShds: hasShdsColumn(unit, requirement),
   };
+}
+
+/** Дата закрытия берета — самая поздняя из четырёх сданных нормативов экзамена */
+function beretPassedAt(passed: readonly ExamPassed[]): string | null {
+  let latest: string | null = null;
+  for (const step of BERET_STEPS) {
+    const found = matchQualification(step, passed);
+    const at = found?.at ? String(found.at) : null;
+    if (at && (!latest || at > latest)) latest = at;
+  }
+  return latest;
+}
+
+/**
+ * Есть ли у норматива столбец в листе ШДС указанного подразделения.
+ *
+ * Сопоставление идёт и по алиасам: «Уставы общие» из шкалы засчитываются
+ * столбцом «Уставы (общевойсковые)», поэтому норматив не должен выглядеть
+ * «ручным» из-за другого написания.
+ */
+export function hasShdsColumn(
+  unit: string | null | undefined,
+  requirement: ExamRequirement
+): boolean {
+  return columnExamFor(unit, requirement.code) !== null;
 }
 
 /** Прогресс по специальности: сколько нормативов сдано и что осталось */
@@ -404,6 +524,7 @@ export function specialityProgress(
   const passedCount = statuses.filter((status) => status.passed).length;
   const percent = total === 0 ? 0 : Math.floor((passedCount / total) * 100);
   const missing = statuses.filter((status) => !status.passed).map((status) => status.requirement.title);
+  const blocked = isSpecialityBlocked(speciality, passed);
 
   return {
     speciality,
@@ -413,6 +534,8 @@ export function specialityProgress(
     percent,
     missing,
     summary: `Сдано: ${passedCount} из ${total} нормативов (${percent}%)`,
+    blocked,
+    blockedHint: blocked ? speciality.blockedHint || "" : "",
   };
 }
 
@@ -422,28 +545,4 @@ export function specialitiesProgress(
   passed: readonly ExamPassed[]
 ): SpecialityProgress[] {
   return examSpecialities(unit).map((speciality) => specialityProgress(speciality, unit, passed));
-}
-
-/**
- * Нормативы, которые штаб подтверждает вручную: столбца в листе ШДС у них нет.
- *
- * Нужно интерфейсу, чтобы честно предупредить бойца: рапорт уйдёт в канал
- * рапортов, но автозакраски столбца не будет — отметку поставит штаб.
- */
-export function manualOnlyRequirements(
-  unit: string | null | undefined,
-  passed: readonly ExamPassed[]
-): ExamRequirementStatus[] {
-  const seen = new Set<string>();
-  const result: ExamRequirementStatus[] = [];
-  for (const speciality of examSpecialities(unit)) {
-    for (const status of speciality.requirements.map((r) => requirementStatus(r, unit, passed))) {
-      if (status.inShds) continue;
-      const key = normalizeExamCode(status.requirement.code);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      result.push(status);
-    }
-  }
-  return result;
 }

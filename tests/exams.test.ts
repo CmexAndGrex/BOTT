@@ -3,13 +3,15 @@
  * сопоставление сданного с бейджем и прогресс.
  *
  * Проверяется боевой модуль src/lib/exams.ts, а не копия правил в тесте: если
- * состав специальностей или признак «столбец в ШДС» изменится в src/, тест
- * упадёт. Это критично по двум причинам:
+ * состав специальностей или правило автозакрытия берета изменится в src/, тест
+ * упадёт. Это критично по трём причинам:
  *   1. названия нормативов должны совпадать с каталогом рапортов (reports.ts) —
  *      иначе кнопка «Сдать норматив» отправит рапорт с неизвестным нормативом,
  *      и сервер его отклонит;
- *   2. признак inShds определяет, попадёт ли норматив в автоматическую отметку
- *      ШДС или его подтверждает штаб вручную.
+ *   2. у каждого норматива шкалы обязан быть столбец в листе ШДС: рапорт,
+ *      который никуда не закрашивается, — это молча не зачтённый норматив;
+ *   3. «Берет» закрывается автоматически после четырёх нормативов экзамена, а
+ *      «Допуск на РСЗО» без него заблокирован — здесь проверяются оба правила.
  *
  * Запуск: npm run test
  */
@@ -17,6 +19,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   examSpecialities,
+  isBeretPassed,
   matchQualification,
   requirementStatus,
   specialitiesProgress,
@@ -24,7 +27,7 @@ import {
   type ExamPassed,
   type ExamRequirement,
 } from "../src/lib/exams.ts";
-import { allExamCodes, examCatalog, findExam, formExamOptions, validateReportPayload } from "../src/lib/reports.ts";
+import { allExamCodes, columnExamFor, examCatalog, findExam, formExamOptions, validateReportPayload } from "../src/lib/reports.ts";
 
 /** Все нормативы всех специальностей подразделения */
 function allRequirements(unit: string): ExamRequirement[] {
@@ -113,7 +116,7 @@ describe("Экзамены: специальности Артдивизиона"
       "Допуск на Минометы",
       "Допуск на САУ + Гаубицы",
       "Допуск на РСЗО",
-      "Спецкурсы",
+      "Дополнительно / Спецкурсы",
       "Экзамен на берет",
     ]);
   });
@@ -123,8 +126,8 @@ describe("Экзамены: специальности Артдивизиона"
       "Физическая подготовка",
       "ТТХ (миномёты)",
       "Миномётное дело (обучение)",
-      "Миномётное дело (экзамен)",
       "Тест по теории",
+      "Миномётное дело (экзамен)",
       "ПМП",
     ]);
   });
@@ -148,21 +151,24 @@ describe("Экзамены: специальности Артдивизиона"
     ]);
   });
 
-  test("РСЗО включает ВСЕ нормативы САУ плюс три своих", () => {
+  test("РСЗО включает ВСЕ нормативы САУ плюс три своих и «Берет»", () => {
     const spg = requirementTitles("Артиллерийский дивизион", "spg");
     const mlrs = requirementTitles("Артиллерийский дивизион", "mlrs");
     assert.deepEqual(mlrs.slice(0, spg.length), spg);
-    assert.equal(mlrs.length, spg.length + 3);
+    // Три своих норматива плюс итоговый «Берет»: он входит в требования
+    // ступени, потому что без него допуск к РСЗО не выдаётся
+    assert.equal(mlrs.length, spg.length + 4);
     assert.deepEqual(mlrs.slice(spg.length), [
       "РСЗО (обучение)",
       "РСЗО (экзамен)",
       "Техника АТК",
+      "Берет",
     ]);
   });
 
   test("спецкурсы дивизиона: уставы, ПВО и БПЛА", () => {
     assert.deepEqual(requirementTitles("Артиллерийский дивизион", "specials"), [
-      "Уставы общие",
+      "Уставы (общевойсковые)",
       "ПВО",
       "БПЛА",
     ]);
@@ -197,46 +203,40 @@ describe("Экзамены: нормативы раздела принимают
     }
   });
 
-  test("шдс-нормативы шкалы совпадают со столбцами листа", () => {
-    // Для каждого норматива, который считается «столбцовым», название обязано
-    // лежать в каталоге листа: иначе бот не найдёт столбец при закраске
+  test("у каждого норматива шкалы есть столбец в листе ШДС своего подразделения", () => {
+    // Раньше часть нормативов считалась «внеплановой» (inShds = false), и отметку
+    // по ним штаб ставил вручную. Теперь столбцы есть у всех: спецкурсы, экзамен
+    // на берет и «Берет» тоже закрашиваются ботом.
+    //
+    // Проверяем не совпадение строк, а сопоставление каталога листа со шкалой
+    // (columnExamFor): один и тот же норматив в листах роты и дивизиона назван
+    // по-разному, и сверять названия напрямую значило бы требовать их совпадения.
     for (const unit of ["Танковая рота", "Артиллерийский дивизион"]) {
-      const columnCodes = new Set(examCatalog(unit).exams.map((exam) => exam.code));
       for (const requirement of allRequirements(unit)) {
-        const status = requirementStatus(requirement, unit, []);
-        if (!status.inShds) continue;
         assert.ok(
-          columnCodes.has(requirement.code),
+          requirementStatus(requirement, unit, []).inShds,
+          `у «${requirement.title}» (${requirement.code}) нет столбца в листе «${unit}»`
+        );
+        const column = columnExamFor(unit, requirement.code);
+        assert.ok(
+          column,
           `«${requirement.code}» помечен столбцовым, но его нет в листе «${unit}»`
         );
       }
     }
   });
 
-  test("внеплановые нормативы помечены как «без столбца в ШДС»", () => {
-    const untitled = allRequirements("Танковая рота")
-      .filter((requirement) => !requirementStatus(requirement, "Танковая рота", []).inShds)
-      .map((requirement) => requirement.title);
-    // Ровно спецкурсы, берет и курсы испытателя — эти штаб отмечает вручную
-    for (const title of ["Берет", "Топография", "КБМ", "ПВО", "КБМ испытателя"]) {
-      assert.ok(untitled.includes(title), `«${title}» должен быть без столбца в ШДС`);
-    }
-    for (const title of ["Огневая подготовка", "ТТХ, часть 2", "Устав АТК"]) {
-      assert.ok(!untitled.includes(title), `«${title}» имеет столбец в листе`);
-    }
-  });
-
-  test("каталог листа не раздувается внеплановыми нормативами", () => {
-    // EXAM-каталог обязан совпадать с шапкой построчно: если внеплановые
-    // нормативы в него попадут, тест связи с шапкой листа упадёт — а это
-    // молчаливое «рапорт одобрен, столбец не закрашен»
+  test("каталог листа содержит спецкурсы, берет и курсы испытателя", () => {
+    // Хвост шапки листа (КБМ, уставы, миномётное и артиллерийское дело, ПВО,
+    // берет) раньше в каталог не входил, и рапорт по нему не закрашивал столбец
     const trCodes = examCatalog("Танковая рота").exams.map((exam) => exam.code);
-    assert.ok(!trCodes.includes("Берет"));
-    assert.ok(!trCodes.includes("Топография"));
-    assert.ok(!trCodes.includes("КБМ Испыт."));
-    // Но валидатор рапорта их знает — иначе кнопка «Сдать норматив» не работает
-    assert.ok(allExamCodes().includes("Берет"));
-    assert.ok(allExamCodes().includes("КБМ Испыт."));
+    for (const code of ["Берет", "Топография", "КБМ Испыт.", "ПВО", "Уставы (общевойсковые)"]) {
+      assert.ok(trCodes.includes(code), `в каталоге роты нет «${code}»`);
+    }
+    const adCodes = examCatalog("Артиллерийский дивизион").exams.map((exam) => exam.code);
+    for (const code of ["БПЛА", "РСЗО (Экзамен)", "Берет", "Артиллерийское дело (обучение)"]) {
+      assert.ok(adCodes.includes(code), `в каталоге дивизиона нет «${code}»`);
+    }
   });
 });
 
@@ -351,19 +351,16 @@ describe("Экзамены: связь с каталогом рапортов", 
     }
   });
 
-  test("форма подачи показывает и внеплановые нормативы — иначе кнопка не работает", () => {
+  test("форма подачи показывает нормативы листа — иначе кнопка не работает", () => {
     const tr = formExamOptions("Танковая рота").map((exam) => exam.code);
     const ad = formExamOptions("Артиллерийский дивизион").map((exam) => exam.code);
 
-    // Столбцовые нормативы листа на месте
+    // Столбцовые нормативы листа на месте, включая спецкурсы и берет
     assert.ok(tr.includes("Огневая подготовка"));
+    assert.ok(tr.includes("ПВО"));
+    assert.ok(tr.includes("КБМ Испыт."));
+    assert.ok(tr.includes("Топография"));
     assert.ok(ad.includes("Миномётное дело (Экзамен)"));
-
-    // Внеплановые курсы тоже: без них кнопка «Сдать норматив» на берете,
-    // спецкурсах и КБМ открывала бы форму без нужной строки
-    for (const code of ["Берет", "Топография", "Должностные лица", "КБМ Испыт.", "ПВО"]) {
-      assert.ok(tr.includes(code), `в форме нет «${code}»`);
-    }
     assert.ok(ad.includes("БПЛА"));
     assert.ok(ad.includes("РСЗО (Экзамен)"));
 
@@ -371,19 +368,114 @@ describe("Экзамены: связь с каталогом рапортов", 
     assert.equal(tr.includes("БПЛА"), false);
   });
 
-  test("у внеплановых нормативов в форме стоит признак «вручную»", () => {
-    const options = formExamOptions("Танковая рота");
-    const beret = options.find((exam) => exam.code === "Берет");
-    const fire = options.find((exam) => exam.code === "Огневая подготовка");
-    assert.equal(beret?.inShds, false);
-    assert.equal(fire?.inShds, true);
+  test("производный «Берет» в форме отсутствует — он закрывается сам", () => {
+    for (const unit of ["Танковая рота", "Артиллерийский дивизион"]) {
+      const codes = formExamOptions(unit).map((exam) => exam.code);
+      assert.equal(codes.includes("Берет"), false, `«Берет» не должен подаваться рапортом (${unit})`);
+      assert.ok(codes.length > 0);
+      // Столбец есть у КАЖДОГО норматива формы: «ручных» отметок не осталось
+      for (const exam of formExamOptions(unit)) {
+        assert.equal(exam.inShds, true, `у «${exam.code}» должен быть столбец в ШДС`);
+      }
+    }
   });
 
-  test("внеплановые нормативы принимаются валидатором рапорта", () => {
-    // Проверяем то, чем живёт кнопка «Сдать норматив» на спецкурсах
-    for (const code of ["Берет", "Топография", "КБМ Испыт.", "ПВО", "БПЛА"]) {
+  test("нормативы раздела принимаются валидатором рапорта", () => {
+    // Проверяем то, чем живёт кнопка «Сдать норматив»
+    for (const code of ["Топография", "КБМ Испыт.", "ПВО", "БПЛА", "Артиллерийское дело (обучение)"]) {
       const result = validateReportPayload("exam", [{ exam_code: code, grade: "Отлично" }]);
       assert.equal(result.ok, true, `рапорт с «${code}» отклонён: ${result.ok ? "" : result.error}`);
+    }
+  });
+
+  test("рапорт на производный «Берет» отклоняется с понятной причиной", () => {
+    // Берет засчитывается автоматически после четырёх нормативов экзамена:
+    // принять такой рапорт значило бы записать оценку нормативу без рапорта
+    const result = validateReportPayload("exam", [{ exam_code: "Берет", grade: "Отлично" }]);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.error, /автоматически/);
+  });
+
+  test("алиасы панели принимаются и приводятся к коду столбца", () => {
+    // «Уставы общие» боец видит в разделе, а столбец в листе зовётся
+    // «Уставы (общевойсковые)»: в рапорт обязан уехать код из каталога
+    const result = validateReportPayload("exam", [{ exam_code: "Уставы общие" }]);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      const exams = (result.payload as { exams: { exam_code: string }[] }).exams;
+      assert.equal(exams[0].exam_code, "Уставы (общевойсковые)");
+    }
+  });
+});
+
+describe("Экзамены: автозакрытие берета", () => {
+  /** Четыре норматива экзамена на берет — ровно те, что закрывают берет */
+  const BERET_STEPS: ExamPassed[] = [
+    { code: "Топография" },
+    { code: "Связь" },
+    { code: "Строевая подготовка" },
+    { code: "Должностные лица" },
+  ];
+
+  test("берет закрыт только когда сданы все четыре норматива", () => {
+    assert.equal(isBeretPassed([]), false);
+    for (let i = 1; i <= 3; i++) {
+      assert.equal(
+        isBeretPassed(BERET_STEPS.slice(0, i)),
+        false,
+        `берет не должен закрываться при ${i} из 4 нормативов`
+      );
+    }
+    assert.equal(isBeretPassed(BERET_STEPS), true);
+  });
+
+  test("«Берет» в шкале показывается сданным, когда сданы четыре норматива", () => {
+    const beret: ExamRequirement = { title: "Берет", code: "Берет", derived: true };
+
+    const before = requirementStatus(beret, "Танковая рота", BERET_STEPS.slice(0, 2));
+    assert.equal(before.passed, false);
+
+    const after = requirementStatus(beret, "Танковая рота", BERET_STEPS);
+    assert.equal(after.passed, true);
+    // Норматив производный: оценки у него нет — экзаменатор её не выставлял
+    assert.equal(after.grade, null);
+    assert.equal(after.inShds, true, "столбец «Берет» в листе есть — бот его закрашивает");
+  });
+
+  test("дата берета — самая поздняя из сданных нормативов экзамена", () => {
+    const dates: ExamPassed[] = [
+      { code: "Топография", at: "2026-08-01T10:00:00.000Z" },
+      { code: "Связь", at: "2026-08-02T10:00:00.000Z" },
+      { code: "Строевая подготовка", at: "2026-08-03T10:00:00.000Z" },
+      { code: "Должностные лица", at: "2026-08-02T10:00:00.000Z" },
+    ];
+    const status = requirementStatus({ title: "Берет", code: "Берет" }, "Танковая рота", dates);
+    assert.equal(status.passed, true);
+    assert.equal(status.at, "2026-08-03T10:00:00.000Z");
+  });
+
+  test("РСЗО заблокирована без берета и открывается с ним", () => {
+    const mlrs = examSpecialities("Артиллерийский дивизион").find((s) => s.key === "mlrs");
+    assert.ok(mlrs);
+
+    const locked = specialityProgress(mlrs, "Артиллерийский дивизион", []);
+    assert.equal(locked.blocked, true);
+    assert.equal(locked.blockedHint, "Требуется сдача Экзамена на берет");
+
+    const open = specialityProgress(mlrs, "Артиллерийский дивизион", BERET_STEPS);
+    assert.equal(open.blocked, false);
+    assert.equal(open.blockedHint, "");
+  });
+
+  test("низшие ступени дивизиона от берета не зависят", () => {
+    for (const key of ["mortar", "spg", "specials", "beret"]) {
+      const speciality = examSpecialities("Артиллерийский дивизион").find((s) => s.key === key);
+      assert.ok(speciality);
+      assert.equal(
+        specialityProgress(speciality, "Артиллерийский дивизион", []).blocked,
+        false,
+        `ступень «${key}» не должна блокироваться беретом`
+      );
     }
   });
 });

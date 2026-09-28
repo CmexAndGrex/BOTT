@@ -20,7 +20,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  Award, CheckCheck, ClipboardList, GraduationCap, RefreshCw, ShieldAlert, Wrench,
+  Award, CheckCheck, ClipboardList, GraduationCap, Lock, RefreshCw, ShieldAlert,
 } from "lucide-react";
 import { Section, Spinner, fmtDate } from "@/components/ui";
 import { useReportLauncher } from "@/components/report-launcher";
@@ -230,7 +230,9 @@ function ExamsInner() {
             ))}
           </div>
 
-          {/* Вкладки специальностей: чипы, как в остальных переключателях панели */}
+          {/* Вкладки специальностей: чипы, как в остальных переключателях панели.
+              Заблокированная ступень (РСЗО без берета) помечается замком и
+              подсказкой — прогресс по ней виден, но допуск не выдаётся */}
           <div className="flex flex-wrap gap-2">
             {progress.map((item) => {
               const isActive = active?.speciality.key === item.speciality.key;
@@ -240,13 +242,17 @@ function ExamsInner() {
                   type="button"
                   className="chip"
                   onClick={() => setActiveKey(item.speciality.key)}
+                  title={item.blocked ? item.blockedHint : undefined}
                   style={
                     isActive
                       ? { background: "var(--red-soft)", borderColor: "rgba(255,61,61,.45)", color: "#fff" }
                       : undefined
                   }
                 >
-                  {item.percent >= 100 && <CheckCheck size={13} style={{ color: "var(--green)" }} />}
+                  {item.percent >= 100 && !item.blocked && (
+                    <CheckCheck size={13} style={{ color: "var(--green)" }} />
+                  )}
+                  {item.blocked && <Lock size={13} style={{ color: "var(--amber)" }} />}
                   {item.speciality.title}
                 </button>
               );
@@ -281,7 +287,7 @@ function SpecialityCard({
   progress: SpecialityProgress;
   onPass: (code: string) => void;
 }) {
-  const { speciality, statuses, percent, passedCount, total, summary } = progress;
+  const { speciality, statuses, percent, passedCount, total, summary, blocked, blockedHint } = progress;
 
   return (
     <Section
@@ -290,17 +296,32 @@ function SpecialityCard({
       action={
         <span
           className="mono text-[12px]"
-          style={{ color: percent >= 100 ? "var(--green)" : "var(--dim)" }}
+          style={{ color: percent >= 100 && !blocked ? "var(--green)" : "var(--dim)" }}
         >
           {passedCount} / {total}
         </span>
       }
     >
       <div className="flex flex-col gap-4 p-5">
+        {/* Заблокированная ступень: боец сдал нормативы, но допуск не выдаётся —
+            говорим об этом прямо, а не оставляем его догадываться по бейджам */}
+        {blocked && (
+          <div
+            className="flex items-start gap-2.5 rounded-xl px-3 py-2.5 text-[12.5px]"
+            style={{ background: "rgba(255,176,32,.08)", color: "var(--amber)" }}
+          >
+            <Lock size={15} className="mt-0.5 flex-none" />
+            <span>
+              Ступень заблокирована: {blockedHint || "требуется сдача Экзамена на берет"}. Допуск
+              будет выдан автоматически после сдачи.
+            </span>
+          </div>
+        )}
+
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
             <span className="font-semibold">{summary}</span>
-            {percent >= 100 && (
+            {percent >= 100 && !blocked && (
               <span className="badge badge-green">
                 <Award size={12} /> допуск готов
               </span>
@@ -354,24 +375,23 @@ function ExamRow({
         )}
       </div>
 
-      {/* Дата сдачи и признак «столбца в ШДС нет» — второй строкой: бейдж остаётся
-          коротким, а боец видит, когда норматив зачтён и попадёт ли он в таблицу */}
+      {/* Дата сдачи — второй строкой: бейдж остаётся коротким, а боец видит,
+          когда норматив зачтён */}
       <div
         className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]"
         style={{ color: "var(--dim)" }}
       >
         {status.passed && <span>сдано: {fmtDate(status.at)}</span>}
-        {!status.inShds && (
-          <span
-            className="flex items-center gap-1"
-            title="Столбца в листе ШДС нет — отметку по этому нормативу штаб ставит вручную"
-          >
-            <Wrench size={11} /> без столбца в ШДС
-          </span>
+        {/* Производный норматив: рапортом не сдаётся — закрывается сам, когда
+            сданы все нормативы экзамена на берет */}
+        {status.requirement.derived && !status.passed && (
+          <span>засчитывается после всех нормативов экзамена на берет</span>
         )}
       </div>
 
-      {!status.passed && (
+      {/* Кнопки «Сдать норматив» у производного норматива нет: рапорт по нему
+          валидатор отклонит, и боец только зря потратил бы время */}
+      {!status.passed && !status.requirement.derived && (
         <button
           type="button"
           className="btn btn-sm btn-primary self-start"

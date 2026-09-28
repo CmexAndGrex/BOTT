@@ -383,6 +383,22 @@ export default function SettingsPage() {
               </div>
             </div>
             <div>
+              <div className="label mb-1.5">ID роли «Берет»</div>
+              <input
+                className="input input-mono"
+                placeholder="пусто — роль ищется на сервере по имени «Берет»"
+                value={settings.beret_role_id}
+                onChange={(e) => set("beret_role_id", e.target.value.replace(/[^\d]/g, ""))}
+              />
+              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
+                Выдаётся автоматически, когда боец сдал все четыре норматива экзамена на берет
+                («Топография», «Связь», «Строевая подготовка», «Должностные лица»): столбец
+                «Берет» в ШДС закрашивается сам, а сверка ролей надевает роль. Снимается, если
+                берет больше не подтверждён. Роль ищется по имени, ID нужен только при
+                нестандартном названии.
+              </p>
+            </div>
+            <div>
               <div className="label mb-1.5">Разрешённые вебхуки заявок (ID через запятую)</div>
               <input
                 className="input input-mono"

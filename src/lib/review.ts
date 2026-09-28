@@ -14,13 +14,15 @@ import { logs, members, recruitApplications, serviceReports } from "@/db/schema"
 import { editChannelMessage, sendDirectMessage, type DiscordActionRow } from "@/lib/discord";
 import type { DiscordEmbed } from "@/lib/discord";
 import {
+  BERET_CODE,
   buildRecruitEmbed,
   buildReportEmbed,
-  examCatalog,
+  columnExamFor,
   examColumnTokens,
   formatIsoDate,
   readReportPayload,
   reviewCustomId,
+  type ExamItem,
   type ExamPayload,
   type ReservePayload,
   type ReviewStatus,
@@ -33,6 +35,7 @@ import {
 import { generateTempPassword } from "@/lib/temp-password";
 import { DEFAULT_RANK, MEMBER_STATUS } from "@/lib/recruits";
 import { COMMON_ROLE_IDS } from "@/lib/roles";
+import { isBeretPassed } from "@/lib/exams";
 import { getSettings } from "@/lib/settings";
 
 /* ------------------------------------------------------------------ */
@@ -354,6 +357,39 @@ async function resolveGuildId(configured: string): Promise<string> {
 }
 
 /**
+ * Ранее сданные нормативы бойца из одобренных рапортов.
+ *
+ * Нужно, чтобы «Берет» закрывался по совокупности: нормативы экзамена на берет
+ * боец мог сдать разными рапортами и в разное время, а автоматически берет
+ * засчитывается только когда сданы все четыре. Без этого чтения берет закрывался
+ * бы лишь при подаче всех четырёх нормативов одним рапортом.
+ *
+ * Ошибка чтения не отменяет применение рапорта: без истории берет просто не
+ * закроется автоматически, и его отметят следующим рапортом.
+ */
+async function previousExamsOf(memberId: number): Promise<Set<string>> {
+  try {
+    const rows = await db
+      .select({ type: serviceReports.type, payload: serviceReports.payload, status: serviceReports.status })
+      .from(serviceReports)
+      .where(eq(serviceReports.memberId, memberId));
+
+    const codes = new Set<string>();
+    for (const row of rows) {
+      if (row.type !== "exam" || row.status !== "approved") continue;
+      const payload = readReportPayload(row.type, row.payload) as ExamPayload;
+      for (const exam of payload.exams ?? []) {
+        if (exam.exam_code) codes.add(exam.exam_code);
+      }
+    }
+    return codes;
+  } catch (e) {
+    console.error("[review] Не удалось прочитать сданные нормативы бойца:", e);
+    return new Set<string>();
+  }
+}
+
+/**
  * Применение одобренного рапорта: Google Таблица, роли Discord и статусы БД.
  *
  * Возвращает текстовый итог для Embed/журнала; ошибку не бросает: рапорт уже
@@ -380,19 +416,45 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
           break;
         }
         const exams = (payload as ExamPayload).exams;
-        // Нормативы делятся на две группы: у одних есть столбец в листе ШДС, у
-        // других (спецкурсы, «Берет», «КБМ») столбца нет вовсе. Раньше весь
-        // список уходил в таблицу одной пачкой, и рапорт только по спецкурсам
-        // падал с «Столбцы экзаменов не найдены» — при том, что норматив сдан
-        // законно. Теперь столбцовые закрашиваются, остальные штаб отмечает сам.
-        const columnCodes = new Set(examCatalog(member.unit).exams.map((e) => e.code));
-        const inSheet = exams.filter((e) => columnCodes.has(e.exam_code));
-        const manual = exams.filter((e) => !columnCodes.has(e.exam_code));
 
-        if (inSheet.length) {
+        /**
+         * Какие столбцы ШДС закрашивать.
+         *
+         * Все нормативы каталога (в том числе спецкурсы и экзамен на берет) имеют
+         * свой столбец, поэтому в таблицу уходит весь список без разделения на
+         * «столбцовые» и «ручные».
+         *
+         * Название при этом приводится к коду СТОЛБЦА своего листа
+         * (columnExamFor): в роте норматив зовётся «Сдача на Мех. Водителя», а в
+         * дивизионе — «Сдача на мехвода», и отправь мы написание панели — бот не
+         * нашёл бы столбец.
+         *
+         * Отдельно проверяется берет: как только сданы все четыре норматива
+         * экзамена, столбец «Берет» закрывается автоматически — боец уже сдал
+         * его, отдельного рапорта не требуется. Требования ступени
+         * (BERET_EXAM_CODES) ищутся среди СДАННЫХ ранее и текущего рапорта: иначе
+         * при подаче четырёх нормативов одной заявкой берет остался бы незакрытым.
+         */
+        const passedCodes = await previousExamsOf(member.id);
+        for (const exam of exams) passedCodes.add(exam.exam_code);
+
+        /** Код столбца → элемент рапорта (оценка нужна для записи в ячейку) */
+        const toMark = new Map<string, ExamItem>();
+        for (const exam of exams) {
+          const column = columnExamFor(member.unit, exam.exam_code);
+          if (!column) continue;
+          toMark.set(column.code, exam);
+        }
+        if (isBeretPassed([...passedCodes].map((code) => ({ code })))) {
+          const beret = columnExamFor(member.unit, BERET_CODE);
+          if (beret) toMark.set(beret.code, { exam_code: beret.code });
+        }
+
+        if (toMark.size) {
           // Все выбранные нормативы закрашиваются в ШДС, но оценка пишется в один
           // столбец заявки: берём оценку первого норматива с оценкой. Остальные
           // видны в исходном Embed рапорта — модератор их проверит при надобности.
+          const items = [...toMark.values()];
           const { applyShdsRequest, SHDS_ACTIONS } = await import("@/lib/gsheets");
           const result = await applyShdsRequest({
             raw: `Рапорт #${report.id} (панель)`,
@@ -406,8 +468,8 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
             discordId,
             отделение: "",
             должность: "",
-            exams: examColumnTokens(inSheet.map((e) => e.exam_code)),
-            grade: inSheet.find((e) => e.grade)?.grade || "",
+            exams: examColumnTokens(items.map((e) => e.exam_code)),
+            grade: items.find((e) => e.grade)?.grade || "",
             examiner: report.reviewedBy || "",
             rolesGive: "",
             rolesRemove: "",
@@ -417,12 +479,32 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
           parts.push(result.ok ? result.message : `ШДС: ошибка (${result.error})`);
         }
 
-        if (manual.length) {
-          parts.push(
-            `отметить вручную (столбца в ШДС нет): ${manual
-              .map((e) => (e.grade ? `${e.exam_code} — ${e.grade}` : e.exam_code))
-              .join(", ")}`
-          );
+        // Берет закрылся сам — выдаём серверную роль «Берет», не дожидаясь
+        // следующего цикла фоновой сверки: боец видит результат сразу
+        if (toMark.has(columnExamFor(member.unit, BERET_CODE)?.code ?? BERET_CODE) && discordId) {
+          const guildId = await resolveGuildId((map.get("guild_id") || "").trim());
+          if (guildId) {
+            try {
+              const { addGuildMemberRole, getGuildRoles } = await import("@/lib/discord");
+              const { resolveBeretRoleId } = await import("@/lib/roles");
+              const roleId = resolveBeretRoleId(
+                map.get("beret_role_id"),
+                await getGuildRoles(guildId)
+              );
+              if (roleId) {
+                await addGuildMemberRole(guildId, discordId, roleId);
+                parts.push("выдана роль «Берет»");
+              } else {
+                parts.push("роль «Берет» на сервере не найдена — выдайте её вручную");
+              }
+            } catch (e) {
+              // Роль — «мягкий» шаг: отметки в ШДС уже стоят, а повторную выдачу
+              // сделает фоновая сверка ролей (role-sync.ts)
+              parts.push(`роль «Берет» не выдана (${e instanceof Error ? e.message : String(e)})`);
+            }
+          } else {
+            parts.push("guild_id не задан — роль «Берет» не выдана");
+          }
         }
         break;
       }

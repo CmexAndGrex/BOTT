@@ -32,6 +32,7 @@ import {
   COMMON_ROLE_IDS,
   RANK_ROLE_IDS,
   SUBDIV_ROLE_IDS,
+  resolveBeretRoleId,
 } from "@/lib/roles";
 
 /* ------------------------------------------------------------------ */
@@ -57,6 +58,14 @@ export type RoleSyncMember = {
   active: boolean;
   /** Отпуск — роль «Отпуск» на время службы */
   vacation: boolean;
+  /**
+   * Сдан экзамен на берет (все четыре норматива).
+   *
+   * Признак считается по одобренным рапортам (isBeretPassed, см.
+   * role-sync-runtime.ts), а не хранится в карточке: «Берет» — производный
+   * норматив, отдельного поля в БД у него нет. Без него роль «Берет» не выдать.
+   */
+  beretPassed: boolean;
 };
 
 /** Роль сервера в объёме, нужном для сверки */
@@ -77,6 +86,12 @@ export type RoleSyncContext = {
   leaveRoleId?: string | null;
   /** Роль «Запас» из настроек */
   reserveRoleId?: string | null;
+  /**
+   * Роль «Берет»: выдаётся за сданный экзамен на берет и снимается, если экзамен
+   * больше не подтверждён (например, строку ШДС зачистили). Пусто — роль на
+   * сервере не настроена, и берет в сверке не участвует.
+   */
+  beretRoleId?: string | null;
   /**
    * Должность → ID роли: явное соответствие из настроек.
    * Должности ведёт командир («Механик-водитель», «Наводчик»), и угадывать их
@@ -342,6 +357,18 @@ export function desiredRoles(member: RoleSyncMember, context: RoleSyncContext = 
   // Роль запаса в строю быть не должна
   if (context.reserveRoleId) remove.add(context.reserveRoleId);
 
+  // «Берет»: выдаётся за сданный экзамен, снимается, если экзамен больше не
+  // подтверждён. Роль ведёт автоматика — рапортом её не выдают, и вручную
+  // снятая роль вернётся на следующем цикле (как и звание).
+  if (context.beretRoleId) {
+    if (member.beretPassed) {
+      add.add(context.beretRoleId);
+      notes.push("сдан экзамен на берет — роль «Берет» назначена");
+    } else {
+      remove.add(context.beretRoleId);
+    }
+  }
+
   return { add, remove, notes, complete, rankRoleId, subdiv };
 }
 
@@ -362,6 +389,9 @@ export function managedRoleIds(context: RoleSyncContext = {}): Set<string> {
   ids.add(COMMON_ROLE_IDS.FRIEND);
   if (context.leaveRoleId) ids.add(context.leaveRoleId);
   if (context.reserveRoleId) ids.add(context.reserveRoleId);
+  // «Берет» ведёт автоматика: роль и выдаётся, и снимается по нормативам, поэтому
+  // она обязана быть в наборе управляемых — иначе снятие не найдёт права
+  if (context.beretRoleId) ids.add(context.beretRoleId);
   for (const [, roleId] of context.postRoleMap || []) {
     const id = (roleId || "").trim();
     if (id) ids.add(id);
@@ -956,6 +986,10 @@ export async function runRoleSync(
       roles,
       leaveRoleId: (map.get("leave_role_id") || "").trim() || null,
       reserveRoleId: (map.get("reserve_role_id") || "").trim() || null,
+      // «Берет»: явная настройка, иначе роль ищется по имени среди ролей сервера.
+      // Роль ведут по нормативам, поэтому она обязана попасть в управляемые —
+      // иначе боец получит её, но повторная сверка не сможет снять лишнюю
+      beretRoleId: resolveBeretRoleId(map.get("beret_role_id"), guildRoles),
       postRoleMap: parsePostRoleMap(map.get(POST_ROLE_MAP_KEY)),
       protectedRoleIds,
     };

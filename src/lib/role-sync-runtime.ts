@@ -10,17 +10,69 @@
  * Модуль не бросает исключений наружу: цикл вызывается из фонового таймера, а
  * необработанная ошибка в фоне уронила бы процесс вместе с веб-сервером.
  */
-import { isNotNull } from "drizzle-orm";
+import { isNotNull, inArray } from "drizzle-orm";
 import { db } from "@/db";
-import { logs, members } from "@/db/schema";
+import { logs, members, serviceReports } from "@/db/schema";
 import { addGuildMemberRole, getBotGuildIds, getGuildMemberRoles, getGuildRoles, removeGuildMemberRole } from "@/lib/discord";
 import { getSettings, setSettingQuiet } from "@/lib/settings";
+import { isBeretPassed } from "@/lib/exams";
+import { readReportPayload, type ExamPayload } from "@/lib/reports";
 import {
   LAST_ROLE_SYNC_KEY,
   runRoleSync,
   type RoleSyncMember,
   type RoleSyncSummary,
 } from "@/lib/role-sync";
+
+/**
+ * Сданные нормативы по бойцам: нужен один признак — закрыт ли берет.
+ *
+ * Считается из одобренных рапортов на экзамены тем же правилом, что и раздел
+ * «Экзамены» (isBeretPassed): «Берет» производный, отдельного поля в БД нет.
+ * Читается одним запросом на весь состав — сверка идёт по всем бойцам сразу, и
+ * запрос на каждого превратился бы в сотни обращений к БД.
+ *
+ * Сбой чтения не срывает сверку: без берета роль просто не выдаётся (и не
+ * снимается), остальные роли синхронизируются как обычно.
+ */
+async function loadBeretPassed(memberIds: number[]): Promise<Set<number>> {
+  const passed = new Set<number>();
+  if (memberIds.length === 0) return passed;
+
+  try {
+    const rows = await db
+      .select({
+        memberId: serviceReports.memberId,
+        type: serviceReports.type,
+        payload: serviceReports.payload,
+        status: serviceReports.status,
+      })
+      .from(serviceReports)
+      .where(inArray(serviceReports.memberId, memberIds));
+
+    // Собираем нормативы по каждому бойцу и проверяем берет его же правилом
+    const byMember = new Map<number, string[]>();
+    for (const row of rows) {
+      if (row.type !== "exam" || !row.memberId) continue;
+      // Только одобренные: рапорт на рассмотрении — ещё не сдача
+      if (row.status !== "approved") continue;
+      const payload = readReportPayload(row.type, row.payload) as ExamPayload;
+      const list = byMember.get(row.memberId) ?? [];
+      for (const exam of payload.exams ?? []) {
+        if (exam.exam_code) list.push(exam.exam_code);
+      }
+      byMember.set(row.memberId, list);
+    }
+
+    for (const [memberId, codes] of byMember) {
+      if (isBeretPassed(codes.map((code) => ({ code })))) passed.add(memberId);
+    }
+  } catch (e) {
+    console.error("[role-sync] Не удалось прочитать нормативы состава:", e);
+  }
+
+  return passed;
+}
 
 /** Загружает бойцов, у которых есть Discord ID: без него сверять нечего */
 async function loadMembers(): Promise<RoleSyncMember[]> {
@@ -40,6 +92,8 @@ async function loadMembers(): Promise<RoleSyncMember[]> {
     .from(members)
     .where(isNotNull(members.discordId));
 
+  const beret = await loadBeretPassed(rows.map((row) => row.id));
+
   return rows.map((row) => ({
     id: row.id,
     name: row.name,
@@ -51,6 +105,7 @@ async function loadMembers(): Promise<RoleSyncMember[]> {
     status: row.status,
     active: row.active,
     vacation: row.vacation,
+    beretPassed: beret.has(row.id),
   }));
 }
 
