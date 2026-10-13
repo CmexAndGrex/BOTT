@@ -422,7 +422,16 @@ export function examBounds(layout: UnitLayout): { start: number; end: number } {
   return { start: colIndex(layout.examStartCol), end: colIndex(layout.examEndCol) };
 }
 
-/** Зелёная заливка сданного экзамена: ярко-зелёный #00ff00 (стиль «боец в строю») */
+/**
+ * Цвет имени бойца в строю (колонка C): стандартный зелёный Google Sheets #6aa84f.
+ * Эталон — строка 43 «Петров М. С.» листа «Танковая рота».
+ */
+const NAME_GREEN = { red: 0.4157, green: 0.6588, blue: 0.3098, alpha: 1 };
+
+/**
+ * Цвет сданного экзамена и берета: ярко-зелёный #00ff00.
+ * Используется для всех ячеек блока оценок (H..AE / I..AG) и столбца «Берет».
+ */
 const EXAM_GREEN = { red: 0, green: 1, blue: 0, alpha: 1 };
 
 /** Белая заливка освободившейся строки: фон «Вакант» */
@@ -1039,6 +1048,13 @@ async function scenarioAdd(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayout
   // Должность бойца: если не указана, берётся штатная должность секции
   const finalPost = req.должность || defaultPostFor(layout, row);
 
+  // Блок оценок очищается явно: старая строка могла содержать оценки и заливки
+  const { start: examFrom, end: examTo } = examBounds(layout);
+  for (let c = examFrom; c <= examTo; c++) {
+    sheet.getCell(row - 1, c).value = "";
+  }
+  await sheet.saveUpdatedCells();
+
   // Формат: шрифт берётся с оформленной строки того же блока, границы
   // накладываются сплошные, имя заливается зелёным — как «боец в строю».
   // Неприменимые дисциплины (не входящие в required секции) закрашиваются серым.
@@ -1048,7 +1064,7 @@ async function scenarioAdd(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayout
   await applyRowFormat(sheet, layout, row, {
     templateRow: formatRow,
     nameCol: layout.nameCol,
-    nameFill: EXAM_GREEN,
+    nameFill: NAME_GREEN,
     // Новобранец приходит без сданных нормативов: блок оценок остаётся белым
     examGreenColumns: [],
     examDisabledColumns: disabledColumns,
@@ -1119,7 +1135,7 @@ async function scenarioPost(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayou
     await applyRowFormat(sheet, layout, srcRow, {
       templateRow: pickFormatRow(sheet, layout, target.top, target.bottom, srcRow),
       nameCol: layout.nameCol,
-      nameFill: EXAM_GREEN,
+      nameFill: NAME_GREEN,
       examGreenColumns: greenColumns,
       examDisabledColumns: disabledColumns,
     });
@@ -1136,7 +1152,7 @@ async function scenarioPost(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayou
   await applyRowFormat(sheet, layout, destRow, {
     templateRow: pickFormatRow(sheet, layout, target.top, target.bottom, destRow),
     nameCol: layout.nameCol,
-    nameFill: EXAM_GREEN,
+    nameFill: NAME_GREEN,
     examGreenColumns: greenColumns,
     examDisabledColumns: disabledColumns,
   });
@@ -1251,7 +1267,7 @@ export async function transferShdsPosition(params: {
           srcRow
         ),
         nameCol: layout.nameCol,
-        nameFill: EXAM_GREEN,
+        nameFill: NAME_GREEN,
         examGreenColumns: greenColumns,
         examDisabledColumns: disabledColumns,
       });
@@ -1302,7 +1318,7 @@ export async function transferShdsPosition(params: {
         destRow
       ),
       nameCol: layout.nameCol,
-      nameFill: EXAM_GREEN,
+      nameFill: NAME_GREEN,
       examGreenColumns: greenColumns,
       examDisabledColumns: disabledColumns,
     });
@@ -1496,6 +1512,22 @@ export function matchExamColumns(
   };
 }
 
+/**
+ * Конвертация оценки в цифру для записи в ячейку.
+ *
+ * Оценки в таблице пишутся строго цифрами (5, 4, 3), а не словами. Панель и старые
+ * заявки могли присылать «Отлично» / «Хорошо» / «Удовлетворительно», поэтому
+ * конвертация обязательна — иначе в ячейке появляется слово вместо цифры.
+ */
+function gradeToNumber(grade: string): string {
+  const normalized = grade.trim().toLowerCase();
+  if (/^отл|^5$/i.test(normalized)) return "5";
+  if (/^хор|^4$/i.test(normalized)) return "4";
+  if (/^уд|^3$/i.test(normalized)) return "3";
+  // Неизвестная оценка → по умолчанию 5
+  return "5";
+}
+
 /** Сценарий Г: «Получение подтверждения об экзаменации» */
 async function scenarioExam(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayout, req: ParsedRequest) {
   if (!req.exams.length) throw new Error("В заявке не указаны сданные экзамены");
@@ -1565,11 +1597,14 @@ async function scenarioExam(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayou
     const cell = sheet.getCell(row - 1, c);
     cell.backgroundColor = { ...EXAM_GREEN };
     const title = String(sheet.getCell(headerRow - 1, c).value ?? "").trim();
-    // КМБТ — базовый экзамен: он закрашивается, но оценки не получает
-    if (/кмбт/i.test(title)) continue;
+    // КМБТ и Берет — базовые экзамены: закрашиваются, но оценки не получают
+    if (/кмбт|берет/i.test(title)) {
+      cell.value = "";
+      continue;
+    }
     // Своя оценка норматива из пакетного рапорта, иначе — общая «Оценка» заявки
     const grade = gradesByColumn.get(c) || req.grade;
-    if (grade) cell.value = grade;
+    if (grade) cell.value = gradeToNumber(grade);
   }
 
   await sheet.saveUpdatedCells();
@@ -1644,6 +1679,7 @@ async function checkAndGrantBeret(
       if (canonical === "берет") {
         const beretCell = sheet.getCell(row - 1, c);
         beretCell.backgroundColor = { ...EXAM_GREEN };
+        beretCell.value = ""; // Столбец «Берет» закрашивается без текста
         return true;
       }
     }
