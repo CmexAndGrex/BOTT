@@ -11,7 +11,7 @@ import { db } from "@/db";
 import { members, recruitApplications, serviceReports } from "@/db/schema";
 import { requireStaff } from "@/lib/member-auth";
 import {
-  approveRecruitApplication,
+  approveRecruitByKind,
   approveServiceReport,
   rejectRecruitApplication,
   rejectServiceReport,
@@ -105,6 +105,10 @@ export async function GET(req: NextRequest) {
         id: row.id,
         memberId: row.memberId,
         callsign: row.callsign,
+        // Вид заявки и ФИО: панель помечает возврат из запаса отдельной
+        // формулировкой, а не показывает его как обычное зачисление
+        kind: row.kind,
+        fullName: row.fullName,
         discordTag: row.discordTag,
         discordId: row.discordId,
         age: row.age,
@@ -171,7 +175,11 @@ export async function POST(req: NextRequest) {
     const result =
       scope === "recruit"
         ? action === "approve"
-          ? await approveRecruitApplication(id, reviewer)
+          ? // Решение по заявке зависит от её вида: возврат из запаса
+            // восстанавливает бойца и переносит строку ШДС, а не зачисляет
+            // нового. Вид хранится в БД, поэтому выбор надёжен, а не выводится
+            // из текста комментария кандидата.
+            await approveRecruitByKind(id, reviewer)
           : await rejectRecruitApplication(id, reviewer, comment)
         : action === "approve"
           ? await approveServiceReport(id, reviewer)

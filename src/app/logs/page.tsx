@@ -39,8 +39,31 @@ export default function LogsPage() {
   const [mainTab, setMainTab] = useState<"system" | "edit">("system");
   const [filter, setFilter] = useState<string>("all");
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  /** Права из /api/me: считаются общим правилом (resolvePanelRights) */
+  const [isCommander, setIsCommander] = useState<boolean | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+    // Права спрашиваем у /api/me, а не выводим из cookie на клиенте: у
+    // командира подразделения роль панели может быть пустой (он работает из
+    // кабинета), и по одной ей журнал закрылся бы. Тот же расчёт выполняет
+    // сервер (/api/logs через requireStaff), поэтому клиент и сервер не разойдутся.
+    const loadRights = async () => {
+      try {
+        const me = await fetch("/api/me", { cache: "no-store" }).then((r) => r.json());
+        if (!cancelled) setIsCommander(Boolean(me.isCommander || me.isAdmin));
+      } catch {
+        if (!cancelled) setIsCommander(false);
+      }
+    };
+    loadRights();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isCommander) return;
     let cancelled = false;
     const load = async () => {
       try {
@@ -58,7 +81,7 @@ export default function LogsPage() {
       cancelled = true;
       clearInterval(t);
     };
-  }, [mainTab]);
+  }, [mainTab, isCommander]);
 
   const filtered = (logs ?? []).filter((l) => {
     const cat = l.category || "system";
@@ -70,6 +93,14 @@ export default function LogsPage() {
   const toggleRow = (id: number) => {
     setExpandedId(expandedId === id ? null : id);
   };
+
+  if (isCommander === false) {
+    return (
+      <div className="p-10 text-center font-bold" style={{ color: "var(--red)" }}>
+        Доступ запрещен. Журнал доступен командирам и администраторам.
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-5">
@@ -93,7 +124,7 @@ export default function LogsPage() {
               className="chip transition-all"
               style={
                 mainTab === "system"
-                  ? { borderColor: "rgba(239,68,68,.5)", background: "var(--red-soft)", color: "#fff", cursor: "pointer" }
+                  ? { borderColor: "rgba(190,18,60,.5)", background: "var(--red-soft)", color: "#fff", cursor: "pointer" }
                   : { cursor: "pointer", color: "var(--muted)" }
               }
             >
@@ -104,7 +135,7 @@ export default function LogsPage() {
               className="chip transition-all"
               style={
                 mainTab === "edit"
-                  ? { borderColor: "rgba(239,68,68,.5)", background: "var(--red-soft)", color: "#fff", cursor: "pointer" }
+                  ? { borderColor: "rgba(190,18,60,.5)", background: "var(--red-soft)", color: "#fff", cursor: "pointer" }
                   : { cursor: "pointer", color: "var(--muted)" }
               }
             >
@@ -126,7 +157,7 @@ export default function LogsPage() {
                   className="chip"
                   style={
                     filter === f.key
-                      ? { borderColor: "rgba(239,68,68,.5)", background: "var(--red-soft)", color: "#fff", cursor: "pointer" }
+                      ? { borderColor: "rgba(190,18,60,.5)", background: "var(--red-soft)", color: "#fff", cursor: "pointer" }
                       : { cursor: "pointer" }
                   }
                   onClick={() => setFilter(f.key)}
@@ -174,11 +205,11 @@ export default function LogsPage() {
                       }`}
                     >
                       <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <span className="mt-0.5 text-red-500 shrink-0">
+                        <span className="mt-0.5 shrink-0" style={{ color: "var(--red)" }}>
                           <Edit3 size={15} />
                         </span>
                         <div className="min-w-0 flex-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-                          <span className="text-[13px] font-semibold text-red-400">
+                          <span className="text-[13px] font-semibold" style={{ color: "#fda4af" }}>
                             {log.author || "Командир"}
                           </span>
                           <span className="text-[13px]" style={{ color: "var(--text)" }}>
@@ -257,8 +288,8 @@ export default function LogsPage() {
                       <div
                         className="mt-1.5 rounded-lg border px-2.5 py-1.5 font-mono text-[11px] leading-relaxed"
                         style={{
-                          borderColor: "rgba(239,68,68,.3)",
-                          background: "rgba(239,68,68,.06)",
+                          borderColor: "rgba(190,18,60,.3)",
+                          background: "rgba(190,18,60,.06)",
                           color: "#ff9c9c",
                         }}
                       >

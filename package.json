@@ -10,12 +10,13 @@
     "lint:strict": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "node --import ./tests/setup.mjs --test \"tests/**/*.test.ts\"",
+    "secret:scan": "node scripts/secret-scan.mjs",
     "verify:sheet": "node scripts/verify-sheet.mjs",
     "bootstrap:admin": "node scripts/bootstrap-admin.ts",
     "dev:seed": "node scripts/dev-seed.ts",
     "schemas:check": "node scripts/check-schemas.mjs",
     "schemas:prepare": "node scripts/prepare-schemas.mjs",
-    "ci": "npm run test && npm run typecheck && npm run lint && npm run build"
+    "ci": "npm run secret:scan && npm run test && npm run typecheck && npm run lint && npm run build"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

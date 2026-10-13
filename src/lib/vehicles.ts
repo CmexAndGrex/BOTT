@@ -18,6 +18,12 @@
  *     «требуется сдача» у того, кто давно сдал.
  *
  * Цены ($) — стоимость единицы в экономике подразделения, показывается в карточке.
+ *
+ * Третий признак — УРОВЕНЬ VIP (`vipTier`) и минимальное звание реестра гаража
+ * (`requiredRank`): они не меняют допуск, но их показывает карточка, и по
+ * `vipTier` кабинет фильтрует список (см. vipFilterCounts). Названия и цены
+ * сверены с реестром гаража: «Т-90М «Прорыв»», «БМП-3 (VВесна-К/ДБ)»,
+ * «ЗСУ-23-4 «Шилка»» — это строки оттуда, а не пересказ.
  */
 import { RANKS, type Rank } from "@/lib/recruits";
 import { normalizeExamCode } from "@/lib/reports";
@@ -38,6 +44,77 @@ export const VEHICLE_CATEGORY_LABELS: Record<VehicleCategory, string> = {
   mortar: "Миномёт",
 };
 
+/* ------------------------------------------------------------------ */
+/* Уровни VIP                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Уровень VIP: 0 — обычная техника, 1 — VIP 1, 2 — VIP 2.
+ *
+ * Шкала взята из реестра игрового гаража и живёт рядом с допуском по званию, а
+ * не вместо него: VIP-машина требует и уровня подписки, и допуска подразделения.
+ * Отдельного поля «есть ли у бойца VIP» в карточке нет — поэтому здесь только
+ * КАТЕГОРИЯ единицы техники, по которой кабинет фильтрует и рисует бейджи.
+ */
+export type VipTier = 0 | 1 | 2;
+
+/** Подписи уровней: те же строки, что на кнопках-фильтрах кабинета */
+export const VEHICLE_VIP_LABELS: Record<VipTier, string> = {
+  0: "Базовая",
+  1: "VIP 1",
+  2: "VIP 2",
+};
+
+/**
+ * Ключ фильтра техники в кабинете.
+ *
+ * `all` — «Все», остальные значения однозначно соответствуют уровню VIP: фильтр
+ * не вводит второй шкалы, а лишь называет уже описанные ступени.
+ */
+export type VehicleVipFilter = "all" | "base" | "vip1" | "vip2";
+
+/** Порядок кнопок фильтра: «Все · Базовая · VIP 1 · VIP 2» */
+export const VEHICLE_VIP_FILTERS: readonly VehicleVipFilter[] = ["all", "base", "vip1", "vip2"];
+
+/** Уровень VIP, которым ограничивает фильтр; null — фильтр ничего не отсекает */
+export function vipTierOfFilter(filter: VehicleVipFilter): VipTier | null {
+  if (filter === "base") return 0;
+  if (filter === "vip1") return 1;
+  if (filter === "vip2") return 2;
+  return null;
+}
+
+/** Подходит ли единица техники выбранному фильтру */
+export function matchesVipFilter(vehicle: Vehicle, filter: VehicleVipFilter): boolean {
+  const tier = vipTierOfFilter(filter);
+  return tier === null || vehicle.vipTier === tier;
+}
+
+/** Карточка в том виде, в каком её достаточно для подсчёта счётчиков */
+export type VipCountable = { vehicle: Vehicle };
+
+/**
+ * Сколько единиц в каждой категории фильтра — для счётчиков на кнопках.
+ *
+ * Считаем по ТЕКУЩЕМУ списку (открытая или закрытая техника), а не по всему
+ * реестру: счётчик «Базовая (12)» рядом с пустым списком читался бы как ошибка
+ * фильтра, хотя вкладка «Требует повышения» просто пуста.
+ */
+export function vipFilterCounts(cards: readonly VipCountable[]): Record<VehicleVipFilter, number> {
+  const counts: Record<VehicleVipFilter, number> = {
+    all: cards.length,
+    base: 0,
+    vip1: 0,
+    vip2: 0,
+  };
+  for (const card of cards) {
+    if (card.vehicle.vipTier === 1) counts.vip1 += 1;
+    else if (card.vehicle.vipTier === 2) counts.vip2 += 1;
+    else counts.base += 1;
+  }
+  return counts;
+}
+
 /**
  * Единица техники.
  *
@@ -53,6 +130,13 @@ export type Vehicle = {
   mod: string | null;
   /** Стоимость единицы; null — цена не установлена (техника ивентов) */
   price: number | null;
+  /** Уровень VIP из реестра гаража: 0 — базовая, 1 — VIP 1, 2 — VIP 2 */
+  vipTier: VipTier;
+  /**
+   * Минимальное звание из реестра («Мин. звание»); null — отдельного требования
+   * в реестре нет, и допуск определяет ступень матрицы либо нормативы ШДС.
+   */
+  requiredRank: Rank | null;
 };
 
 /** Подпись состояния доступа в карточке техники */
@@ -80,97 +164,151 @@ const RHS = "RHS";
 const RED = "RED";
 
 /**
+ * Базовая техника из реестра гаража: без VIP и без отдельного «мин. звания».
+ *
+ * Базовые машины по-прежнему открываются ступенью матрицы: звание бойца и есть
+ * их минимальное звание. Поле requiredRank остаётся null — там, где реестр
+ * называет звание явно (Т-90М, вся VIP-линейка), оно заполняется вручную.
+ */
+const BASE = { vipTier: 0, requiredRank: null } as const;
+
+/**
  * Матрица «Танковая рота».
  *
  * Порядок ступеней совпадает с порядком званий в RANKS — на этом построен
  * вывод «что откроется на следующем звании»: следующая ступень ищется по
  * индексу звания в общем списке, а не по порядку в этом массиве.
+ *
+ * VIP-техника живёт в тех же ступенях, что и раньше: уровень VIP — это
+ * подписка на единицу из реестра гаража, а допуск по-прежнему даёт звание.
+ * Так карточка честно показывает и «когда можно», и «что это VIP-машина».
  */
 export const TANK_RANK_MATRIX: readonly RankTier[] = [
   {
     rank: "Рядовой",
     vehicles: [
-      { id: "t-72b-1985-rhs", name: "Т-72Б (1985) (RHS)", category: "tank", mod: RHS, price: 235 },
-      { id: "t-72b-1989-rhs", name: "Т-72Б (1989) (RHS)", category: "tank", mod: RHS, price: 215 },
-      { id: "2s25-sprut-sd", name: "2С25 (Спрут-СД)", category: "spg", mod: null, price: 215 },
+      { id: "t-72b-1985-rhs", name: "Т-72Б (1985) (RHS)", category: "tank", mod: RHS, price: 235, ...BASE },
+      { id: "t-72b-1989-rhs", name: "Т-72Б (1989) (RHS)", category: "tank", mod: RHS, price: 215, ...BASE },
+      { id: "2s25-sprut-sd", name: "2С25 (Спрут-СД)", category: "spg", mod: null, price: 215, ...BASE },
+      { id: "btr-80a", name: "БТР-80А", category: "ifv", mod: null, price: 160, ...BASE },
+      { id: "mt-lb-lv-camo", name: "MT-LB LV (Camo)", category: "ifv", mod: null, price: 100, ...BASE },
+      { id: "zsu-23-4-shilka", name: "ЗСУ-23-4 «Шилка»", category: "sam", mod: null, price: 100, ...BASE },
     ],
   },
   {
     rank: "Ефрейтор",
     vehicles: [
-      { id: "t-72a-red", name: "Т-72А (RED)", category: "tank", mod: RED, price: 250 },
-      { id: "t-72b3-2012-rhs", name: "Т-72Б3 (2012) (RHS)", category: "tank", mod: RHS, price: 250 },
-      { id: "t-80b-red", name: "Т-80Б (RED)", category: "tank", mod: RED, price: 250 },
-      { id: "t-80u-rhs", name: "Т-80У (RHS)", category: "tank", mod: RHS, price: 280 },
-      { id: "t-80u-45m-rhs", name: "Т-80У (45М) (RHS)", category: "tank", mod: RHS, price: 295 },
-      { id: "t-80ue1-rhs", name: "Т-80УЕ-1 (RHS)", category: "tank", mod: RHS, price: 260 },
-      { id: "2s6-tunguska", name: "2С6 «Тунгуска»", category: "sam", mod: null, price: 450 },
-      { id: "bmp-2k-rhs", name: "БМП-2К (RHS)", category: "ifv", mod: RHS, price: 210 },
+      { id: "t-72a-red", name: "Т-72А (RED)", category: "tank", mod: RED, price: 250, ...BASE },
+      { id: "t-72b3-2012-rhs", name: "Т-72Б3 (2012) (RHS)", category: "tank", mod: RHS, price: 250, ...BASE },
+      { id: "t-80b-red", name: "Т-80Б (RED)", category: "tank", mod: RED, price: 250, ...BASE },
+      { id: "t-80u-rhs", name: "Т-80У (RHS)", category: "tank", mod: RHS, price: 280, ...BASE },
+      { id: "t-80u-45m-rhs", name: "Т-80У (45М) (RHS)", category: "tank", mod: RHS, price: 295, ...BASE },
+      { id: "t-80ue1-rhs", name: "Т-80УЕ-1 (RHS)", category: "tank", mod: RHS, price: 260, ...BASE },
+      {
+        id: "2s6-tunguska", name: "2С6 «Тунгуска»", category: "sam", mod: null, price: 450,
+        vipTier: 1, requiredRank: "Ефрейтор",
+      },
+      { id: "bmp-2k-rhs", name: "БМП-2К (RHS)", category: "ifv", mod: RHS, price: 210, ...BASE },
     ],
   },
   {
     rank: "Мл. Сержант",
     vehicles: [
-      { id: "t-72b-red", name: "Т-72Б (RED)", category: "tank", mod: RED, price: 285 },
-      { id: "t-72b3-2016-rhs", name: "Т-72Б3 (2016) (RHS)", category: "tank", mod: RHS, price: 275 },
-      { id: "t-80bv-red", name: "Т-80БВ (RED)", category: "tank", mod: RED, price: 300 },
-      { id: "t-80uk-rhs", name: "Т-80УК (RHS)", category: "tank", mod: RHS, price: 315 },
-      { id: "t-90a-2006-rhs", name: "Т-90А (2006) (RHS)", category: "tank", mod: RHS, price: 290 },
-      { id: "pantsir-s1", name: "Панцирь-С1", category: "sam", mod: null, price: 900 },
-      { id: "bmp-2d-rhs", name: "БМП-2Д (RHS)", category: "ifv", mod: RHS, price: 230 },
-      { id: "bmp-3-poz", name: "БМП-3 (Поз.)", category: "ifv", mod: null, price: 275 },
-      { id: "bmp-3-vesna-k", name: "БМП-3 (VВесна-К)", category: "ifv", mod: null, price: 300 },
+      { id: "t-72b-red", name: "Т-72Б (RED)", category: "tank", mod: RED, price: 285, ...BASE },
+      { id: "t-72b3-2016-rhs", name: "Т-72Б3 (2016) (RHS)", category: "tank", mod: RHS, price: 275, ...BASE },
+      { id: "t-80bv-red", name: "Т-80БВ (RED)", category: "tank", mod: RED, price: 300, ...BASE },
+      { id: "t-80uk-rhs", name: "Т-80УК (RHS)", category: "tank", mod: RHS, price: 315, ...BASE },
+      { id: "t-90a-2006-rhs", name: "Т-90А (2006) (RHS)", category: "tank", mod: RHS, price: 290, ...BASE },
+      {
+        id: "pantsir-s1", name: "Панцирь-С1", category: "sam", mod: null, price: 900,
+        vipTier: 2, requiredRank: "Мл. Сержант",
+      },
+      { id: "bmp-2d-rhs", name: "БМП-2Д (RHS)", category: "ifv", mod: RHS, price: 230, ...BASE },
+      { id: "bmp-3-poz", name: "БМП-3 (Поз.)", category: "ifv", mod: null, price: 275, ...BASE },
+      { id: "bmp-3-vesna-k", name: "БМП-3 (VВесна-К)", category: "ifv", mod: null, price: 300, ...BASE },
+      {
+        id: "bmp-3m", name: "БМП-3М", category: "ifv", mod: null, price: 340,
+        vipTier: 1, requiredRank: "Мл. Сержант",
+      },
     ],
   },
   {
     rank: "Сержант",
     vehicles: [
-      { id: "t-72b3-red", name: "Т-72Б3 (RED)", category: "tank", mod: RED, price: 310 },
-      { id: "t-90sa-rhs", name: "Т-90СА (RHS)", category: "tank", mod: RHS, price: 330 },
-      { id: "bmp-3-vesna-k-db", name: "БМП-3 (VВесна-К/ДБ)", category: "ifv", mod: null, price: 325 },
+      { id: "t-72b3-red", name: "Т-72Б3 (RED)", category: "tank", mod: RED, price: 310, ...BASE },
+      { id: "t-90sa-rhs", name: "Т-90СА (RHS)", category: "tank", mod: RHS, price: 330, ...BASE },
+      {
+        id: "bmp-3-vesna-k-db", name: "БМП-3 (VВесна-К/ДБ)", category: "ifv", mod: null, price: 325,
+        vipTier: 2, requiredRank: "Сержант",
+      },
     ],
   },
   {
     rank: "Ст. Сержант",
     vehicles: [
-      { id: "t-80u-red", name: "Т-80У (RED)", category: "tank", mod: RED, price: 350 },
-      { id: "t-90a-red", name: "Т-90А (RED)", category: "tank", mod: RED, price: 400 },
-      { id: "t-90am-rhs", name: "Т-90АМ (RHS)", category: "tank", mod: RHS, price: 410 },
+      {
+        id: "t-80u-red", name: "Т-80У (RED)", category: "tank", mod: RED, price: 350,
+        vipTier: 1, requiredRank: "Ст. Сержант",
+      },
+      { id: "t-90a-red", name: "Т-90А (RED)", category: "tank", mod: RED, price: 400, ...BASE },
+      { id: "t-90am-rhs", name: "Т-90АМ (RHS)", category: "tank", mod: RHS, price: 410, ...BASE },
     ],
   },
   {
     rank: "Старшина",
     vehicles: [
-      { id: "t-90sm-rhs", name: "Т-90СМ (RHS)", category: "tank", mod: RHS, price: 410 },
+      {
+        id: "t-90sm-rhs", name: "Т-90СМ (объект 188СМ) (RHS)", category: "tank", mod: RHS, price: 410,
+        vipTier: 1, requiredRank: "Старшина",
+      },
     ],
   },
   {
     rank: "Прапорщик",
     vehicles: [
-      { id: "t-80ue1-red", name: "Т-80УЕ-1 (RED)", category: "tank", mod: RED, price: 400 },
+      {
+        id: "t-80ue1-red", name: "Т-80УЕ-1 (RED)", category: "tank", mod: RED, price: 400,
+        vipTier: 2, requiredRank: "Прапорщик",
+      },
     ],
   },
   {
     rank: "Ст. Прапорщик",
     vehicles: [
-      { id: "t-72b3-ubh-red", name: "Т-72Б3 УБХ (RED)", category: "tank", mod: RED, price: 410 },
+      { id: "t-72b3-ubh-red", name: "Т-72Б3 УБХ (RED)", category: "tank", mod: RED, price: 410, ...BASE },
     ],
   },
   {
     rank: "Лейтенант",
     vehicles: [
-      { id: "t-90m-red", name: "Т-90М (RED)", category: "tank", mod: RED, price: 450 },
-      { id: "t-90m-proryv-3", name: "Т-90М (Proryv-3)", category: "tank", mod: null, price: 510 },
-      { id: "t-90ms-tagil", name: "Т-90MS Tagil", category: "tank", mod: null, price: 500 },
+      // Т-90М в реестре идёт базовой машиной, но с явным требованием по званию
+      {
+        id: "t-90m-red", name: "Т-90М (RED)", category: "tank", mod: RED, price: 450,
+        vipTier: 0, requiredRank: "Лейтенант",
+      },
+      {
+        id: "t-90m-proryv-3", name: "Т-90М «Прорыв» (Proryv-3)", category: "tank", mod: null, price: 510,
+        vipTier: 2, requiredRank: "Лейтенант",
+      },
+      {
+        id: "t-90ms-tagil", name: "Т-90MS Tagil", category: "tank", mod: null, price: 500,
+        vipTier: 1, requiredRank: "Лейтенант",
+      },
       // Техника ивентов: цена не установлена — в карточке показывается «по решению штаба»
-      { id: "t-100-black-eagle", name: "Т-100 «Чёрный Орёл» (Ивентолог)", category: "tank", mod: null, price: null },
-      { id: "t-15-armata-ifv", name: "Т-15 Армата ИФВ", category: "ifv", mod: null, price: 500 },
+      { id: "t-100-black-eagle", name: "Т-100 «Чёрный Орёл» (Ивентолог)", category: "tank", mod: null, price: null, ...BASE },
+      {
+        id: "t-15-armata-ifv", name: "Т-15 Армата ИФВ", category: "ifv", mod: null, price: 500,
+        vipTier: 1, requiredRank: "Лейтенант",
+      },
     ],
   },
   {
     rank: "Ст. Лейтенант",
     vehicles: [
-      { id: "t-14-armata", name: "Т-14 Армата", category: "tank", mod: null, price: 510 },
+      {
+        id: "t-14-armata", name: "Т-14 Армата", category: "tank", mod: null, price: 510,
+        vipTier: 2, requiredRank: "Ст. Лейтенант",
+      },
     ],
   },
 ];
@@ -208,8 +346,8 @@ export const ARTILLERY_CATEGORIES: readonly ArtilleryCategory[] = [
     title: "Миномётная батарея",
     hint: "Поднос 2Б14 и миномёты расчёта",
     vehicles: [
-      { id: "mortar-2b14-podnos", name: "2Б14 «Поднос» (82-мм миномёт)", category: "mortar", mod: null, price: null },
-      { id: "mortar-crew-nomenclature", name: "Миномёты расчёта батареи", category: "mortar", mod: null, price: null },
+      { id: "mortar-2b14-podnos", name: "2Б14 «Поднос» (82-мм миномёт)", category: "mortar", mod: null, price: null, ...BASE },
+      { id: "mortar-crew-nomenclature", name: "Миномёты расчёта батареи", category: "mortar", mod: null, price: null, ...BASE },
     ],
     required: [
       { code: "Миномётное дело (Экзамен)", aliases: ["Минометное дело (экзамен)", "Миномётное дело (экзамен)"] },
@@ -220,9 +358,9 @@ export const ARTILLERY_CATEGORIES: readonly ArtilleryCategory[] = [
     title: "Самоходная артиллерия",
     hint: "2С1 «Гвоздика», 2С3М1 «Акация», 2С19 «Мста-С»",
     vehicles: [
-      { id: "2s1-gvozdika", name: "2С1 «Гвоздика»", category: "spg", mod: null, price: null },
-      { id: "2s3m1-akatsiya", name: "2С3М1 «Акация»", category: "spg", mod: null, price: null },
-      { id: "2s19-msta-s", name: "2С19 «Мста-С»", category: "spg", mod: null, price: null },
+      { id: "2s1-gvozdika", name: "2С1 «Гвоздика»", category: "spg", mod: null, price: null, ...BASE },
+      { id: "2s3m1-akatsiya", name: "2С3М1 «Акация»", category: "spg", mod: null, price: null, ...BASE },
+      { id: "2s19-msta-s", name: "2С19 «Мста-С»", category: "spg", mod: null, price: null, ...BASE },
     ],
     required: [
       {
@@ -246,8 +384,8 @@ export const ARTILLERY_CATEGORIES: readonly ArtilleryCategory[] = [
     title: "Реактивная артиллерия",
     hint: "2Б26 «Град-К», Торнадо-Г",
     vehicles: [
-      { id: "2b26-grad-k", name: "2Б26 «Град-К»", category: "mlrs", mod: null, price: null },
-      { id: "tornado-g", name: "Торнадо-Г", category: "mlrs", mod: null, price: null },
+      { id: "2b26-grad-k", name: "2Б26 «Град-К»", category: "mlrs", mod: null, price: 325, ...BASE },
+      { id: "tornado-g", name: "Торнадо-Г", category: "mlrs", mod: null, price: null, ...BASE },
     ],
     required: [{ code: "РСЗО (Экзамен)", aliases: ["РСЗО (экзамен)", "РСЗО"] }],
   },
@@ -462,25 +600,49 @@ function percentOf(satisfied: number, total: number): number {
 /* Танковая рота: расчёт допуска                                       */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Более строгое из двух званий.
+ *
+ * Нужно там, где требование единицы техники может быть названо дважды: ступенью
+ * матрицы и полем «мин. звание» реестра. Сравнение идёт по позиции в RANKS, а не
+ * по алфавиту; неизвестное звание (index -1) требование не ослабляет — вернётся
+ * известное.
+ */
+function stricterRank(a: Rank, b: Rank | null): Rank {
+  if (!b) return a;
+  return RANKS.indexOf(b) > RANKS.indexOf(a) ? b : a;
+}
+
 function buildTankReport(
   unit: string | null,
   rank: Rank | null,
   holderIndex: number
 ): Omit<VehicleAccessReport, "division" | "categories"> {
   const tiers: TankTierView[] = TANK_RANK_MATRIX.map((tier) => {
-    const unlocked = holderIndex >= RANKS.indexOf(tier.rank);
+    const tierIndex = RANKS.indexOf(tier.rank);
     return {
       rank: tier.rank,
-      unlocked,
+      unlocked: holderIndex >= tierIndex,
       vehicles: tier.vehicles.map((vehicle): VehicleCard => {
+        /**
+         * Порог единицы техники — не всегда порог ступени.
+         *
+         * У базовых машин требование задаёт ступень матрицы, но у части реестра
+         * «мин. звание» названо прямо в карточке (Т-90М, Т-14). Порог берём как
+         * более высокое из двух званий: если машину однажды переставят в другую
+         * ступень, допуск не станет мягче случайно.
+         */
+        const thresholdRank = stricterRank(tier.rank, vehicle.requiredRank);
+        const unlocked = holderIndex >= RANKS.indexOf(thresholdRank);
+
         if (unlocked) {
           return {
             vehicle,
             status: "unlocked",
             statusLabel: VEHICLE_STATUS_LABELS.unlocked,
-            satisfied: [`звание ${tier.rank}`],
+            satisfied: [`звание ${thresholdRank}`],
             missing: [],
-            unlocksAtRank: tier.rank,
+            unlocksAtRank: thresholdRank,
           };
         }
         return {
@@ -488,15 +650,26 @@ function buildTankReport(
           status: "locked",
           statusLabel: VEHICLE_STATUS_LABELS.lockedByRank,
           satisfied: rank ? [`звание ${rank}`] : [],
-          missing: [`звание ${tier.rank}`],
-          unlocksAtRank: tier.rank,
+          missing: [`звание ${thresholdRank}`],
+          unlocksAtRank: thresholdRank,
         };
       }),
     };
   });
 
-  const unlocked = tiers.filter((tier) => tier.unlocked).flatMap((tier) => tier.vehicles);
-  const locked = tiers.filter((tier) => !tier.unlocked).flatMap((tier) => tier.vehicles);
+  /**
+   * Списки собираются по СОСТОЯНИЮ КАРТОЧКИ, а не по флагу ступени.
+   *
+   * Раньше делили по `tier.unlocked`, и это расходилось с тем, что показывает
+   * интерфейс: внутри пройденной ступени машина может требовать более высокого
+   * звания. Пример — Т-90М: он стоит в ступени «Лейтенант», но и «мин. звание»
+   * у него названо отдельно, поэтому при звании ниже порога карточка честно
+   * говорила «Требуется повышение», а список открытой техники относил его к
+   * допущенной. Источник истины теперь один — status самой карточки.
+   */
+  const allCards = tiers.flatMap((tier) => tier.vehicles);
+  const unlocked = allCards.filter((card) => card.status === "unlocked");
+  const locked = allCards.filter((card) => card.status !== "unlocked");
 
   // Предпросмотр: ближайшая ступень выше текущего звания. Даже если выше есть
   // ступени с техникой, показываем именно следующую — бойцу важно знать, что

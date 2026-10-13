@@ -115,13 +115,23 @@ docker compose up -d --build app
 ## 5. Проверка
 
 ```bash
-docker compose ps                    # три сервиса: db, migrate (exited 0), app
+docker compose ps                    # три сервиса: db, migrate (exited 0), app (healthy)
 docker compose logs -f app           # Ctrl+C чтобы выйти
 curl http://localhost:3000/api/health
 # {"ok":true}                  — публичный ответ минимальный (только статус)
 # С cookie администратора тот же адрес вернёт диагностику:
 # {"ok":true,"database":"reachable","uptimeSec":...,"nodeEnv":"...","checkedAt":"..."}
 ```
+
+Столбец `STATUS` у `app` показывает `(healthy)` — это результат встроенной
+проверки контейнера (`curl /api/health` каждые 30 секунд). В образ добавлен
+`curl`, поэтому проверка работает; `(unhealthy)` означает, что панель поднялась,
+но не отвечает — смотрите `docker compose logs app`.
+
+> Порты: база публикуется только на `127.0.0.1:5432`, то есть снаружи она
+> недоступна и подключиться к ней можно лишь с самого сервера. Если нужен
+> внешний доступ (например, для клиента на рабочей машине), используйте
+> SSH-туннель: `ssh -L 5432:127.0.0.1:5432 user@сервер`.
 
 > `PANEL_URL` — необязательная переменная: если панель работает за прокси,
 > задайте её (например `PANEL_URL=https://panel.example.ru`), чтобы в архив

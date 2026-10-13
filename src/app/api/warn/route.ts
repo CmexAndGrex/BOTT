@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { members, settings, logs } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { requireRole } from "@/lib/api-auth";
+import { requireStaff } from "@/lib/member-auth";
 import { CooldownLimiter, nextWarningCount, isDiscordId } from "@/lib/validation";
 
 /**
@@ -18,10 +18,15 @@ const warnLimiter = new CooldownLimiter(3000);
 type WarnType = 1 | 2;
 
 export async function POST(req: NextRequest) {
-  // Предупреждение с пингом в Discord — командиры и админы
-  const auth = await requireRole(req, ["officer"]);
+  // Предупреждение с пингом в Discord — командиры и админы.
+  //
+  // requireStaff, а не requireRole(["officer"]): допускается как сессия панели,
+  // так и сессия кабинета с правами штаба (роль officer/admin или должность
+  // командира подразделения). Иначе командир, работающий из кабинета
+  // (member_token), получал 401 — при том, что интерфейс ему кнопку показывал.
+  const auth = await requireStaff(req);
   if (!auth.ok) return auth.response;
-  const authUsername = auth.user.username;
+  const operator = auth.member;
 
   try {
     let body;
@@ -35,7 +40,7 @@ export async function POST(req: NextRequest) {
     if (typeof norm !== "number" || norm < 1 || norm > 168) return NextResponse.json({ error: "Некорректная норма" }, { status: 400 });
 
     const now = Date.now();
-    const rateKey = `${authUsername || "unknown"}:${memberId}`;
+    const rateKey = `${operator.id || operator.callsign || "unknown"}:${memberId}`;
     if (!warnLimiter.allow(rateKey, now)) {
       return NextResponse.json({ error: "Слишком часто" }, { status: 429 });
     }
@@ -45,10 +50,26 @@ export async function POST(req: NextRequest) {
     
     const fighter = fighterRecord[0];
 
+    /**
+     * Проверка принадлежности к подразделению (IDOR).
+     *
+     * Если у инициатора задано подразделение, он не может выдавать выговоры
+     * бойцам чужого подразделения — иначе командир роты наказывал бы бойцов
+     * дивизиона по прямому знанию чужого memberId. Администраторы не
+     * ограничены: их надзор общий, и подразделение у них может быть не задано.
+     */
+    if (
+      operator.role !== "admin" &&
+      operator.unit &&
+      fighter.unit &&
+      fighter.unit !== operator.unit
+    ) {
+      return NextResponse.json({ error: "Боец другого подразделения" }, { status: 403 });
+    }
+
     // Счётчик только растёт: повторная выдача «1/2» не сбрасывает уже
     // накопленные предупреждения (см. nextWarningCount).
     const newWarnings = nextWarningCount(fighter.warnings, type as WarnType);
-    await db.update(members).set({ warnings: newWarnings }).where(eq(members.id, memberId));
 
     const settingsData = await db.select().from(settings);
     const config = Object.fromEntries(settingsData.map((s) => [s.key, s.value]));
@@ -69,6 +90,10 @@ export async function POST(req: NextRequest) {
       ? `⛔ ${ping} 2/2 предупреждение, онлайн ${fighter.hours.toFixed(1)}ч, повторно ниже нормы. Исключён! ⛔`
       : `⚠️ ${ping} 1/2 предупреждение, онлайн ${fighter.hours.toFixed(1)}ч, ниже нормы ${norm}ч. Добить онлайн, иначе исключение ⚠️`;
 
+    // Сначала доставляем сообщение в Discord и только при успешной доставке
+    // меняем счётчик в базе. Иначе при отказе Discord (400/404/сеть) счётчик
+    // рос бы «в никуда», и боец получал исключение 2/2, не получив самого
+    // предупреждения ни в канале, ни в личных сообщениях.
     const discordRes = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
       method: "POST",
       headers: { "Authorization": `Bot ${botToken.trim()}`, "Content-Type": "application/json" },
@@ -77,10 +102,12 @@ export async function POST(req: NextRequest) {
 
     if (!discordRes.ok) return NextResponse.json({ error: `Ошибка Discord` }, { status: 400 });
 
+    await db.update(members).set({ warnings: newWarnings }).where(eq(members.id, memberId));
+
     // Пишем в журнал редактирования
     try {
-      const roleRu = auth.user.role === "admin" ? "Администратор" : "Командир";
-      const authorFormatted = authUsername ? `${roleRu} ${authUsername}` : roleRu;
+      const roleRu = operator.role === "admin" ? "Администратор" : "Командир";
+      const authorFormatted = operator.callsign ? `${roleRu} ${operator.callsign}` : roleRu;
       await db.insert(logs).values({
         category: "edit",
         author: authorFormatted,
@@ -97,7 +124,7 @@ export async function POST(req: NextRequest) {
         detail: `Бойцу ${fighter.name} выдано предупреждение ${newWarnings}/2 (запрошено ${type}/2)`,
         ok: true,
       });
-    } catch (e) {
+    } catch {
       // Журнал не критичен для ответа
     }
     return NextResponse.json({ ok: true, warnings: newWarnings });

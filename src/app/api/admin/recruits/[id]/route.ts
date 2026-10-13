@@ -25,6 +25,7 @@ import {
   UNITS,
   type MemberStatus,
 } from "@/lib/recruits";
+import { statusTrackingFields } from "@/lib/roles-monitor";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -281,6 +282,14 @@ function buildPatch(member: MemberRow, body: UpdateBody, action: Action): PatchR
   }
 
   values.status = nextStatus ?? member.status;
+
+  // Фиксация момента исключения/возврата в строй: по dismissedAt фоновая
+  // задача контроля ролей отсчитывает сутки до напоминания комсоставу о
+  // неснятых ролях Discord. Считается от ПРЕДЫДУЩЕГО статуса карточки, а не
+  // от действия: повторное «сохранить» с тем же статусом не должно начинать
+  // отсчёт заново — иначе правка примечания откладывала бы напоминание.
+  Object.assign(values, statusTrackingFields(values.status, member.status));
+
   return { ok: true, values };
 }
 /* ------------------------------------------------------------------ */

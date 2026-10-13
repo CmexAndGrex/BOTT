@@ -24,8 +24,8 @@ const MAX_DOC_TAGS = 4;
 // Стиль активного чипа фильтра
 const activeChipStyle = {
   background: "var(--red-soft)",
-  borderColor: "rgba(239,68,68,0.5)",
-  color: "#fca5a5",
+  borderColor: "rgba(190,18,60,0.5)",
+  color: "#fda4af",
 } as const;
 
 export default function DocsPage() {
@@ -297,7 +297,7 @@ export default function DocsPage() {
 
       <AnimatePresence>
         {notice && (
-          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="card flex items-start gap-2.5 px-4 py-3" style={{ borderColor: notice.ok ? "rgba(16,185,129,.4)" : "rgba(239,68,68,.45)" }}>
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="card flex items-start gap-2.5 px-4 py-3" style={{ borderColor: notice.ok ? "rgba(16,185,129,.4)" : "rgba(190,18,60,.45)" }}>
             {notice.ok ? <CheckCircle2 size={16} className="mt-0.5" style={{ color: "var(--green)", flex: "none" }} /> : <XCircle size={16} className="mt-0.5" style={{ color: "var(--red)", flex: "none" }} />}
             <span className="text-[13px]" style={{ color: "var(--muted)" }}>{notice.text}</span>
           </motion.div>
@@ -421,7 +421,7 @@ export default function DocsPage() {
                         <span
                           key={tag.id}
                           className="max-w-[120px] truncate rounded-lg px-2 py-0.5 text-[11px] font-bold leading-tight"
-                          style={{ background: "var(--red-soft)", color: "#fca5a5" }}
+                          style={{ background: "var(--red-soft)", color: "#fda4af" }}
                           title={`Тег: ${tag.name}`}
                         >
                           {tag.name}
@@ -565,7 +565,7 @@ export default function DocsPage() {
                     {confirmId === x.id ? (
                       <button
                         className="btn btn-sm"
-                        style={{ background: "rgba(239,68,68,0.15)", borderColor: "rgba(239,68,68,0.45)", color: "var(--red)" }}
+                        style={{ background: "rgba(190,18,60,0.15)", borderColor: "rgba(190,18,60,0.45)", color: "var(--red)" }}
                         onClick={() => removeItem(x.id)}
                       >
                         <Trash2 size={14} /> Точно удалить
@@ -608,7 +608,7 @@ export default function DocsPage() {
               exit={{ opacity: 0, scale: 0.94, y: 12 }}
               transition={{ type: "spring", stiffness: 380, damping: 30 }}
               className="card w-full max-w-[420px] p-5"
-              style={{ background: "var(--modal)", backdropFilter: "blur(14px)", borderColor: "rgba(239,68,68,0.28)" }}
+              style={{ background: "var(--modal)", backdropFilter: "blur(14px)", borderColor: "rgba(190,18,60,0.28)" }}
               onClick={(e) => e.stopPropagation()}
             >
               {/* шапка окна */}
@@ -658,7 +658,7 @@ export default function DocsPage() {
                             height: 19,
                             borderRadius: 6,
                             border: checked ? "1px solid transparent" : "1px solid rgba(255,255,255,0.22)",
-                            background: checked ? "linear-gradient(135deg, #ef4444, #b91c1c)" : "rgba(255,255,255,0.05)",
+                            background: checked ? "var(--red-grad)" : "rgba(255,255,255,0.05)",
                             color: "#fff",
                           }}
                         >
@@ -714,7 +714,7 @@ export default function DocsPage() {
           >
             <div
               className="card flex flex-wrap items-center gap-3 px-5 py-3.5"
-              style={{ background: "var(--modal)", borderColor: "rgba(239,68,68,0.35)", backdropFilter: "blur(14px)" }}
+              style={{ background: "var(--modal)", borderColor: "rgba(190,18,60,0.35)", backdropFilter: "blur(14px)" }}
             >
               <div className="flex min-w-[200px] flex-1 items-center gap-2.5">
                 <Pencil size={15} style={{ color: "var(--red)", flex: "none" }} />

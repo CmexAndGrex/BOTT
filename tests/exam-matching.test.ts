@@ -13,7 +13,8 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { matchExamColumns } from "@/lib/gsheets.ts";
+import { examBounds, matchExamColumns, resolveLayout } from "@/lib/gsheets.ts";
+import { examCatalog, examColumnTokens } from "@/lib/reports.ts";
 
 /** Шапка «Танковая рота» (реальные названия столбцов листа) */
 const TR_HEADERS = [
@@ -49,7 +50,14 @@ const TR_HEADERS = [
   "Берет",
 ];
 
-/** Шапка «Артиллерийский дивизион» */
+/**
+ * Шапка «Артиллерийский дивизион».
+ *
+ * Перед блоком оценок у дивизиона на один служебный столбец больше, чем у роты:
+ * экзамены начинаются с «I», а не с «H» (см. examStartCol/examEndCol в LAYOUTS).
+ * Столбец без заголовка — тот самый разделительный: сопоставление пустые
+ * заголовки игнорирует, поэтому расширить шапку он не может.
+ */
 const AD_HEADERS = [
   "Звание",
   "Фамилии, инициалы",
@@ -57,6 +65,7 @@ const AD_HEADERS = [
   "Steam ID",
   "Discord ID",
   "Заметки",
+  "",
   "КМБТ",
   "Физ. Подготовка",
   "ТТХ (минометы)",
@@ -220,5 +229,74 @@ describe("matchExamColumns — ошибки и защита от дублей", 
     const r = matchExamColumns([], ["КМБТ"]);
     assert.deepEqual(r.columns, []);
     assert.deepEqual(r.unmatched, ["КМБТ"]);
+  });
+});
+
+describe("Блок оценок листа: границы раскладки", () => {
+  /**
+   * Шапки в этом файле скопированы с листа НАЧИНАЯ С КОЛОНКИ B: служебная
+   * колонка A в них не попала, поэтому индекс в массиве на единицу меньше
+   * индекса колонки листа. Границы из LAYOUTS дают индекс колонки — этот
+   * хелпер приводит его к позиции в тестовом массиве.
+   */
+  const inHeaders = (columnIndex: number) => columnIndex - 1;
+
+  test("границы блока экзаменов заданы у каждого листа и совпадают с шапкой", () => {
+    // Блок оценок — часть раскладки листа, а не общая константа: у дивизиона
+    // служебных столбцов слева на один больше, и общая константа сдвинула бы
+    // оценку на колонку в чужой столбец
+    const tr = resolveLayout("Танковая рота");
+    assert.equal(tr.examStartCol, "H");
+    assert.equal(tr.examEndCol, "AE");
+    // «H» — это 8-я колонка листа (индекс 7), где в шапке стоит КМБТ
+    assert.equal(examBounds(tr).start, 7);
+    assert.equal(TR_HEADERS[inHeaders(examBounds(tr).start)], "КМБТ");
+    // Конец блока — столбец «Берет», последний в шапке роты
+    assert.equal(TR_HEADERS[inHeaders(examBounds(tr).end)], "Берет");
+    assert.equal(TR_HEADERS.length - 1, inHeaders(examBounds(tr).end));
+
+    const ad = resolveLayout("Артиллерийский дивизион");
+    assert.equal(ad.examStartCol, "I");
+    assert.equal(ad.examEndCol, "AG");
+    assert.equal(AD_HEADERS[inHeaders(examBounds(ad).start)], "КМБТ");
+    assert.equal(AD_HEADERS[inHeaders(examBounds(ad).end)], "Берет");
+    assert.equal(AD_HEADERS.length - 1, inHeaders(examBounds(ad).end));
+  });
+
+  test("число столбцов блока совпадает с числом нормативов каталога листа", () => {
+    // Расхождение означало бы, что часть нормативов каталога некуда записать
+    // (или что блок оценок шире шапки и захватывает служебные столбцы)
+    for (const unit of ["Танковая рота", "Артиллерийский дивизион"]) {
+      const layout = resolveLayout(unit);
+      const bounds = examBounds(layout);
+      const width = bounds.end - bounds.start + 1;
+      assert.equal(
+        width,
+        examCatalog(unit).exams.length,
+        `блок оценок листа «${unit}» (${width} столбцов) не совпадает с каталогом`
+      );
+    }
+  });
+
+  test("каждый норматив каталога ложится в свой столбец шапки", () => {
+    // Сквозная сверка: норматив из каталога → столбец листа → оценка в ЭТОЙ
+    // ячейке. Если сопоставление сдвинется, в чужой столбец уедет и закраска,
+    // и оценка рапорта
+    for (const unit of ["Танковая рота", "Артиллерийский дивизион"]) {
+      const layout = resolveLayout(unit);
+      const headers = unit === "Танковая рота" ? TR_HEADERS : AD_HEADERS;
+      const bounds = examBounds(layout);
+      let cursor = inHeaders(bounds.start);
+      for (const exam of examCatalog(unit).exams) {
+        const tokens = examColumnTokens([exam.code]);
+        const { columns } = matchExamColumns(headers, tokens);
+        assert.deepEqual(
+          columns,
+          [cursor],
+          `норматив «${exam.code}» (${unit}) найден не в своём столбце`
+        );
+        cursor++;
+      }
+    }
   });
 });

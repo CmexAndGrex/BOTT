@@ -3,3 +3,19 @@
 - All code comments and commit messages must be in Russian or standard English.
 - Under NO circumstances use Chinese characters or Chinese language in output or reasoning.
 - Keep terminal commands and code identifiers in standard English/code syntax.
+# ATK RED Project Guidelines
+
+## Стек
+- Next.js (App Router), TypeScript (strict), Tailwind CSS.
+- PostgreSQL (`app_db`), Drizzle ORM.
+- Google Sheets API, Discord REST API.
+
+## Правила архитектуры:
+1. Google Таблицы (ШДС):
+   - Раскладка строки: B — Звание, C — ФИО/Позывной, D — Должность, E — Steam ID, F — Discord ID.
+   - Экзамены: H..AE (ТР), I..AG (АД). Обязательно сохранять границы Borders SOLID.
+   - Лист «Запас»: сохраняет диапазон A..AG. Служебные метаданные строго в AH (unit), AI (roles), AJ (date).
+2. Discord:
+   - Все сетевые вызовы Discord строго изолированы в `safeDiscord` / try-catch. Ошибки Discord не прерывают запись в БД и ШДС.
+3. Качество:
+   - После изменения логики обязательно проверять: `npx tsc --noEmit` и `npm test`.

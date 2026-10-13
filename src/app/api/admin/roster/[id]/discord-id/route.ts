@@ -7,6 +7,11 @@
  * PATCH /api/members/[id] (база панели); запись в ШДС оставлена администратору
  * как операция с внешним документом.
  *
+ * Доступ: командир подразделения и администратор (requireRosterEditor — единое
+ * правило прав, см. lib/panel-rights.ts). Ранее требовалась строго роль admin,
+ * из-за чего командиру табеля поле правки было недоступно; при этом правку
+ * можно и нужно вести из панели «Состав», а не просить администратора.
+ *
  * Порядок действий намеренный:
  *   1. проверка роли и формата (общий валидатор validateRosterDiscordId —
  *      тот же, что показывает требование в интерфейсе);
@@ -18,10 +23,10 @@
  * синхронизации, панель показывает предупреждение вместо ложного успеха.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { db } from "@/db";
 import { logs, members } from "@/db/schema";
-import { requireRole } from "@/lib/api-auth";
+import { requireRosterEditor } from "@/lib/member-auth";
 import { isCrossSiteRequest, isUnsafeMethod } from "@/lib/csrf";
 import { validateRosterDiscordId } from "@/lib/validation";
 
@@ -34,6 +39,18 @@ type Params = { params: Promise<{ id: string }> };
 
 /** Статус синхронизации с листом ШДС */
 type SheetStatus = { ok: boolean; message?: string; error?: string };
+
+/**
+ * Подпись автора правки для журнала.
+ *
+ * Правку ведут и администратор, и командир подразделения, поэтому роль берётся
+ * из карточки сессии (офицер → «Командир»), а не приписывается администратору:
+ * в журнале сверяются с тем, кто именно распорядился правкой ШДС.
+ */
+function authorLabel(member: { role: string; callsign: string }): string {
+  const role = member.role === "admin" ? "Администратор" : "Командир";
+  return member.callsign ? `${role} ${member.callsign}` : role;
+}
 
 /**
  * Запись ячейки на листе подразделения.
@@ -66,8 +83,10 @@ async function syncSheet(
 }
 
 export async function PATCH(req: NextRequest, { params }: Params) {
-  // Администратор — всегда допущен (requireRole пропускает его к любому набору)
-  const auth = await requireRole(req, ["admin"]);
+  // Командир подразделения или администратор: правка меняет и базу панели, и
+  // Google Таблицу ШДС. Требование разрешает её командирам, поэтому гвард —
+  // requireRosterEditor (единое правило прав), а не жёсткая роль admin.
+  const auth = await requireRosterEditor(req);
   if (!auth.ok) return auth.response;
 
   // Проверка источника дублируется намеренно: middleware — не единственный
@@ -102,6 +121,23 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const [member] = await db.select().from(members).where(eq(members.id, memberId));
   if (!member) return NextResponse.json({ ok: false, error: "Боец не найден" }, { status: 404 });
 
+  // Дубликат Discord ID запрещён: одна снежинка — один боец, иначе бот
+  // упоминал бы двух человек по одному ID, а сверка ролей путалась. Пустое
+  // значение (осознанная очистка привязки) конфликта не создаёт, а своя же
+  // запись под проверку не попадает — сравниваем по memberId.
+  if (discordId) {
+    const [taken] = await db
+      .select({ id: members.id })
+      .from(members)
+      .where(and(eq(members.discordId, discordId), ne(members.id, memberId)));
+    if (taken) {
+      return NextResponse.json(
+        { ok: false, error: "Этот Discord ID уже привязан к другому бойцу" },
+        { status: 409 }
+      );
+    }
+  }
+
   const before = member.discordId ?? null;
   const [updated] = await db
     .update(members)
@@ -120,7 +156,9 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
   await db.insert(logs).values({
     category: "edit",
-    author: auth.user.username ? `Администратор ${auth.user.username}` : "Администратор",
+    // Автор — по флагу администратора, а не по одному username: правку ведёт
+    // и командир, и в журнале должно быть видно, кто именно распорядился
+    author: authorLabel(auth.member),
     action: discordId
       ? `изменил Discord ID на "${discordId}" бойцу ${member.name}`
       : `снял Discord ID бойцу ${member.name}`,

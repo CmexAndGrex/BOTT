@@ -38,12 +38,11 @@ import { applyRoleCommand, parseRoleCommand, parseRoleRequest, COMMON_ROLE_IDS }
 import { moveToReserve, returnFromReserve } from "@/lib/reserve";
 import { parseReviewCustomId, type ReviewAction, type ReviewScope } from "@/lib/reports";
 import {
-  approveRecruitApplication,
+  approveRecruitByKind,
   approveServiceReport,
   rejectRecruitApplication,
   rejectServiceReport,
 } from "@/lib/review";
-import { discordQueue, queueOptionsFromSettings } from "@/lib/discord-queue";
 import { LAST_ROLE_SYNC_KEY, roleSyncSchedule } from "@/lib/role-sync";
 
 declare global {
@@ -57,30 +56,17 @@ declare global {
 }
 
 /* ------------------------------------------------------------------ */
-/* Очередь запросов к Discord: параметры из настроек                    */
+/* Очередь запросов к Discord                                          */
 /* ------------------------------------------------------------------ */
 
-/**
- * Применяет к общей очереди параметры из настроек панели.
- *
- * Нужно, чтобы администратор мог убавить нагрузку, не перезапуская контейнер:
- * настройки читаются на каждом цикле сверки. Ошибка чтения настроек не критична
- * — очередь продолжит работать с текущими параметрами.
+/*
+ * Лимиты Discord (параллелизм, пауза между запросами, число попыток при
+ * 429/5xx) больше не берутся из настроек панели: эти поля убраны из
+ * интерфейса как низкоуровневые — неудачное значение давало 429 по кругу или
+ * «зависшую» на часы сверку. Общая очередь процесса создаётся с
+ * DEFAULT_QUEUE_OPTIONS из src/lib/discord-queue.ts, сама выдерживает
+ * Retry-After от Discord и повторяет запрос с нарастающей задержкой.
  */
-async function applyQueueSettings(): Promise<void> {
-  try {
-    const map = await getSettings();
-    discordQueue().configure(
-      queueOptionsFromSettings({
-        concurrency: map.get("discord_rate_concurrency"),
-        intervalMs: map.get("discord_rate_interval_ms"),
-        attempts: map.get("discord_rate_attempts"),
-      })
-    );
-  } catch {
-    /* настройки недоступны — оставляем текущие параметры очереди */
-  }
-}
 
 /* ------------------------------------------------------------------ */
 /* Загрузка конфигурации бота из настроек панели                        */
@@ -496,7 +482,9 @@ async function handleReviewButton(
     const result =
       parsed.scope === "recruit"
         ? parsed.action === "approve"
-          ? await approveRecruitApplication(parsed.id, reviewer)
+          ? // Решение по виду заявки: возврат из запаса восстанавливает бойца
+            // и переносит строку ШДС, а не зачисляет нового (см. review.ts)
+            await approveRecruitByKind(parsed.id, reviewer)
           : await rejectRecruitApplication(parsed.id, reviewer)
         : parsed.action === "approve"
           ? await approveServiceReport(parsed.id, reviewer)
@@ -629,7 +617,6 @@ async function runRoleSyncCycle(source: string): Promise<void> {
   if (globalThis.__atkRoleSyncRunning) return;
   globalThis.__atkRoleSyncRunning = true;
   try {
-    await applyQueueSettings();
     // Динамический импорт: модуль сверки тянет за собой модуль Discord REST,
     // который не нужен, пока сверка выключена или пока бот ещё не подключился.
     const { syncGuildRoles } = await import("@/lib/role-sync-runtime");
@@ -725,7 +712,6 @@ export function initBot() {
       }
     })();
 
-    applyQueueSettings().catch(() => {});
     startRoleSyncLoop();
   });
 

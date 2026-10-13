@@ -33,13 +33,19 @@ export function normalizeCallsign(value: unknown): string {
  * подчёркивание: в таблице встречаются позывные вида «Скиф», «Гром-2»,
  * «Штурман 1». Спецсимволы и эмодзи отсекаются — они ломают поиск по листу
  * и позволяют создать визуально неотличимый логин.
+ * Позывной должен содержать хотя бы одну букву (не может быть только цифрами).
  */
 export function isCallsign(value: unknown): boolean {
   const callsign = normalizeCallsign(value);
   if (callsign.length < CALLSIGN_MIN_LENGTH || callsign.length > CALLSIGN_MAX_LENGTH) {
     return false;
   }
-  return /^[\wА-Яа-яЁё.\- ]+$/u.test(callsign);
+  // Разрешены буквы, цифры, пробелы, точка, дефис, подчёркивание
+  if (!/^[\wА-Яа-яЁё.\- ]+$/u.test(callsign)) {
+    return false;
+  }
+  // Позывной должен содержать хотя бы одну букву
+  return /[a-zA-ZА-Яа-яЁё]/.test(callsign);
 }
 
 /* ------------------------------------------------------------------ */
@@ -188,6 +194,11 @@ export type ApplicationInput = {
   armaExperience?: unknown;
   specialization?: unknown;
   comment?: unknown;
+  /**
+   * Вид заявки. Для возврата из запаса анкета необязательна: боец уже служил,
+   * и требование спрашивает у него только позывной и ФИО.
+   */
+  kind?: RecruitApplicationKind;
 };
 
 export type ApplicationData = {
@@ -213,28 +224,45 @@ function clip(value: unknown, max: number = APPLICATION_TEXT_MAX): string {
  * Возраст приводится к числу здесь, а не в роуте: из формы он приходит
  * строкой, и такие значения сохранялись бы как «18» — после этого сравнения
  * вида `age < 18` молча работали бы со строкой.
+ *
+ * `kind` меняет набор обязательных полей. Возврат из запаса анкеты не требует:
+ * боец известен, его данные уже в табеле, а требование называет для него лишь
+ * позывной и ФИО (проверяет их роут). Опыт и специализацию при этом сохраняем,
+ * если их заполнили, — они попадают в карточку модерации.
  */
 export function validateApplication(input: ApplicationInput): ApplicationValidation {
   const ageRaw = typeof input.age === "string" ? input.age.trim() : input.age;
   const age = typeof ageRaw === "number" ? ageRaw : Number(ageRaw);
+  const armaExperience = clip(input.armaExperience);
+  const specialization = clip(input.specialization, 100);
+  const comment = clip(input.comment);
+
+  // Анкета возвращающегося: возраст и опыт не спрашиваем (он уже служил)
+  if (input.kind === APPLICATION_KIND_RESERVE_RETURN) {
+    return {
+      ok: true,
+      data: {
+        age: Number.isInteger(age) && age > 0 ? age : AGE_MIN,
+        armaExperience,
+        specialization: specialization || "Возврат из запаса",
+        comment,
+      },
+    };
+  }
+
   if (!Number.isInteger(age) || age < AGE_MIN || age > AGE_MAX) {
     return { ok: false, error: `Возраст: укажите целое число от ${AGE_MIN} до ${AGE_MAX}` };
   }
 
-  const armaExperience = clip(input.armaExperience);
   if (armaExperience.length < 2) {
     return { ok: false, error: "Опыт в Arma 3: заполните поле (например «600 часов, 3 года»)" };
   }
 
-  const specialization = clip(input.specialization, 100);
   if (specialization.length < 2) {
     return { ok: false, error: "Специализация: выберите вариант или впишите свою" };
   }
 
-  return {
-    ok: true,
-    data: { age, armaExperience, specialization, comment: clip(input.comment) },
-  };
+  return { ok: true, data: { age, armaExperience, specialization, comment } };
 }
 
 /**
@@ -264,6 +292,80 @@ export function readApplication(value: unknown): Partial<ApplicationData> {
 
 /** Подпись, которую кандидат видит сразу после отправки рапорта */
 export const PENDING_NOTICE = "Ваш рапорт находится на рассмотрении штаба";
+
+/* ------------------------------------------------------------------ */
+/* Вид заявки: новобранец или возврат из запаса                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Виды заявки на вступление (колонка kind в recruit_applications).
+ *
+ * RECRUIT — обычное зачисление нового бойца, RESERVE_RETURN — возврат из
+ * запаса: бойца не создают заново, а восстанавливают его строку в ШДС
+ * (лист «Запас» → свободная строка «Вакант» подразделения), снимают роль
+ * «Запас» и возвращают прежние роли из колонки AI (у записей старого формата —
+ * из колонки V).
+ *
+ * Значения — единый источник и для формы (/apply), и для модерации, и для
+ * решения: строка, набранная руками в одном месте, разошлась бы с другим.
+ */
+export const RECRUIT_APPLICATION_KINDS = ["recruit", "reserve_return"] as const;
+
+/** Обычное зачисление нового бойца */
+export const APPLICATION_KIND_RECRUIT = "recruit" as const;
+/** Возврат из запаса: восстановление строки в ШДС и прежних ролей */
+export const APPLICATION_KIND_RESERVE_RETURN = "reserve_return" as const;
+
+export type RecruitApplicationKind = (typeof RECRUIT_APPLICATION_KINDS)[number];
+
+/** Значение по умолчанию: заявка без вида — обычное зачисление */
+export const DEFAULT_APPLICATION_KIND: RecruitApplicationKind = "recruit";
+
+export function isRecruitApplicationKind(value: unknown): value is RecruitApplicationKind {
+  return (
+    typeof value === "string" &&
+    (RECRUIT_APPLICATION_KINDS as readonly string[]).includes(value)
+  );
+}
+
+/** Подписи видов заявки: их видит и кандидат в форме, и штаб в модерации */
+export const APPLICATION_KIND_LABELS: Record<RecruitApplicationKind, string> = {
+  recruit: "Новобранец",
+  reserve_return: "Возврат из запаса",
+};
+
+/**
+ * Заголовок заявки для панели модерации и Embed.
+ *
+ * Возврат помечается явной формулировкой из требования — «Запрос на возврат из
+ * запаса», чтобы модератор не принял его за обычное зачисление: решение по
+ * такому запросу двигает строку в Google Таблице, а не создаёт новую.
+ */
+export const APPLICATION_KIND_TITLES: Record<RecruitApplicationKind, string> = {
+  recruit: "Заявка на вступление",
+  reserve_return: "Запрос на возврат из запаса",
+};
+
+export const FULL_NAME_MIN_LENGTH = 5;
+export const FULL_NAME_MAX_LENGTH = 60;
+
+/**
+ * Проверка ФИО для возврата из запаса.
+ *
+ * ФИО обязательно ищется на листе «Запас»: без него строку найти нечем, и
+ * восстановление невозможно. Требования к формату мягкие (буквы, пробел,
+ * точка, дефис) — в табеле встречаются записи вида «Волков Д. В.».
+ */
+export function normalizeFullName(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.trim().replace(/\s+/g, " ").slice(0, FULL_NAME_MAX_LENGTH);
+}
+
+export function isFullName(value: unknown): boolean {
+  const name = normalizeFullName(value);
+  if (name.length < FULL_NAME_MIN_LENGTH || name.length > FULL_NAME_MAX_LENGTH) return false;
+  return /^[\wА-Яа-яЁё.\- ]+$/u.test(name);
+}
 
 /** Подпись для отклонённого рапорта */
 export const DISMISSED_NOTICE =

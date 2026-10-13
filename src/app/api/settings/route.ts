@@ -10,9 +10,38 @@ export const dynamic = "force-dynamic";
 
 const SECRET_KEYS = new Set(["rs_cookie", "discord_token", "gsheet_service_account"]);
 
+/**
+ * Ключи, зафиксированные в коде и потому отбрасываемые из PUT.
+ *
+ * Раньше это были обычные настройки, теперь их значения заданы константами:
+ *   * rs_base_url — адрес сайта подразделения (см. RS_RED_BASE_URL);
+ *   * discord_rate_concurrency / discord_rate_interval_ms /
+ *     discord_rate_attempts — лимиты Discord API (см. DEFAULT_QUEUE_OPTIONS);
+ *   * discord_queue_max_concurrent / discord_queue_pause_ms /
+ *     discord_queue_max_retries — прежние названия тех же лимитов.
+ *
+ * Обратная совместимость: такой PUT не считается ошибкой — лишние поля просто
+ * игнорируются, остальные настройки сохраняются как обычно. Иначе устаревшая
+ * вкладка (открытая в браузере до обновления страницы) получала бы 400 на любую
+ * правку, и администратор не понял бы причину.
+ *
+ * form_enabled («опрос Google-формы») здесь НЕТ намеренно: из интерфейса поле
+ * убрано как рудимент, но сама задача опроса формы жива (см. src/lib/forms.ts).
+ * Ключ остаётся рабочим — его можно выставить напрямую в базе, не ломая модуль.
+ */
+const REMOVED_KEYS = new Set([
+  "rs_base_url",
+  "discord_rate_concurrency",
+  "discord_rate_interval_ms",
+  "discord_rate_attempts",
+  "discord_queue_max_concurrent",
+  "discord_queue_pause_ms",
+  "discord_queue_max_retries",
+]);
+
 const SETTING_NAMES: Record<string, string> = {
   norm_hours: "норму часов", weekly_time: "время проверки онлайн", timezone: "часовой пояс",
-  discord_channel_id: "ID канала Discord", discord_role_id: "ID роли Discord", rs_base_url: "адрес rs-red",
+  discord_channel_id: "ID канала Discord", discord_role_id: "ID роли Discord",
   rs_subdiv_id: "ID подразделения", op_enabled: "статус задачи пингов", weekly_enabled: "статус проверки онлайн",
   op_times: "время пингов", weekly_days: "дни проверки онлайн", op_texts: "тексты для операций",
   op_gifs: "гифки для операций", rs_cookie: "куки rs-red", discord_token: "токен Discord бота",
@@ -22,10 +51,12 @@ const SETTING_NAMES: Record<string, string> = {
   beret_role_id: "ID роли «Берет»",
   command_role_id: "ID роли «Командирский состав»",
   left_members_check: "контроль вышедших из подразделения", left_check_channel_id: "канал пинга о вышедших",
+  roles_monitor_enabled: "контроль снятия ролей у исключённых", roles_monitor_channel_id: "канал уведомлений о неснятых ролях",
+  roles_monitor_delay_hours: "срок ожидания снятия ролей (часов)",
   gsheet_spreadsheet_id: "ID Google-таблицы (ШДС)", gsheet_service_account: "паспорт сервисного аккаунта Google",
   snapshot_enabled: "статус задачи снимка статистики", snapshot_time: "время снимка статистики",
   logs_retention_days: "срок хранения логов (дней)",
-  form_enabled: "опрос Google-формы", form_response_sheet: "лист с ответами формы",
+  form_response_sheet: "лист с ответами формы",
   reserve_role_id: "ID роли «Запас»", reserve_sheet_name: "название листа «Запас»",
   guild_id: "ID сервера Discord",
   allowed_webhook_ids: "разрешённые вебхуки заявок",
@@ -33,9 +64,6 @@ const SETTING_NAMES: Record<string, string> = {
   role_sync_dry_run: "режим проверки сверки ролей",
   role_sync_interval_min: "интервал сверки ролей",
   post_role_map: "соответствие «должность = роль»",
-  discord_rate_concurrency: "число одновременных запросов к Discord",
-  discord_rate_interval_ms: "паузу между запросами к Discord",
-  discord_rate_attempts: "число попыток при лимитах Discord",
 };
 
 export async function GET(req: NextRequest) {
@@ -77,13 +105,18 @@ export async function PUT(req: NextRequest) {
   const changedKeys: string[] = [];
   const detailsObj: Record<string, string> = {};
 
+  // Явно перечисляем отброшенные поля — для журнала и чтобы поведение не
+  // зависело от того, попадёт ли устаревший ключ в DEFAULT_SETTINGS.
+  for (const key of REMOVED_KEYS) {
+    if (key in body) delete body[key];
+  }
+
   for (const key of Object.keys(DEFAULT_SETTINGS)) {
     const raw = body[key];
     if (typeof raw !== "string") continue;
     const value = raw.trim();
 
     if (value.length > 20000) return NextResponse.json({ ok: false, error: `Текст в настройке "${key}" слишком длинный` }, { status: 400 });
-    if (key === "rs_base_url" && value !== "https://rs-red.com" && value !== "") return NextResponse.json({ ok: false, error: "Недопустимый базовый URL" }, { status: 400 });
 
     const humanName = SETTING_NAMES[key] || `настройку "${key}"`;
 

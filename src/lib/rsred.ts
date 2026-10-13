@@ -1,3 +1,13 @@
+/**
+ * Базовый адрес сайта подразделения.
+ *
+ * Зафиксирован в коде осознанно: в настройках панели это поле было лишним —
+ * сайт один и тот же, а неверное значение (опечатка, http вместо https, слэш в
+ * конце) валило синхронизацию состава непонятной ошибкой сети. Смена адреса —
+ * это правка кода, а не поле формы.
+ */
+export const RS_RED_BASE_URL = "https://rs-red.com";
+
 export type RosterMember = {
   pid: string | null;
   handle: string | null;
@@ -23,7 +33,7 @@ export async function fetchRoster(
   baseUrl: string,
   subdivId: string
 ): Promise<RosterResult> {
-  const base = (baseUrl || "https://rs-red.com").replace(/\/+$/, "");
+  const base = (baseUrl || RS_RED_BASE_URL).replace(/\/+$/, "");
   const id = encodeURIComponent(subdivId || "5");
   const url = `${base}/api/subdivision/${id}`;
 

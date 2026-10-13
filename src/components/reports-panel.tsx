@@ -19,8 +19,9 @@ import {
   SHDS_ENTRY_UNITS,
   examCatalog,
   findExam,
-  formExamOptions,
+  formExamGroups,
   formatIsoDate,
+  positionSections,
   reportTypeMeta,
   reviewStatusLabel,
   summarizeReport,
@@ -121,6 +122,9 @@ export function ReportForm({
           />
         )}
         {type === "role" && <RoleForm sending={sending} onSubmit={onSubmit} />}
+        {type === "position_transfer" && (
+          <PositionTransferForm member={member} sending={sending} onSubmit={onSubmit} />
+        )}
         {type === "vacation" && <VacationForm sending={sending} onSubmit={onSubmit} />}
         {type === "reserve" && <ReserveForm sending={sending} onSubmit={onSubmit} />}
         {type === "shds_entry" && <ShdsEntryForm member={member} sending={sending} onSubmit={onSubmit} />}
@@ -193,6 +197,109 @@ function RoleForm({
         />
       </div>
       <FormFooter sending={sending} hint="Штаб подтвердит роль и выдаст её в Discord отдельно" />
+    </form>
+  );
+}
+
+/**
+ * Перевод по должности ШДС.
+ *
+ * Должность выбирается из справочника секций СВОЕГО подразделения
+ * (positionSections): от секции зависит и блок строк листа, куда встанет боец,
+ * и обязательные экзамены. Свободный текст здесь был бы опасен — рапорт мог бы
+ * «перевестить» бойца в командирский блок, который назначает только штаб.
+ *
+ * Командирские ступени из списка исключены на уровне справочника
+ * (positionSections отсеивает isCommand): танкист видит мехвода и
+ * наводчика-оператора, артиллерист — миномётный расчёт, мехвода САУ, наводчика
+ * и расчёт РСЗО. Чужие ступени не показываются ни в одном случае: рапорт
+ * танкиста не должен предлагать «Специалист расчёта РСЗО».
+ *
+ * Требования ступени показываются подсказкой; проверяет их сервер при
+ * одобрении (по одобренным рапортам и закраскам листа).
+ */
+function PositionTransferForm({
+  member,
+  sending,
+  onSubmit,
+}: {
+  member: SessionMember | null;
+  sending: boolean;
+  onSubmit: (type: ServiceReportType, payload: unknown, reset: () => void) => Promise<void> | void;
+}) {
+  const sections = useMemo(() => positionSections(member?.unit ?? null), [member?.unit]);
+  const [section, setSection] = useState(() => sections[0]?.key ?? "");
+  const [comment, setComment] = useState("");
+  const reset = () => {
+    setSection(sections[0]?.key ?? "");
+    setComment("");
+  };
+
+  // Пустой список возможен только у бойца без подразделения: у роты и дивизиона
+  // ступени есть (командирские отсеяны справочником, но не все)
+  if (!sections.length) {
+    return (
+      <div
+        className="rounded-xl px-3 py-2.5 text-[12px] leading-relaxed"
+        style={{ background: "rgba(255,176,32,.08)", color: "var(--amber)" }}
+      >
+        {member?.unit
+          ? `Для подразделения «${member.unit}» перевод по должности не предусмотрен: должности назначает штаб.`
+          : "Подразделение ещё не назначено — список должностей появится после назначения штабом."}
+      </div>
+    );
+  }
+
+  const selected = sections.find((item) => item.key === section) ?? sections[0];
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        void onSubmit("position_transfer", { section, comment }, reset);
+      }}
+      className="flex flex-col gap-4"
+    >
+      <div className="grid grid-cols-1 gap-2">
+        {sections.map((item) => {
+          const active = item.key === selected.key;
+          return (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => setSection(item.key)}
+              className="rounded-xl px-3 py-2.5 text-left"
+              style={{
+                border: `1px solid ${active ? "rgba(190,18,60,.45)" : "var(--stroke-soft)"}`,
+                background: active ? "rgba(190,18,60,.06)" : "transparent",
+                cursor: "pointer",
+              }}
+            >
+              <div className="text-[12.5px] font-semibold">{item.title}</div>
+              <p className="mt-1 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                {item.hint}
+              </p>
+            </button>
+          );
+        })}
+      </div>
+
+      <div>
+        <label className="label mb-1.5 block">Комментарий (необязательно)</label>
+        <textarea
+          className="input w-full"
+          rows={2}
+          value={comment}
+          onChange={(e) => setComment(e.target.value)}
+          placeholder="Обоснование перевода, рекомендации командира"
+          maxLength={REPORT_TEXT_MAX}
+        />
+      </div>
+
+      <FormFooter
+        sending={sending}
+        hint="Строка ШДС переедет в секцию должности вместе с отметками экзаменов; прежнее место освободится"
+      />
     </form>
   );
 }
@@ -294,14 +401,20 @@ function TypePicker({ onPick }: { onPick: (type: ServiceReportType) => void }) {
 }
 
 /**
- * Рапорт на экзамены: пакетный выбор нормативов чекбоксами.
+ * Рапорт на экзамены: пакетный выбор нормативов чекбоксами по блокам листа.
  *
- * Перечень строится formExamOptions() по подразделению бойца — это нормативы
- * каталога листа ШДС: у каждого есть свой столбец, и бот закрашивает его при
- * одобрении рапорта. Производный «Берет» в перечень не входит: он засчитывается
- * автоматически после всех нормативов экзамена на берет. Поле оценки
- * раскрывается только у нормативов, где она предусмотрена (КМБТ — базовый
- * экзамен и сдаётся без оценки: то же правило в gsheets.ts).
+ * Перечень строится formExamGroups() по подразделению бойца: боец видит ТОЛЬКО
+ * нормативы своего листа ШДС, сгруппированные по смысловым блокам сетки
+ * («Механик - Водитель», «Наводчик-Оператор», «от Мл. Сержанта» у роты;
+ * «Допуск на Минометы», «Мех-вод.», «Допуск на САУ + Гаубицы», «Допуск на
+ * РСЗО» у дивизиона). Плоский список из двух подразделений сразу был бы
+ * ошибкой: танкисту предлагались бы РСЗО и БПЛА, а рапорт по ним сервер
+ * отклонил бы.
+ *
+ * Производный «Берет» в перечень не входит: он засчитывается автоматически
+ * после всех нормативов экзамена на берет. Поле оценки раскрывается только у
+ * нормативов, где она предусмотрена (КМБТ — базовый экзамен и сдаётся без
+ * оценки: то же правило в gsheets.ts).
  *
  * `presetExams` — нормативы, отмеченные ещё до открытия формы: так работает
  * кнопка «Сдать норматив» в разделе «Экзамены». Предвыбор применяется как
@@ -323,16 +436,17 @@ function ExamForm({
 }) {
   const catalog = useMemo(() => examCatalog(member?.unit ?? null), [member?.unit]);
   /**
-   * Перечень для отметок: нормативы листа подразделения (в том числе спецкурсы и
-   * экзамен на берет). Производный «Берет» сюда не попадает — он закрывается
-   * автоматически, поэтому кнопку «Сдать норматив» по нему не предлагаем.
+   * Перечень для отметок, разложенный по блокам листа: нормативы подразделения
+   * (в том числе спецкурсы и экзамен на берет). Производный «Берет» сюда не
+   * попадает — он закрывается автоматически, поэтому кнопку «Сдать норматив»
+   * по нему не предлагаем.
    */
-  const options = useMemo(() => formExamOptions(member?.unit ?? null), [member?.unit]);
+  const groups = useMemo(() => formExamGroups(member?.unit ?? null), [member?.unit]);
   /** Выбранные нормативы: код → оценка (пустая строка = без оценки) */
   const [selected, setSelected] = useState<Record<string, string>>(() => {
     // Отмечаем только те предвыбранные названия, что есть в перечне: чужой
     // норматив (например, «РСЗО» у танкиста) валидатор отклонил бы при отправке
-    const allowed = new Set(options.map((exam) => exam.code));
+    const allowed = new Set(groups.flatMap((group) => group.exams.map((exam) => exam.code)));
     const initial: Record<string, string> = {};
     for (const code of presetExams) {
       if (allowed.has(code)) initial[code] = "";
@@ -379,51 +493,66 @@ function ExamForm({
         </p>
       )}
 
-      <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-        {options.map((exam) => {
-          const active = exam.code in selected;
-          return (
-            <div
-              key={exam.code}
-              className="rounded-xl px-3 py-2.5"
-              style={{
-                border: `1px solid ${active ? "rgba(239,68,68,.45)" : "var(--stroke-soft)"}`,
-                background: active ? "rgba(239,68,68,.06)" : "transparent",
-              }}
-            >
-              <label className="flex items-center gap-2.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={active}
-                  onChange={() => toggle(exam.code)}
-                  style={{ width: 15, height: 15, accentColor: "var(--red)" }}
-                />
-                <span className="text-[12.5px]">{exam.code}</span>
-                {!exam.graded && (
-                  <span className="chip ml-auto" style={{ fontSize: "0.62rem" }}>
-                    без оценки
-                  </span>
-                )}
-              </label>
-
-              {/* Поле оценки появляется только у выбранного норматива с оценкой */}
-              {active && exam.graded && (
-                <select
-                  className="select mt-2 w-full"
-                  value={selected[exam.code]}
-                  onChange={(e) => setSelected((prev) => ({ ...prev, [exam.code]: e.target.value }))}
-                >
-                  <option value="">оценка не указана</option>
-                  {EXAM_GRADES.map((grade) => (
-                    <option key={grade} value={grade}>
-                      {grade}
-                    </option>
-                  ))}
-                </select>
-              )}
+      {/* Блоки листа идут по порядку сетки ШДС: боец ищет норматив там же, где
+          видит его столбец в таблице, а не в одном общем списке */}
+      <div className="flex flex-col gap-4">
+        {groups.map((group) => (
+          <div key={group.group} className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <span className="label">{group.group}</span>
+              <span className="mono text-[11px]" style={{ color: "var(--dim)" }}>
+                {group.exams.length}
+              </span>
             </div>
-          );
-        })}
+
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+              {group.exams.map((exam) => {
+                const active = exam.code in selected;
+                return (
+                  <div
+                    key={exam.code}
+                    className="rounded-xl px-3 py-2.5"
+                    style={{
+                      border: `1px solid ${active ? "rgba(190,18,60,.45)" : "var(--stroke-soft)"}`,
+                      background: active ? "rgba(190,18,60,.06)" : "transparent",
+                    }}
+                  >
+                    <label className="flex items-center gap-2.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={active}
+                        onChange={() => toggle(exam.code)}
+                        style={{ width: 15, height: 15, accentColor: "var(--red)" }}
+                      />
+                      <span className="text-[12.5px]">{exam.code}</span>
+                      {!exam.graded && (
+                        <span className="chip ml-auto" style={{ fontSize: "0.62rem" }}>
+                          без оценки
+                        </span>
+                      )}
+                    </label>
+
+                    {/* Поле оценки появляется только у выбранного норматива с оценкой */}
+                    {active && exam.graded && (
+                      <select
+                        className="select mt-2 w-full"
+                        value={selected[exam.code]}
+                        onChange={(e) => setSelected((prev) => ({ ...prev, [exam.code]: e.target.value }))}
+                      >
+                        <option value="">оценка не указана</option>
+                        {EXAM_GRADES.map((grade) => (
+                          <option key={grade} value={grade}>
+                            {grade}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4" style={{ borderColor: "var(--stroke-soft)" }}>

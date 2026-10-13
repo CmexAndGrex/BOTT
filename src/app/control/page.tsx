@@ -32,7 +32,9 @@ export default function ControlPage() {
   const [fighters, setFighters] = useState<Fighter[] | null>(null);
   const [norm, setNorm] = useState(10);
   const [notice, setNotice] = useState<Notice>(null);
-  const [role, setRole] = useState("guest");
+  /** Права из /api/me: считаются общим правилом (resolvePanelRights) */
+  const [isCommander, setIsCommander] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [busyIds, setBusyIds] = useState<Set<number>>(new Set());
 
   const reload = useCallback(async () => {
@@ -43,7 +45,15 @@ export default function ControlPage() {
     ]);
     setFighters(c.data ?? []);
     setNorm(s.norm ?? 10);
-    setRole(me.role || "guest");
+    /**
+     * Права берём из флагов /api/me, а не из «role»: роль сессии панели у
+     * командира подразделения может быть не выставлена вовсе, и тогда он
+     * читался как гость — страница показывала «Доступ запрещен».
+     * Тот же расчёт делает сервер (resolvePanelRights), поэтому проверка
+     * на клиенте и на сервере больше не расходится.
+     */
+    setIsCommander(Boolean(me.isCommander));
+    setIsAdmin(Boolean(me.isAdmin));
   }, []);
 
   useEffect(() => { reload().catch(() => setFighters([])); }, [reload]);
@@ -79,8 +89,18 @@ export default function ControlPage() {
     }
   };
 
-  if (role === "guest") {
-    return <div className="p-10 text-center text-red-500">Доступ запрещен. Только для командиров.</div>;
+  /**
+   * Доступ к разделу «Контроль»: командир (в том числе командир подразделения
+   * по должности со званием) или администратор.
+   *
+   * Проверка по флагам /api/me, а не по «role === guest»: у командира с
+   * сессией кабинета роль панели пустая, и по одному ей он читался гостем —
+   * страница показывала «Доступ запрещен. Только для командиров». Флаги
+   * считает тот же модуль, что и серверный роут /api/control, поэтому клиент
+   * и сервер отвечают одинаково.
+   */
+  if (!isCommander) {
+    return <div className="p-10 text-center font-bold" style={{ color: "var(--red)" }}>Доступ запрещен. Только для командиров.</div>;
   }
 
   // 1. Сортировка бойцов по часам (от большего к меньшему)
@@ -99,7 +119,9 @@ export default function ControlPage() {
     <div className="flex flex-col gap-5">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <div className="eyebrow mb-2">командирская панель // контроль</div>
+          <div className="eyebrow mb-2">
+            командирская панель // контроль{isAdmin ? " // администратор" : ""}
+          </div>
           <h1 className="display text-[34px] font-black leading-tight sm:text-[40px]">Учет онлайна</h1>
           <p className="mt-2 text-sm" style={{ color: "var(--muted)" }}>
             Сводка активности. Выдавайте предупреждения, бот автоматически пинганет должников в Discord.
@@ -109,7 +131,7 @@ export default function ControlPage() {
 
       <AnimatePresence>
         {notice && (
-          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="card flex items-start gap-2.5 px-4 py-3" style={{ borderColor: notice.ok ? "rgba(16,185,129,.4)" : "rgba(239,68,68,.45)" }}>
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="card flex items-start gap-2.5 px-4 py-3" style={{ borderColor: notice.ok ? "rgba(16,185,129,.4)" : "rgba(190,18,60,.45)" }}>
             {notice.ok ? <CheckCircle2 size={16} className="mt-0.5" style={{ color: "var(--green)", flex: "none" }} /> : <XCircle size={16} className="mt-0.5" style={{ color: "var(--red)", flex: "none" }} />}
             <span className="text-[13px]" style={{ color: "var(--muted)" }}>{notice.text}</span>
           </motion.div>
@@ -189,7 +211,7 @@ export default function ControlPage() {
                           
                           <button 
                             className="btn" 
-                            style={{ padding: "0.4rem 0.6rem", fontSize: "0.75rem", background: "var(--red-soft)", color: "#fff", borderColor: "rgba(239,68,68,.5)" }}
+                            style={{ padding: "0.4rem 0.6rem", fontSize: "0.75rem", background: "var(--red-soft)", color: "#fff", borderColor: "rgba(190,18,60,.5)" }}
                             disabled={busyIds.has(f.id)}
                             onClick={() => issueWarning(f.id, 2)}
                           >

@@ -321,7 +321,7 @@ export default function ArmoryPage() {
         </div>
       )}
       {error && (
-        <div className="card flex items-center gap-2.5 px-4 py-3" style={{ borderColor: "rgba(239,68,68,.45)" }}>
+        <div className="card flex items-center gap-2.5 px-4 py-3" style={{ borderColor: "rgba(190,18,60,.45)" }}>
           <span className="text-[13px]" style={{ color: "var(--red)" }}>
             {error}
           </span>
@@ -362,7 +362,7 @@ export default function ArmoryPage() {
             position: "fixed",
             inset: 0,
             zIndex: 60,
-            background: "rgba(3,4,9,.72)",
+            background: "rgba(5,6,8,.74)",
             backdropFilter: "blur(4px)",
             display: "flex",
             justifyContent: "flex-end",
@@ -420,7 +420,7 @@ export default function ArmoryPage() {
             position: "fixed",
             inset: 0,
             zIndex: 70,
-            background: "rgba(3,4,9,.78)",
+            background: "rgba(5,6,8,.80)",
             backdropFilter: "blur(4px)",
             display: "flex",
             justifyContent: "center",

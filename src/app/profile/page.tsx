@@ -329,7 +329,7 @@ function DossierPageInner() {
       {noticeError && (
         <div
           className="card flex items-center gap-2.5 px-4 py-3"
-          style={{ borderColor: "rgba(239,68,68,.45)" }}
+          style={{ borderColor: "rgba(190,18,60,.45)" }}
         >
           <ShieldAlert size={16} style={{ color: "var(--red)" }} />
           <span className="text-[13px]" style={{ color: "var(--red)" }}>

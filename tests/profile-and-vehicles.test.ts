@@ -17,11 +17,14 @@ import {
   allTankVehicles,
   getAvailableVehicles,
   isQualificationPassed,
+  matchesVipFilter,
   nextTankTier,
   normalizeRank,
   rankIndex,
   TANK_RANK_MATRIX,
   vehicleDivision,
+  vipFilterCounts,
+  VEHICLE_VIP_FILTERS,
 } from "@/lib/vehicles.ts";
 import {
   a2sConfig,
@@ -180,6 +183,97 @@ function playerPacket(
 /* Матрица техники: Танковая рота                                      */
 /* ------------------------------------------------------------------ */
 
+describe("Матрица техники: VIP-уровни и требования по званию", () => {
+  test("VIP-уровни описаны у всей техники роты", () => {
+    for (const tier of TANK_RANK_MATRIX) {
+      for (const vehicle of tier.vehicles) {
+        assert.ok(
+          vehicle.vipTier === 0 || vehicle.vipTier === 1 || vehicle.vipTier === 2,
+          `у «${vehicle.name}» не задан уровень VIP`
+        );
+      }
+    }
+  });
+
+  test("реестр VIP 1 и VIP 2 совпадает с гаражом подразделения", () => {
+    const byTier = (tier: 1 | 2): string[] =>
+      allTankVehicles()
+        .filter((vehicle) => vehicle.vipTier === tier)
+        .map((vehicle) => vehicle.name);
+
+    const vip1 = byTier(1);
+    const vip2 = byTier(2);
+
+    for (const fragment of ["Тунгуска", "БМП-3М", "Т-80У (RED)", "Т-90СМ", "Т-90MS Tagil", "Т-15 Армата"]) {
+      assert.ok(hasVehicle(vip1, fragment), `VIP 1 должен содержать «${fragment}»`);
+    }
+    for (const fragment of ["Панцирь-С1", "БМП-3 (VВесна-К/ДБ)", "Т-80УЕ-1 (RED)", "Т-90М «Прорыв»", "Т-14 Армата"]) {
+      assert.ok(hasVehicle(vip2, fragment), `VIP 2 должен содержать «${fragment}»`);
+    }
+  });
+
+  test("минимальное звание проставлено у VIP-техники и у Т-90М", () => {
+    const vehicles = allTankVehicles();
+    const find = (fragment: string) => {
+      const vehicle = vehicles.find((item) => item.name.includes(fragment));
+      assert.ok(vehicle, `в реестре нет «${fragment}»`);
+      return vehicle;
+    };
+
+    assert.equal(find("Тунгуска").requiredRank, "Ефрейтор");
+    assert.equal(find("Т-90СМ").requiredRank, "Старшина");
+    assert.equal(find("Т-80УЕ-1 (RED)").requiredRank, "Прапорщик");
+    assert.equal(find("Т-90М (RED)").requiredRank, "Лейтенант");
+    assert.equal(find("Т-14 Армата").requiredRank, "Ст. Лейтенант");
+    // Базовая техника отдельного требования не несёт: её порог — ступень матрицы
+    assert.equal(find("Т-72Б (1985)").requiredRank, null);
+    assert.equal(find("БТР-80А").vipTier, 0);
+  });
+
+  test("карточка закрытой VIP-машины называет и VIP, и требуемое звание", () => {
+    const report = getAvailableVehicles({ rank: "Рядовой", unit: "Танковая рота" });
+    const tagil = report.locked.find((card) => card.vehicle.name.includes("Т-90MS Tagil"));
+
+    assert.ok(tagil, "Т-90MS Tagil должен быть в списке закрытой техники");
+    assert.equal(tagil?.vehicle.vipTier, 1);
+    assert.equal(tagil?.vehicle.requiredRank, "Лейтенант");
+    assert.deepEqual(tagil?.missing, ["звание Лейтенант"]);
+  });
+
+  test("фильтр VIP отбирает технику и считает счётчики по текущему списку", () => {
+    const report = getAvailableVehicles({ rank: "Ст. Лейтенант", unit: "Танковая рота" });
+    const counts = vipFilterCounts(report.unlocked);
+
+    assert.equal(counts.all, report.unlocked.length, "«Все» — весь список");
+    assert.equal(counts.base + counts.vip1 + counts.vip2, counts.all, "категории не пересекаются");
+    assert.ok(counts.base > 0, "в роте есть базовая техника");
+    assert.ok(counts.vip1 > 0, "в роте есть VIP 1");
+    assert.ok(counts.vip2 > 0, "в роте есть VIP 2");
+
+    const vip2 = report.unlocked.filter((card) => matchesVipFilter(card.vehicle, "vip2"));
+    assert.equal(vip2.length, counts.vip2);
+    assert.ok(vip2.every((card) => card.vehicle.vipTier === 2));
+
+    // «Все» ничего не отсекает: список совпадает с исходным
+    assert.equal(
+      report.unlocked.filter((card) => matchesVipFilter(card.vehicle, "all")).length,
+      counts.all
+    );
+    // Фильтры перечислены в порядке кнопок интерфейса
+    assert.deepEqual([...VEHICLE_VIP_FILTERS], ["all", "base", "vip1", "vip2"]);
+  });
+
+  test("фильтр не смешивает вкладки: закрытая техника фильтруется отдельно", () => {
+    const report = getAvailableVehicles({ rank: "Рядовой", unit: "Танковая рота" });
+    const lockedCounts = vipFilterCounts(report.locked);
+
+    assert.equal(lockedCounts.all, report.locked.length);
+    // У рядового VIP-машины ещё закрыты по званию — они попадают в «Требует повышения»
+    assert.ok(lockedCounts.vip1 > 0);
+    assert.ok(lockedCounts.vip2 > 0);
+  });
+});
+
 describe("Матрица техники: Танковая рота — допуск по званию", () => {
   test("рядовому открыт Т-72Б, но не Т-90М", () => {
     const report = getAvailableVehicles({ rank: "Рядовой", unit: "Танковая рота" });
@@ -240,6 +334,35 @@ describe("Матрица техники: Танковая рота — допу�
     // должен быть именно он, а не лейтенант
     const report = getAvailableVehicles({ rank: "Старшина", unit: "Танковая рота" });
     assert.equal(report.progress.next, "Прапорщик");
+  });
+
+  test("списки открытой и закрытой техники совпадают со статусом карточек", () => {
+    // Регрессия: раньше делили по флагу ступени (tier.unlocked), и Т-90М при
+    // звании Рядовой попадал в «Допуск получен», хотя карточка говорила
+    // «Требуется повышение». Проверяем инвариант для всех званий сразу.
+    for (const rank of ["Курсант", "Рядовой", "Старшина", "Лейтенант", "Ст. Лейтенант"] as const) {
+      const report = getAvailableVehicles({ rank, unit: "Танковая рота" });
+      assert.ok(
+        report.unlocked.every((card) => card.status === "unlocked"),
+        `«${rank}»: в открытом списке только карточки со статусом unlocked`
+      );
+      assert.ok(
+        report.locked.every((card) => card.status !== "unlocked"),
+        `«${rank}»: в закрытом списке только карточки без допуска`
+      );
+      // Ни одна единица не потеряна и не продублирована
+      assert.equal(
+        report.unlocked.length + report.locked.length,
+        allTankVehicles().length,
+        `«${rank}»: все единицы матрицы распределены между списками`
+      );
+    }
+  });
+
+  test("Т-90М у рядового попадает в закрытый список, а не в открытый", () => {
+    const report = getAvailableVehicles({ rank: "Рядовой", unit: "Танковая рота" });
+    assert.equal(hasVehicle(namesOf(report.unlocked), "Т-90М"), false);
+    assert.equal(hasVehicle(namesOf(report.locked), "Т-90М"), true);
   });
 
   test("Курсант без техники: ничего не открыто, но подразделение известно", () => {

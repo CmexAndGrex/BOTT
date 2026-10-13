@@ -157,11 +157,27 @@ describe("PATCH /api/admin/roster/[id]/discord-id — доступ", () => {
     assert.equal(res.status, 401);
   });
 
-  test("роут закрыт для командира: роль admin обязательна", () => {
+  test("роут допускает командира и администратора — единое правило прав", () => {
     const source = read("src/app/api/admin/roster/[id]/discord-id/route.ts");
-    // Требование ТЗ: правка доступна администратору. Роль передаётся в requireRole
-    // явно — ослабление списка должно ломать тест, а не тихо открывать доступ
-    assert.match(source, /requireRole\(req, \["admin"\]\)/);
+    // Требование: правка доступна и администратору, и командиру подразделения.
+    // Гвард берётся из общего модуля прав (requireRosterEditor), а не из
+    // жёсткой роли admin — ослабление или подмена гварда должно ломать тест,
+    // а не тихо открывать доступ.
+    assert.match(source, /requireRosterEditor\(req\)/);
+    assert.equal(
+      /requireRole\(req, \["admin"\]\)/.test(source),
+      false,
+      "в роуте осталась жёсткая проверка роли admin"
+    );
+  });
+
+  test("гвард правки считает права одним правилом с интерфейсом", () => {
+    // Копия правила в двух местах разошлась бы: поле в табеле открыто, а
+    // сервер отвечает 403 (ровно этот рассинхрон и был причиной бага)
+    const source = read("src/lib/member-auth.ts");
+    const fn = source.slice(source.indexOf("export async function requireRosterEditor"));
+    assert.match(fn, /resolvePanelRights\(/, "гвард не использует общее правило прав");
+    assert.match(fn, /canEditRosterDiscordId/, "гвард не проверяет право правки состава");
   });
 
   test("межсайтовый запрос отклоняется собственной проверкой источника", () => {
@@ -219,13 +235,19 @@ describe("Доступ к правке через middleware и адрес ра�
     assert.match(source, /redirect\("\/members"\)/);
   });
 
-  test("страница состава показывает окно правки администратору", () => {
+  test("страница состава показывает окно правки командиру и администратору", () => {
     const source = read("src/app/members/page.tsx");
-    assert.match(source, /isAdmin \? \(/, "нет ветки администратора в колонке");
+    // Окно правки (запись и в панель, и в ШДС) доступно всем, кому разрешена
+    // правка: право приходит флагом из /api/me, а не выводится из роли
+    assert.match(source, /canEditDiscordId \? \(/, "нет ветки правки в колонке");
     assert.match(source, /<DiscordIdCell/);
     assert.match(source, /\/api\/admin\/roster\/\$\{id\}\/discord-id/);
-    // Командиру прежний ввод панели сохраняем: убирать рабочую возможность нельзя
-    assert.match(source, /<DiscordIdInput/);
+    // Право берётся из флагов /api/me: у командира подразделения роль панели
+    // может быть пустой, и по одной ей поле оставалось только для чтения
+    assert.match(source, /setCanEditRosterDiscordId\(Boolean\(me\.isCommander \|\| me\.isAdmin\)\)/);
+    // Колонка видна по тому же признаку: иначе поле было бы скрыто у командира
+    // с ролью «member», у которого права идут от должности
+    assert.match(source, /setCanViewPrivate\(Boolean\(me\.canViewPrivate\)\)/);
   });
 
   test("сводка «Без Discord ID» считается из тех же данных, что и строки", () => {

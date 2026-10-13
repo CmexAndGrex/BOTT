@@ -12,14 +12,15 @@
  * его в чужом канале. Права проверяются и на сервере (/api/members обнуляет
  * поле для не-штаба), поэтому скрытие в разметке — не единственный рубеж.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  CheckCircle2, CloudDownload, Ghost, Link2, Palmtree, RefreshCw,
-  Search, Unlink, Users, XCircle,
+  CalendarDays, CheckCircle2, CloudDownload, Ghost, Palmtree,
+  Search, Users, X, XCircle,
 } from "lucide-react";
-import { Avatar, Section, Spinner, Toggle, fmtDate } from "@/components/ui";
+import { Avatar, Section, Spinner, fmtDate } from "@/components/ui";
 import { DiscordIdCell, type DiscordIdSaveResult } from "@/components/discord-id-cell";
+import { MemberDeleteButton, type MemberDeleteResult } from "@/components/member-delete-button";
 
 /**
  * Строка табеля.
@@ -29,42 +30,11 @@ import { DiscordIdCell, type DiscordIdSaveResult } from "@/components/discord-id
  * — как называется лист), поэтому в типе они обязательны, хотя в разметке
  * строки не показываются.
  */
-type Member = { id: number; name: string; handle: string | null; callsign: string | null; unit: string | null; rankName: string | null; post: string | null; hours: number; vacation: boolean; discordId: string | null; active: boolean; updatedAt: string; };
+type Member = { id: number; name: string; handle: string | null; callsign: string | null; unit: string | null; rankName: string | null; post: string | null; hours: number; vacation: boolean; vacationUntil: string | null; status: string | null; discordId: string | null; active: boolean; updatedAt: string; };
 type Notice = { ok: boolean; text: string } | null;
 
 /** Роли, которым доступны приватные поля состава (панель или кабинет) */
-const STAFF_ROLES = ["admin", "officer"];
-
-/**
- * Поле правки Discord ID для командира панели (без записи в Google Таблицу).
- *
- * Новый путь правки (модальное окно + синхронизация с ШДС) доступен только
- * администратору, поэтому у командира остаётся прежний ввод: он правит привязку
- * в панели через PATCH /api/members/[id]. Убирать эту возможность нельзя — она
- * была и остаётся рабочей, а запись во внешнюю таблицу — отдельное полномочие.
- */
-function DiscordIdInput({ value, onSave }: { value: string; onSave: (v: string) => Promise<void>; }) {
-  const [local, setLocal] = useState(value);
-  const [saving, setSaving] = useState(false);
-  const initial = useRef(value);
-
-  useEffect(() => { setLocal(value); initial.current = value; }, [value]);
-
-  const commit = async () => {
-    if (local === initial.current) return;
-    setSaving(true);
-    try { await onSave(local); } finally { setSaving(false); }
-  };
-
-  return (
-    <div className="relative" style={{ width: 170 }}>
-      <input className="input input-mono" style={{ padding: "0.42rem 2rem 0.42rem 0.7rem", fontSize: "0.76rem" }} placeholder="ID Discord" value={local} disabled={saving} onChange={(e) => setLocal(e.target.value.replace(/[^\d]/g, ""))} onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
-      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2">
-        {saving ? <Spinner /> : local ? <Link2 size={13} style={{ color: "var(--green)" }} /> : <Unlink size={13} style={{ color: "var(--dim)" }} />}
-      </span>
-    </div>
-  );
-}
+const STAFF_ROLES = ["admin", "officer", "commander"];
 
 export default function MembersPage() {
   const [members, setMembers] = useState<Member[] | null>(null);
@@ -75,15 +45,40 @@ export default function MembersPage() {
   const [busyIds, setBusyIds] = useState<Set<number>>(new Set());
   const [syncing, setSyncing] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
+  /** Боец, для которого открыто окно управления отпуском */
+  const [vacationFor, setVacationFor] = useState<Member | null>(null);
+  /** Дата возвращения в черновике окна отпуска (YYYY-MM-DD) */
+  const [vacationUntilDraft, setVacationUntilDraft] = useState("");
+  /** Создаётся ли отпуск (true) или снимается (false) в открытом окне */
+  const [vacationApply, setVacationApply] = useState(true);
   /** Роль сессии панели: guest / officer / admin */
   const [role, setRole] = useState("guest");
+  /** Администратор ли текущий пользователь — из /api/me (право считает сервер) */
+  const [isAdmin, setIsAdmin] = useState(false);
   /** Роль бойца из кабинета: пусто, если кабинет не открыт */
   const [memberRole, setMemberRole] = useState("");
   /**
+   * Правка Discord ID разрешена этому пользователю.
+   *
+   * Значение приходит из /api/me флагом isCommander/isAdmin: права считает
+   * общее правило (resolvePanelRights) с учётом должности и звания из табеля,
+   * а клиент их только отображает. Выводи сам клиент права из роли — и
+   * открытое в интерфейсе поле упиралось бы в 403 на сервере (баг из отчёта).
+   */
+  const [canEditRosterDiscordId, setCanEditRosterDiscordId] = useState(false);
+  /** Разрешено ли видеть приватные поля — из /api/me (право считает сервер) */
+  const [canViewPrivate, setCanViewPrivate] = useState(false);
+  /**
    * Приватные поля состава (Discord ID) видит штаб панели ИЛИ штаб кабинета:
    * командир, вошедший в личный кабинет, тоже ведёт учёт онлайна.
+   *
+   * Учитывается и флаг /api/me: командир подразделения может иметь роль
+   * «member» в табеле и права лишь по должности, и по одной роли колонка
+   * Discord ID осталась бы для него скрытой. Тот же признак считает сервер
+   * (/api/members возвращает поле или null) — интерфейс и API совпадают.
    */
-  const canSeePrivate = STAFF_ROLES.includes(role) || STAFF_ROLES.includes(memberRole);
+  const canSeePrivate =
+    canViewPrivate || STAFF_ROLES.includes(role) || STAFF_ROLES.includes(memberRole);
   /**
    * Правки состава идут через сессию панели (PATCH /api/members/[id] требует
    * requireAuth): бойцу-командиру поле ввода не показываем, иначе он получил бы
@@ -91,11 +86,29 @@ export default function MembersPage() {
    */
   const canEditPanel = STAFF_ROLES.includes(role);
   /**
-   * Правка Discord ID с записью в Google Таблицу ШДС — полномочие администратора
-   * (PATCH /api/admin/roster/[id]/discord-id требует роль admin). Администратор
-   * получает модальное окно в колонке, командир — прежнее поле ввода панели.
+   * Правка Discord ID в табеле.
+   *
+   * Окно с записью в Google Таблицу ШДС раньше видел только администратор, а
+   * командиру оставался ввод старой панели. По требованию поле должны править и
+   * командиры (в том числе командир подразделения по должности), поэтому окно
+   * показываем всем, кому разрешена правка: право спрашиваем у /api/me флагом
+   * canEditRosterDiscordId, а не выводим из роли на клиенте. Сервер проверяет
+   * то же самое (requireRosterEditor) — интерфейс и роут не разойдутся.
+   *
+   * Если флага нет (например, сессия старого образца), остаётся ветка с
+   * canEditPanel: возможность правки в базе панели убирать нельзя.
    */
-  const isAdmin = role === "admin";
+  const canEditDiscordId = canEditRosterDiscordId || canEditPanel;
+  /**
+   * Полное удаление профиля — СТРОГО администратор.
+   *
+   * Флаг isAdmin приходит из /api/me (право считает сервер по обеим сессиям и
+   * по роли из БД), а не выводится из строки роли на клиенте: иначе кнопка
+   * показывалась бы командиру, которому роут отвечает 403. Отдельно от
+   * canEditDiscordId намеренно: правка состава — полномочие командира,
+   * удаление личного дела — только администратора.
+   */
+  const canDeleteMembers = Boolean(isAdmin);
 
   const reload = useCallback(async () => {
     const [m, s, me] = await Promise.all([
@@ -110,7 +123,10 @@ export default function MembersPage() {
      * (правки состава — только панель), а видеть Discord ID вправе обе.
      */
     setRole(me.role || "guest");
+    setIsAdmin(Boolean(me.isAdmin));
     setMemberRole(me.member?.role ?? "");
+    setCanEditRosterDiscordId(Boolean(me.isCommander || me.isAdmin));
+    setCanViewPrivate(Boolean(me.canViewPrivate));
   }, []);
 
   useEffect(() => { reload().catch(() => setMembers([])); }, [reload]);
@@ -121,15 +137,60 @@ export default function MembersPage() {
     return () => clearTimeout(t);
   }, [notice]);
 
+  /**
+   * Полное удаление профиля бойца.
+   *
+   * Строка убирается из таблицы без перезагрузки страницы: сводные карточки
+   * («Активных бойцов», «В отпуске», «Без Discord ID») считаются из того же
+   * массива members, поэтому числа пересчитываются сами. При ошибке список не
+   * трогаем — сервер отказал, значит боец на месте.
+   */
+  const deleteMember = async (id: number, confirmation: string): Promise<MemberDeleteResult> => {
+    setBusyIds((prev) => new Set(prev).add(id));
+    try {
+      const res = await fetch(`/api/admin/members/${id}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        const error = data.error || "Не удалось удалить профиль";
+        setNotice({ ok: false, text: error });
+        return { ok: false, error };
+      }
+      setMembers((prev) => (prev ?? []).filter((m) => m.id !== id));
+      setNotice({ ok: true, text: data.message || "Профиль бойца удалён" });
+      return { ok: true, message: data.message ?? null };
+    } catch {
+      const error = "Сбой сети при удалении профиля";
+      setNotice({ ok: false, text: error });
+      return { ok: false, error };
+    } finally {
+      setBusyIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+    }
+  };
+
   const patch = async (id: number, body: Record<string, unknown>) => {
     setBusyIds((prev) => new Set(prev).add(id));
     try {
       const res = await fetch(`/api/members/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const data = await res.json();
-      if (data.ok) { setMembers((prev) => (prev ?? []).map((m) => (m.id === id ? data.member : m))); } 
+      if (data.ok) { setMembers((prev) => (prev ?? []).map((m) => (m.id === id ? data.member : m))); }
       else { setNotice({ ok: false, text: data.error || "Не удалось сохранить" }); }
-    } catch { setNotice({ ok: false, text: "Сбой сети при сохранении" }); } 
+    } catch { setNotice({ ok: false, text: "Сбой сети при сохранении" }); }
     finally { setBusyIds((prev) => { const next = new Set(prev); next.delete(id); return next; }); }
+  };
+
+  /** Подтверждение окна отпуска: ставит или снимает отпуск с датой возврата */
+  const confirmVacation = async () => {
+    if (!vacationFor) return;
+    const until = vacationApply ? vacationUntilDraft.trim() : null;
+    await patch(vacationFor.id, {
+      vacation: vacationApply,
+      vacationUntil: until || null,
+    });
+    setVacationFor(null);
   };
 
   /**
@@ -214,8 +275,8 @@ export default function MembersPage() {
     { label: "Активных бойцов", value: active.length, icon: Users, tint: "#7c9aff" },
     { label: "В отпуске", value: onVacation, icon: Palmtree, tint: "#ffb020" },
     ...(canSeePrivate
-      ? [{ label: "Без Discord ID", value: withoutDiscord, icon: Ghost, tint: "#ef4444" }]
-      : [{ label: "Выбывших в списке", value: all.length - active.length, icon: Ghost, tint: "#ef4444" }]),
+      ? [{ label: "Без Discord ID", value: withoutDiscord, icon: Ghost, tint: "#be123c" }]
+      : [{ label: "Выбывших в списке", value: all.length - active.length, icon: Ghost, tint: "#be123c" }]),
   ];
 
   return (
@@ -241,7 +302,7 @@ export default function MembersPage() {
 
       <AnimatePresence>
         {notice && (
-          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="card flex items-start gap-2.5 px-4 py-3" style={{ borderColor: notice.ok ? "rgba(16,185,129,.4)" : "rgba(239,68,68,.45)" }}>
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="card flex items-start gap-2.5 px-4 py-3" style={{ borderColor: notice.ok ? "rgba(16,185,129,.4)" : "rgba(190,18,60,.45)" }}>
             {notice.ok ? <CheckCircle2 size={16} className="mt-0.5" style={{ color: "var(--green)", flex: "none" }} /> : <XCircle size={16} className="mt-0.5" style={{ color: "var(--red)", flex: "none" }} />}
             <span className="text-[13px]" style={{ color: "var(--muted)" }}>{notice.text}</span>
           </motion.div>
@@ -265,7 +326,7 @@ export default function MembersPage() {
         }
       >
         <div className="flex flex-wrap items-center gap-2 px-5 pt-4">
-          <button className={`chip ${onlyDebtors ? "" : ""}`} style={onlyDebtors ? { borderColor: "rgba(239,68,68,.5)", background: "var(--red-soft)", color: "#fff" } : { cursor: "pointer" }} onClick={() => setOnlyDebtors((v) => !v)}><span className={`dot ${onlyDebtors ? "dot-err" : "dot-dim"}`} />Только должники (&lt; {norm} ч)</button>
+          <button className={`chip ${onlyDebtors ? "" : ""}`} style={onlyDebtors ? { borderColor: "rgba(190,18,60,.5)", background: "var(--red-soft)", color: "#fff" } : { cursor: "pointer" }} onClick={() => setOnlyDebtors((v) => !v)}><span className={`dot ${onlyDebtors ? "dot-err" : "dot-dim"}`} />Только должники (&lt; {norm} ч)</button>
           <button className="chip" style={showInactive ? { borderColor: "rgba(255,176,32,.5)", background: "var(--amber-soft)", color: "#fff" } : { cursor: "pointer" }} onClick={() => setShowInactive((v) => !v)}><span className={`dot ${showInactive ? "dot-warn" : "dot-dim"}`} />Показать выбывших</button>
         </div>
 
@@ -275,7 +336,7 @@ export default function MembersPage() {
           ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center gap-2 py-12 text-center"><Users size={20} style={{ color: "var(--dim)" }} /><p className="text-sm" style={{ color: "var(--muted)" }}>{all.length === 0 ? "Состав пуст — нажмите «Синхронизировать с rs-red.com»" : "Никого не найдено по фильтрам"}</p></div>
           ) : (
-            <table className="tbl" style={{ minWidth: canSeePrivate ? 900 : 680 }}>
+            <table className="tbl" style={{ minWidth: (canSeePrivate ? 900 : 680) + (canDeleteMembers ? 70 : 0) }}>
               <thead><tr>
                 <th>Позывной</th>
                 <th>Звание / должность</th>
@@ -283,6 +344,8 @@ export default function MembersPage() {
                 {/* Discord ID — рабочая колонка штаба: по ней бот пингует человека */}
                 {canSeePrivate && <th>Discord ID</th>}
                 <th style={{ textAlign: "center" }}>Статус</th>
+                {/* Колонка необратимых действий — только администратору */}
+                {canDeleteMembers && <th style={{ textAlign: "center" }}>Действия</th>}
               </tr></thead>
               <tbody>
                 {filtered.map((m) => {
@@ -306,13 +369,11 @@ export default function MembersPage() {
                           чтения (без обмана) */}
                       {canSeePrivate && (
                         <td>
-                          {isAdmin ? (
+                          {canEditDiscordId ? (
                             <DiscordIdCell
                               member={{ id: m.id, name: m.name, callsign: m.callsign, unit: m.unit, discordId: m.discordId }}
                               onSave={saveDiscordId}
                             />
-                          ) : canEditPanel ? (
-                            <DiscordIdInput value={m.discordId ?? ""} onSave={(v) => patch(m.id, { discordId: v })} />
                           ) : (
                             <span className="mono text-[12.5px]" style={{ color: m.discordId ? "var(--text)" : "var(--dim)" }}>
                               {m.discordId || "—"}
@@ -323,19 +384,49 @@ export default function MembersPage() {
 
                       <td style={{ textAlign: "center" }}>
                         <div className="inline-flex items-center justify-center gap-2">
-                          {!m.active ? (
-                            <span className="badge badge-red">выбыл</span>
+                          {m.status === "dismissed" ? (
+                            <span className="badge badge-reserve">в резерве</span>
                           ) : m.vacation ? (
-                            <span className="badge badge-amber"><Palmtree size={12} className="mr-1" style={{ display: 'inline-block' }} /> в отпуске</span>
+                            <span className="badge badge-info" title={m.vacationUntil ? `До ${fmtDate(m.vacationUntil)}` : undefined}>
+                              <Palmtree size={12} className="mr-1" style={{ display: 'inline-block' }} />
+                              в отпуске
+                              {m.vacationUntil ? ` · до ${fmtDate(m.vacationUntil)}` : null}
+                            </span>
                           ) : (
                             <span className="badge badge-green">в строю</span>
                           )}
-                          {/* Тумблер отпуска — рабочий инструмент штаба панели */}
+                          {/* Управление отпуском — штатная кнопка для офицеров:
+                              вместо слепого тумблера открывает окно с датой возврата */}
                           {canEditPanel && (
-                            <Toggle on={m.vacation} disabled={busyIds.has(m.id)} color="rgba(255,176,32,.9)" onChange={(v) => patch(m.id, { vacation: v })} />
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-icon"
+                              title={m.vacation ? "Снять отпуск" : "В отпуск"}
+                              aria-label={m.vacation ? `Снять отпуск бойцу ${m.name}` : `Отправить ${m.name} в отпуск`}
+                              disabled={busyIds.has(m.id)}
+                              onClick={() => {
+                                setVacationFor(m);
+                                setVacationApply(!m.vacation);
+                                setVacationUntilDraft(m.vacationUntil ? m.vacationUntil.slice(0, 10) : "");
+                              }}
+                            >
+                              {m.vacation ? <X size={13} /> : <Palmtree size={13} />}
+                            </button>
                           )}
                         </div>
                       </td>
+
+                      {/* Полное удаление профиля: кнопка рендерится только
+                          администратору (canDeleteMembers из /api/me), а окно
+                          подтверждения требует ввести позывной бойца */}
+                      {canDeleteMembers && (
+                        <td style={{ textAlign: "center" }}>
+                          <MemberDeleteButton
+                            member={{ id: m.id, name: m.name, callsign: m.callsign }}
+                            onDelete={deleteMember}
+                          />
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -344,6 +435,81 @@ export default function MembersPage() {
           )}
         </div>
       </Section>
+
+      {/* Окно управления отпуском: офицер задаёт дату возврата, а не просто
+          щёлкает тумблер. Правка уходит PATCH /api/members/[id] под гвардом
+          requireRosterEditor — тем же правилом, что разрешает кнопку в строке. */}
+      <AnimatePresence>
+        {vacationFor && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4"
+            style={{ background: "var(--overlay)", backdropFilter: "blur(4px)" }}
+            onClick={() => setVacationFor(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Отпуск бойца ${vacationFor.name}`}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 14 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 14 }}
+              transition={{ type: "spring", stiffness: 380, damping: 30 }}
+              className="card my-10 w-full max-w-[420px]"
+              style={{ background: "var(--modal)", backdropFilter: "blur(14px)", borderColor: "rgba(255,176,32,0.3)" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <header className="flex items-center justify-between gap-3 border-b px-5 py-4" style={{ borderColor: "var(--stroke-soft)" }}>
+                <div>
+                  <div className="label mb-0.5">состав // отпуск</div>
+                  <h2 className="display text-[14px] font-bold">{vacationFor.name}</h2>
+                </div>
+                <button type="button" onClick={() => setVacationFor(null)} className="btn btn-sm btn-icon" title="Закрыть" aria-label="Закрыть окно">
+                  <X size={14} />
+                </button>
+              </header>
+
+              <div className="flex flex-col gap-4 px-5 py-4">
+                <p className="text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
+                  {vacationApply
+                    ? "Боец исключается из пингов на время отпуска. Укажите дату возвращения."
+                    : "Боец возвращается в строй и снова включается в пинги."}
+                </p>
+
+                {vacationApply && (
+                  <label className="flex flex-col gap-1.5">
+                    <span className="label">Дата возвращения</span>
+                    <input
+                      className="input"
+                      type="date"
+                      value={vacationUntilDraft}
+                      onChange={(e) => setVacationUntilDraft(e.target.value)}
+                      aria-label="Дата возвращения из отпуска"
+                    />
+                  </label>
+                )}
+
+                <div className="flex items-center justify-end gap-2">
+                  <button type="button" className="btn" onClick={() => setVacationFor(null)} disabled={busyIds.has(vacationFor.id)}>
+                    Отмена
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={busyIds.has(vacationFor.id)}
+                    onClick={() => void confirmVacation()}
+                  >
+                    {busyIds.has(vacationFor.id) ? <Spinner /> : <CalendarDays size={15} />}
+                    {vacationApply ? "Отправить в отпуск" : "Вернуть в строй"}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

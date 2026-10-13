@@ -162,7 +162,7 @@ return (
         <div>
           <div className="eyebrow mb-2">штаб // модерация</div>
           <h1 className="display text-[30px] font-black leading-tight flex items-center gap-3">
-            <ClipboardCheck className="text-red-500" size={32} /> Рапорты новобранцев
+            <ClipboardCheck style={{ color: "var(--red)" }} size={32} /> Рапорты новобранцев
           </h1>
           <p className="mt-2 text-sm" style={{ color: "var(--muted)" }}>
             Проверьте анкету, назначьте звание и подразделение — одобрение сразу дописывает бойца
@@ -175,7 +175,7 @@ return (
       </header>
 
       {error && (
-        <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+        <div className="alert-red flex items-start gap-2 rounded-xl px-3 py-2 text-sm">
           <ShieldAlert size={16} style={{ flex: "none", marginTop: 2 }} />
           <span>{error}</span>
         </div>
@@ -201,7 +201,7 @@ return (
             className="btn btn-sm"
             style={
               filter === item.key
-                ? { borderColor: "rgba(239,68,68,.5)", background: "var(--red-soft)", color: "#fff" }
+                ? { borderColor: "rgba(190,18,60,.5)", background: "var(--red-soft)", color: "#fff" }
                 : undefined
             }
           >
@@ -355,7 +355,7 @@ return (
                   style={{
                     color: "var(--red)",
                     borderColor: "transparent",
-                    background: "rgba(239,68,68,0.1)",
+                    background: "rgba(190,18,60,0.1)",
                   }}
                 >
                   <ThumbsDown size={14} /> Отклонить

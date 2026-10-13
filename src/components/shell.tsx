@@ -110,6 +110,14 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { openReport } = useReportLauncher();
   const [role, setRole] = useState("guest");
+  /**
+   * Права из /api/me. Роль сессии панели у командира подразделения может быть
+   * не выставлена вовсе (он работает из кабинета), и по одной ей он читался
+   * гостем: секция «УПРАВЛЕНИЕ» с пунктом «Контроль» тогда не появлялась.
+   * Флаги считает общее правило (resolvePanelRights) — на сервере и здесь.
+   */
+  const [isCommander, setIsCommander] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
   /** Логин учётной записи панели — нужен в карточке пользователя у штаба */
   const [username, setUsername] = useState<string | null>(null);
   const [member, setMember] = useState<{ callsign: string; status: string; statusLabel: string } | null>(null);
@@ -135,6 +143,8 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
       .then(r => r.json())
       .then(d => {
         setRole(d.role || "guest");
+        setIsCommander(Boolean(d.isCommander));
+        setIsAdmin(Boolean(d.isAdmin));
         setUsername(d.username ?? null);
         setMember(d.member || null);
         setCabinet(d.cabinet || "no_session");
@@ -160,7 +170,16 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
     window.location.href = member && role === "guest" ? "/login" : "/";
   };
 
-  const isStaff = role === "officer" || role === "admin";
+  /**
+   * Штаб: командир (в том числе командир подразделения по должности и званию)
+   * или администратор.
+   *
+   * Раньше проверялась только роль сессии панели — командир с сессией кабинета
+   * штабом не считался, и пункт «Контроль» из секции «УПРАВЛЕНИЕ» был ему
+   * недоступен. Флаги приходят из /api/me и считаются тем же правилом, что и
+   * на сервере.
+   */
+  const isStaff = isCommander || isAdmin;
 
   /**
    * Меню сайдбара: две группы вместо одного длинного списка.
@@ -209,9 +228,11 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
   const staffNav: NavItem[] = [
     { href: "/admin/reports", label: "Модерация рапортов", icon: Inbox },
     { href: "/logs", label: "Журнал", icon: ScrollText },
+    // «Контроль» — рабочий раздел командира: пункт виден всем, кому разрешён
+    // сам раздел (флаг isCommander из /api/me), а не только администратору
     { href: "/control", label: "Контроль", icon: ShieldAlert },
     // Настройки — только администратор (то же правило проверяет /api/settings)
-    ...(role === "admin" ? [{ href: "/settings", label: "Настройки", icon: Settings2 }] : []),
+    ...(isAdmin ? [{ href: "/settings", label: "Настройки", icon: Settings2 }] : []),
   ];
 
   /**
@@ -251,7 +272,6 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
   if (pathname === "/cookie-bridge") {
     return (
       <>
-        <div className="fx-bg fx-grid" />
         <div className="fx-bg fx-glow-red" />
         <div className="fx-bg fx-noise" />
         <div className="relative z-10">{children}</div>
@@ -263,9 +283,10 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
     <>
       {/* Фоновое слайд-шоу — поддерживает зацикливание и кроссфейд */}
       <BackgroundSlideshow />
-      <div className="fx-bg fx-grid" />
+      {/* Слой fx-grid (квадратная сетка) удалён: фон держат арт-обои и
+          радиальная виньетка. Синий отсвет fx-glow-blue тоже убран — палитра
+          осталась графитовой с бордовым акцентом */}
       <div className="fx-bg fx-glow-red" />
-      <div className="fx-bg fx-glow-blue" />
       <div className="fx-bg fx-noise" />
 
       <aside className="sidebar">
@@ -276,7 +297,8 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
             style={{
               width: 68,
               height: 68,
-              boxShadow: "0 0 35px 10px rgba(239,68,68,0.18)",
+              /* Бордовый неоновый отсвет вокруг круглого логотипа */
+              boxShadow: "var(--red-glow), 0 0 35px 10px rgba(190,18,60,0.18)",
               borderRadius: "50%",
               overflow: "hidden"
             }}
@@ -288,7 +310,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
             />
           </div>
           <div className="flex-1 text-center pr-3">
-            <div className="display text-[20px] font-bold tracking-widest text-white">ATK&nbsp;RED</div>
+            <div className="display text-[20px] font-bold tracking-widest" style={{ color: "var(--text)" }}>ATK&nbsp;RED</div>
           </div>
         </Link>
 
@@ -432,7 +454,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
                 className="btn btn-sm btn-icon"
                 title="Выйти из аккаунта"
                 aria-label="Выйти из аккаунта"
-                style={{ color: "var(--red)", borderColor: "transparent", background: "rgba(239,68,68,0.1)" }}
+                style={{ color: "var(--red)", borderColor: "transparent", background: "rgba(190,18,60,0.1)" }}
               >
                 <LogOut size={14} />
               </button>
@@ -465,7 +487,7 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
               key={item.href}
               href={item.href}
               className="btn btn-sm"
-              style={active ? { borderColor: "rgba(239,68,68,.5)", background: "var(--red-soft)", color: "#fff" } : undefined}
+              style={active ? { borderColor: "rgba(190,18,60,.5)", background: "var(--red-soft)", color: "#fff" } : undefined}
             >
               {item.label}
             </Link>

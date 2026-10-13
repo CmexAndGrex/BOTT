@@ -1,49 +1,39 @@
 "use client";
 
+/**
+ * Страница настроек: контейнер вкладок.
+ *
+ * Роль этого файла — только каркас: заголовок, таб-бар, кнопка сохранения и
+ * всплывающее уведомление. Состояние настроек и вся логика сохранения тоже
+ * здесь, потому что «Сохранить всё» одно на страницу и отправляет один
+ * PUT /api/settings со всей картой значений — вкладки лишь делят разметку, а не
+ * данные. Так настройки, разложенные по вкладкам, сохраняются одной кнопкой, и
+ * переключение вкладки не может «потерять» правки из соседней.
+ *
+ * Разметка разнесена по компонентам вкладок:
+ *   * integrations-tab.tsx — Discord, Google Таблица, rs-red.com, расширение;
+ *   * scheduler-tab.tsx    — задачи №1–5 и сводка автоматики;
+ *   * content-tab.tsx      — тексты пингов, гифки, карта должностей;
+ *   * maintenance-tab.tsx  — сверка ролей и панель обслуживания с копиями.
+ *
+ * Активная вкладка хранится в адресе (?tab=…): ссылкой можно поделиться, а
+ * перезагрузка страницы не сбрасывает выбранный раздел.
+ */
 import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { CheckCircle2, Save, XCircle } from "lucide-react";
+import { Spinner } from "@/components/ui";
 import {
-  AlarmClockCheck,
-  Bot,
-  CalendarClock,
-  CheckCircle2,
-  Copy,
-  Cookie,
-  Download,
-  FileText,
-  KeyRound,
-  Link2,
-  Puzzle,
-  RefreshCw,
-  Save,
-  ShieldCheck,
-  XCircle,
-} from "lucide-react";
-import { Section, Spinner, Toggle, fmtDateLong } from "@/components/ui";
-import MaintenancePanel from "@/components/maintenance-panel";
-
-const DAY_OPTIONS = [
-  { n: 1, label: "Пн" },
-  { n: 2, label: "Вт" },
-  { n: 3, label: "Ср" },
-  { n: 4, label: "Чт" },
-  { n: 5, label: "Пт" },
-  { n: 6, label: "Сб" },
-  { n: 0, label: "Вс" },
-];
-
-const TIMEZONES = [
-  "Europe/Moscow",
-  "Europe/Kyiv",
-  "Europe/Minsk",
-  "Europe/Kaliningrad",
-  "Asia/Yekaterinburg",
-  "Asia/Novosibirsk",
-  "Asia/Vladivostok",
-  "UTC",
-];
-
-type SettingsState = Record<string, string>;
+  SettingsTabBar,
+  SettingsTabPanel,
+  SETTINGS_TABS,
+  useSettingsTab,
+  type SettingsState,
+} from "@/components/settings/tabs";
+import IntegrationsTab from "@/components/settings/integrations-tab";
+import SchedulerTab from "@/components/settings/scheduler-tab";
+import ContentTab from "@/components/settings/content-tab";
+import MaintenanceTab from "@/components/settings/maintenance-tab";
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<SettingsState | null>(null);
@@ -55,6 +45,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  const [tab, setTab] = useSettingsTab();
 
   useEffect(() => {
     setOrigin(window.location.origin);
@@ -121,6 +112,13 @@ export default function SettingsPage() {
     set("weekly_days", next.sort((a, b) => a - b).join(","));
   };
 
+  /**
+   * Сохранение всей карты настроек.
+   *
+   * Отправляем целиком, а не «только текущую вкладку»: роут сравнивает значения
+   * со старыми и пишет в журнал ровно то, что изменилось, поэтому лишние поля
+   * ничего не портят, зато правки с разных вкладок не теряются.
+   */
   const save = async () => {
     if (!settings) return;
     setSaving(true);
@@ -162,6 +160,8 @@ export default function SettingsPage() {
     }
   };
 
+  const current = SETTINGS_TABS.find((t) => t.id === tab) ?? SETTINGS_TABS[0];
+
   if (!settings) {
     return (
       <div className="flex flex-col gap-4">
@@ -171,17 +171,6 @@ export default function SettingsPage() {
       </div>
     );
   }
-
-  const tokenState = settings.discord_token
-    ? "в базе"
-    : env?.hasToken
-      ? "из окружения"
-      : "не задан";
-  const cookieState = settings.rs_cookie
-    ? "в базе"
-    : env?.hasCookie
-      ? "из окружения"
-      : "не задана";
 
   return (
     <div className="flex flex-col gap-5">
@@ -206,7 +195,7 @@ export default function SettingsPage() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
             className="card flex items-center gap-2.5 px-4 py-3"
-            style={{ borderColor: notice.ok ? "rgba(16,185,129,.4)" : "rgba(239,68,68,.45)" }}
+            style={{ borderColor: notice.ok ? "rgba(16,185,129,.4)" : "rgba(190,18,60,.45)" }}
           >
             {notice.ok ? (
               <CheckCircle2 size={16} style={{ color: "var(--green)" }} />
@@ -220,808 +209,49 @@ export default function SettingsPage() {
         )}
       </AnimatePresence>
 
-      <div className="grid gap-5 lg:grid-cols-2">
-        {/* Discord */}
-        <Section
-          title="Discord"
-          eyebrow="токен · канал · роль"
-          action={
-            <span className="chip">
-              <span
-                className={`dot ${tokenState === "не задан" ? "dot-err pulse-dot" : "dot-ok"}`}
-              />
-              токен: {tokenState}
-            </span>
-          }
-        >
-          <div className="flex flex-col gap-4 px-5 py-5">
-            <div>
-              <div className="label mb-1.5">Токен бота</div>
-              <input
-                className="input input-mono"
-                placeholder="MTIz… из Discord Developer Portal → Bot → Token"
-                value={settings.discord_token}
-                onChange={(e) => set("discord_token", e.target.value)}
-                spellCheck={false}
-              />
-              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                Хранится в базе и используется только для запросов к api.discord.com. Если поле
-                пустое — берётся переменная окружения <span className="kbd">DISCORD_BOT_TOKEN</span>.
-              </p>
-            </div>
-            <div>
-              <div className="label mb-1.5">ID канала для пингов</div>
-              <input
-                className="input input-mono"
-                placeholder="например 1185432109876543210"
-                value={settings.discord_channel_id}
-                onChange={(e) => set("discord_channel_id", e.target.value.replace(/[^\d]/g, ""))}
-              />
-              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                ПКМ по каналу → «Копировать ID канала» (нужен режим разработчика в Discord).
-              </p>
-            </div>
-            <div>
-              <div className="label mb-1.5">ID роли для пинга на операцию</div>
-              <input
-                className="input input-mono"
-                placeholder="например 1185432109876543999"
-                value={settings.discord_role_id}
-                onChange={(e) => set("discord_role_id", e.target.value.replace(/[^\d]/g, ""))}
-              />
-              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                Настройки сервера → Роли → ПКМ по роли → «Копировать ID роли».
-              </p>
-            </div>
-            <hr className="divider" />
-            <div className="flex items-start gap-2.5 text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
-              <Bot size={14} className="mt-0.5 flex-none" style={{ color: "var(--red)" }} />
-              <span>
-                У бота на сервере должны быть права: отправка сообщений, встраивание ссылок,
-                добавление реакций. Замаскированное значение при сохранении не затирает старое.
-              </span>
-            </div>
-          </div>
-        </Section>
-
-        {/* Бот заявок: ШДС / отпуск + Google Таблица */}
-        <Section
-          title="Бот заявок и Google Таблица"
-          eyebrow="ШДС · отпуск · gsheets"
-          action={
-            <span className="chip">
-              <Bot size={12} />
-              заявки: {settings.shds_channel_id ? "ШДС" : "—"}
-              {settings.vacation_channel_id ? " + отпуск" : ""}
-            </span>
-          }
-        >
-          <div className="flex flex-col gap-4 px-5 py-5">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="label mb-1.5">ID канала заявок ШДС (SHDS_CHANNEL_ID)</div>
-                <input
-                  className="input input-mono"
-                  placeholder="например 1085141850966458519"
-                  value={settings.shds_channel_id}
-                  onChange={(e) => set("shds_channel_id", e.target.value.replace(/[^\d]/g, ""))}
-                />
-              </div>
-              <div>
-                <div className="label mb-1.5">ID канала заявок на отпуск (VACATION_CHANNEL_ID)</div>
-                <input
-                  className="input input-mono"
-                  placeholder="например 1085141850966458519"
-                  value={settings.vacation_channel_id}
-                  onChange={(e) => set("vacation_channel_id", e.target.value.replace(/[^\d]/g, ""))}
-                />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="label mb-1.5">
-                  ID канала заявок на вступление (RECRUITS_CHANNEL_ID)
-                </div>
-                <input
-                  className="input input-mono"
-                  placeholder="пусто — публикуется в канал ШДС"
-                  value={settings.recruits_channel_id}
-                  onChange={(e) => set("recruits_channel_id", e.target.value.replace(/[^\d]/g, ""))}
-                />
-                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-                  Сюда приходят заявки с формы /apply — с кнопками «Одобрить / Отклонить».
-                </p>
-              </div>
-              <div>
-                <div className="label mb-1.5">ID канала рапортов состава (REPORTS_CHANNEL_ID)</div>
-                <input
-                  className="input input-mono"
-                  placeholder="пусто — публикуется в канал ШДС"
-                  value={settings.reports_channel_id}
-                  onChange={(e) => set("reports_channel_id", e.target.value.replace(/[^\d]/g, ""))}
-                />
-                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-                  Рапорты бойцов (экзамены, отпуск, резерв, специальность, ШДС). Сама очередь
-                  всегда доступна штабу: <span className="kbd">/admin/reports</span>.
-                </p>
-              </div>
-            </div>
-            <div>
-              <div className="label mb-1.5">ID канала запросов ролей (ROLES_CHANNEL_ID)</div>
-              <input
-                className="input input-mono"
-                placeholder="например 1090516508725215253"
-                value={settings.roles_channel_id}
-                onChange={(e) => set("roles_channel_id", e.target.value.replace(/[^\d]/g, ""))}
-              />
-              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                В этом канале бот принимает команды вида <b>«Выдать Капитан ТР, снять Друг АТК»</b>.
-                Формат сообщения: <span className="kbd">@получатель</span>,{" "}
-                <span className="kbd">@экзаменатор</span>, затем команда со списком ролей
-                (несколько через запятую, «Выдать …» и «Снять …» в одном сообщении).
-              </p>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="label mb-1.5">ID роли модератора заявок</div>
-                <input
-                  className="input input-mono"
-                  value={settings.moderator_role_id}
-                  onChange={(e) => set("moderator_role_id", e.target.value.replace(/[^\d]/g, ""))}
-                />
-                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-                  Всегда может подтверждать/отклонять заявки.
-                </p>
-              </div>
-              <div>
-                <div className="label mb-1.5">ID роли «Отпуск»</div>
-                <input
-                  className="input input-mono"
-                  value={settings.leave_role_id}
-                  onChange={(e) => set("leave_role_id", e.target.value.replace(/[^\d]/g, ""))}
-                />
-              </div>
-            </div>
-            <div>
-              <div className="label mb-1.5">ID роли «Берет»</div>
-              <input
-                className="input input-mono"
-                placeholder="пусто — роль ищется на сервере по имени «Берет»"
-                value={settings.beret_role_id}
-                onChange={(e) => set("beret_role_id", e.target.value.replace(/[^\d]/g, ""))}
-              />
-              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                Выдаётся автоматически, когда боец сдал все четыре норматива экзамена на берет
-                («Топография», «Связь», «Строевая подготовка», «Должностные лица»): столбец
-                «Берет» в ШДС закрашивается сам, а сверка ролей надевает роль. Снимается, если
-                берет больше не подтверждён. Роль ищется по имени, ID нужен только при
-                нестандартном названии.
-              </p>
-            </div>
-            <div>
-              <div className="label mb-1.5">Разрешённые вебхуки заявок (ID через запятую)</div>
-              <input
-                className="input input-mono"
-                placeholder="например 1085141850966458519, 1090516508725215253"
-                value={settings.allowed_webhook_ids}
-                onChange={(e) => set("allowed_webhook_ids", e.target.value)}
-              />
-              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                Заявки приходят в каналы ШДС/отпуска от вебхуков Discord. Бот выполняет
-                только сообщения вебхуков из этого списка — так поддельная заявка от
-                постороннего вебхука не будет принята. ID вебхука виден в его URL
-                (Discord: Настройки канала → Интеграции → Вебхуки).
-                <b> Если список пуст, заявки от вебхуков не принимаются вообще.</b>
-              </p>
-            </div>
-            <hr className="divider" />
-            <div className="label">Сверка ролей Discord с базой панели</div>
-            <p className="text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-              Бот сверяет звания, подразделения, отпуск и должности бойцов с ролями на
-              сервере и приводит их в соответствие. Кастомные роли («Игроман», «Модератор»)
-              не трогаются, роли ботов — тоже. По умолчанию сверка выключена: сначала
-              посмотрите отчёт в режиме проверки, чтобы увидеть, что именно будет изменено.
-            </p>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="flex items-center gap-3">
-                  <span className="label">вкл</span>
-                  <Toggle
-                    on={settings.role_sync_enabled === "true"}
-                    onChange={(v) => set("role_sync_enabled", v ? "true" : "false")}
-                  />
-                  <span className="text-[12.5px]">Фоновая сверка ролей</span>
-                </div>
-                <div className="mt-3 flex items-center gap-3">
-                  <span className="label">проверка</span>
-                  <Toggle
-                    on={settings.role_sync_dry_run === "true"}
-                    onChange={(v) => set("role_sync_dry_run", v ? "true" : "false")}
-                  />
-                  <span className="text-[12.5px]">Роли не менять</span>
-                </div>
-                <p className="mt-2 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                  В режиме проверки бот считает расхождения и пишет отчёт в журнал, но
-                  ничего не меняет. Выключите его, когда убедитесь в правильности отчёта.
-                </p>
-              </div>
-              <div>
-                <div className="label mb-1.5">Как часто сверять, минут (5–1440)</div>
-                <input
-                  className="input input-mono"
-                  value={settings.role_sync_interval_min}
-                  onChange={(e) => set("role_sync_interval_min", e.target.value.replace(/[^\d]/g, ""))}
-                />
-                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-                  Меньше 5 минут — слишком часто: сверка опрашивает Discord по каждому бойцу.
-                </p>
-              </div>
-            </div>
-            <div>
-              <div className="label mb-1.5">Должности: соответствие «должность = ID роли»</div>
-              <textarea
-                className="textarea"
-                style={{ minHeight: 74 }}
-                placeholder={"Механик-водитель = 1090320507288699020\nНаводчик = 1090320811572875314"}
-                value={settings.post_role_map}
-                onChange={(e) => set("post_role_map", e.target.value)}
-              />
-              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                По строке на пару, роль указывается ID (имя роли командир может изменить).
-                Если должность в карточке бойца снята или заменена — прежняя роль снимается.
-              </p>
-            </div>
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <div className="label mb-1.5">Запросов к Discord одновременно</div>
-                <input
-                  className="input input-mono"
-                  value={settings.discord_rate_concurrency}
-                  onChange={(e) => set("discord_rate_concurrency", e.target.value.replace(/[^\d]/g, ""))}
-                />
-              </div>
-              <div>
-                <div className="label mb-1.5">Пауза между запросами, мс</div>
-                <input
-                  className="input input-mono"
-                  value={settings.discord_rate_interval_ms}
-                  onChange={(e) => set("discord_rate_interval_ms", e.target.value.replace(/[^\d]/g, ""))}
-                />
-              </div>
-              <div>
-                <div className="label mb-1.5">Попыток при 429/5xx</div>
-                <input
-                  className="input input-mono"
-                  value={settings.discord_rate_attempts}
-                  onChange={(e) => set("discord_rate_attempts", e.target.value.replace(/[^\d]/g, ""))}
-                />
-              </div>
-            </div>
-            <p className="text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-              Лимиты Discord: очередь сама выдерживает паузу из ответа 429 (Retry-After) и
-              повторяет запрос с нарастающей задержкой. Если сервер часто отвечает лимитом —
-              уменьшите число одновременных запросов и увеличьте паузу.
-            </p>
-            <hr className="divider" />
-            <div>
-              <div className="label mb-1.5">ID Google-таблицы (ШДС)</div>
-              <input
-                className="input input-mono"
-                placeholder="строка из URL между /d/ и /edit"
-                value={settings.gsheet_spreadsheet_id}
-                onChange={(e) => set("gsheet_spreadsheet_id", e.target.value.trim())}
-              />
-              <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-                Из ссылки: <span className="kbd">docs.google.com/spreadsheets/d/ВОТ_ЭТО_ID/edit</span>
-              </p>
-            </div>
-            <div>
-              <div className="label mb-1.5">Паспорт сервисного аккаунта Google (JSON)</div>
-              <textarea
-                className="textarea"
-                style={{ minHeight: 110 }}
-                placeholder='{"type": "service_account", "project_id": "…", "private_key": "…", "client_email": "…"}'
-                value={settings.gsheet_service_account}
-                onChange={(e) => set("gsheet_service_account", e.target.value)}
-                spellCheck={false}
-              />
-              <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-                Содержимое JSON-файла сервисного аккаунта (Google Cloud → IAM → Service Accounts → Keys).
-                Хранится скрыто; замаскированное значение при сохранении не затирает старое. Если пусто —
-                используется файл <span className="kbd">src/lib/google-service-account.json</span>.
-              </p>
-            </div>
-            <hr className="divider" />
-            <div className="flex items-start gap-2.5 text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
-              <Bot size={14} className="mt-0.5 flex-none" style={{ color: "var(--red)" }} />
-              <span>
-                Бот ждёт ручную реакцию ❌ или зелёного круга / :ATK: под заявкой от пользователя
-                с упомянутой в заявке ролью (или от модератора). Отказ → [ОТКАЗАНО] + ЛС для отпуска,
-                одобрение → [ОДОБРЕНО И ВНЕСЕНО] и запись в Google Таблицу (лист = «Подразделение»).
-                В ветке под заявкой публикуется, кто подтвердил или отказал.
-              </span>
-            </div>
-          </div>
-        </Section>
-
-        {/* Google-форма и запас */}
-        <Section
-          title="Google-форма и запас"
-          eyebrow="заявки от бойцов"
-          action={
-            <span className="chip">
-              <Bot size={12} />
-              форма: {settings.form_enabled === "true" ? "вкл" : "выкл"}
-            </span>
-          }
-        >
-          <div className="flex flex-col gap-4 px-5 py-5">
-            <div className="flex items-center justify-between gap-3 rounded-xl border p-3" style={{ borderColor: "var(--stroke-soft)", background: "rgba(255,255,255,.02)" }}>
-              <div>
-                <div className="text-[13px] font-bold">Опрос Google-формы</div>
-                <div className="mt-0.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-                  Раз в минуту бот забирает новые ответы и публикует их как заявки в Discord
-                </div>
-              </div>
-              <Toggle
-                on={settings.form_enabled === "true"}
-                onChange={(v) => set("form_enabled", v ? "true" : "false")}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="label mb-1.5">Лист с ответами формы</div>
-                <input
-                  className="input input-mono"
-                  placeholder="Ответы на форму 1"
-                  value={settings.form_response_sheet}
-                  onChange={(e) => set("form_response_sheet", e.target.value)}
-                />
-                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-                  Лист внутри Google-таблицы ШДС, куда форма пишет ответы.
-                </p>
-              </div>
-              <div>
-                <div className="label mb-1.5">ID роли «Запас»</div>
-                <input
-                  className="input input-mono"
-                  placeholder="например 1166476218791645256"
-                  value={settings.reserve_role_id}
-                  onChange={(e) => set("reserve_role_id", e.target.value.replace(/[^\d]/g, ""))}
-                />
-                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-                  Выдаётся при уходе в запас и снимается при возврате.
-                </p>
-              </div>
-              <div>
-                <div className="label mb-1.5">Название листа «Запас»</div>
-                <input
-                  className="input input-mono"
-                  placeholder="Запас"
-                  value={settings.reserve_sheet_name}
-                  onChange={(e) => set("reserve_sheet_name", e.target.value)}
-                />
-                <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-                  Создаётся автоматически, если не существует.
-                </p>
-              </div>
-            </div>
-
-            <hr className="divider" />
-            <div className="flex items-start gap-2.5 text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
-              <Bot size={14} className="mt-0.5 flex-none" style={{ color: "var(--red)" }} />
-              <span>
-                Бот публикует заявки из формы в каналы (роли / отпуск / ШДС) — модератор подтверждает реакцией.
-                Для «запаса» строка бойца переносится на отдельный лист, роли меняются автоматически.
-                Подробная инструкция — в файле <span className="kbd">FORMS_SETUP.md</span> в репозитории.
-              </span>
-            </div>
-          </div>
-        </Section>
-
-        {/* RS-RED */}
-        <Section
-          title="RS-RED"
-          eyebrow="источник онлайна"
-          action={
-            <span className="chip">
-              <Cookie size={12} />
-              cookie: {cookieState}
-              {cookieUpdatedAt ? ` · ${fmtDateLong(cookieUpdatedAt)}` : ""}
-            </span>
-          }
-        >
-          <div className="flex flex-col gap-4 px-5 py-5">
-            <div>
-              <div className="label mb-1.5">Cookie сайта rs-red.com (ручной ввод)</div>
-              <textarea
-                className="textarea"
-                style={{ minHeight: 74 }}
-                placeholder="Обычно не нужно — cookie приходит сама из расширения ниже"
-                value={settings.rs_cookie}
-                onChange={(e) => set("rs_cookie", e.target.value)}
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="label mb-1.5">ID подразделения</div>
-                <input
-                  className="input input-mono"
-                  value={settings.rs_subdiv_id}
-                  onChange={(e) => set("rs_subdiv_id", e.target.value.replace(/[^\d]/g, ""))}
-                />
-              </div>
-              <div>
-                <div className="label mb-1.5">Базовый URL</div>
-                <input
-                  className="input input-mono"
-                  value={settings.rs_base_url}
-                  onChange={(e) => set("rs_base_url", e.target.value)}
-                />
-              </div>
-            </div>
-            <hr className="divider" />
-            <div className="text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
-              <div className="mb-1.5 flex items-center gap-1.5 font-semibold" style={{ color: "var(--text)" }}>
-                <ShieldCheck size={13} style={{ color: "var(--green)" }} />
-                Резервный способ, если расширение недоступно
-              </div>
-              <ol className="ml-4 list-decimal space-y-1">
-                <li>Откройте <span className="kbd">rs-red.com</span> и войдите через Steam.</li>
-                <li>Нажмите <span className="kbd">F12</span> → вкладка «Сеть» (Network).</li>
-                <li>Обновите страницу, кликните первый запрос к rs-red.com.</li>
-                <li>В «Заголовках» найдите <span className="kbd">Cookie</span> и вставьте значение сюда.</li>
-              </ol>
-            </div>
-          </div>
-        </Section>
-
-        {/* Расписание операций */}
-        <Section title="Пинги на операцию" eyebrow="задача №1"
-          action={
-            <div className="flex items-center gap-2">
-              <span className="label">вкл</span>
-              <Toggle
-                on={settings.op_enabled === "true"}
-                onChange={(v) => set("op_enabled", v ? "true" : "false")}
-              />
-            </div>
-          }
-        >
-          <div className="flex flex-col gap-4 px-5 py-5">
-            <div>
-              <div className="label mb-1.5">Время пингов (через запятую, ЧЧ:ММ)</div>
-              <input
-                className="input input-mono"
-                placeholder="14:45, 19:45"
-                value={settings.op_times}
-                onChange={(e) => set("op_times", e.target.value)}
-              />
-              <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-                Ежедневно. Бот отправит случайный текст + гифку и поставит реакции ✅ ❌ ⏰ ❓.
-              </p>
-            </div>
-            <div className="flex items-center gap-2 text-[12px]" style={{ color: "var(--muted)" }}>
-              <AlarmClockCheck size={14} style={{ color: "var(--red)" }} />
-              Реакции: ✅ буду · ❌ не буду · ⏰ опоздаю · ❓ под вопросом — добавляются автоматически.
-            </div>
-          </div>
-        </Section>
-
-        {/* Проверка онлайна */}
-        <Section title="Проверка онлайна" eyebrow="задача №2"
-          action={
-            <div className="flex items-center gap-2">
-              <span className="label">вкл</span>
-              <Toggle
-                on={settings.weekly_enabled === "true"}
-                onChange={(v) => set("weekly_enabled", v ? "true" : "false")}
-              />
-            </div>
-          }
-        >
-          <div className="flex flex-col gap-4 px-5 py-5">
-            <div>
-              <div className="label mb-1.5">Дни проверки</div>
-              <div className="flex flex-wrap gap-1.5">
-                {DAY_OPTIONS.map((d) => (
-                  <button key={d.n} className="day-pill" data-on={days.includes(d.n)} onClick={() => toggleDay(d.n)}>
-                    {d.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <div className="label mb-1.5">Время</div>
-                <input
-                  className="input input-mono"
-                  placeholder="12:00"
-                  value={settings.weekly_time}
-                  onChange={(e) => set("weekly_time", e.target.value)}
-                />
-              </div>
-              <div>
-                <div className="label mb-1.5">Норма в часах</div>
-                <input
-                  className="input input-mono"
-                  type="number"
-                  min={1}
-                  value={settings.norm_hours}
-                  onChange={(e) => set("norm_hours", e.target.value)}
-                />
-              </div>
-              <div>
-                <div className="label mb-1.5">Часовой пояс</div>
-                <select
-                  className="select"
-                  value={settings.timezone}
-                  onChange={(e) => set("timezone", e.target.value)}
-                >
-                  {TIMEZONES.map((tz) => (
-                    <option key={tz} value={tz}>
-                      {tz}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 text-[12px]" style={{ color: "var(--muted)" }}>
-              <CalendarClock size={14} style={{ color: "var(--amber)" }} />
-              Пингуются должники (&lt; нормы) без отпуска, у которых привязан Discord ID.
-            </div>
-          </div>
-        </Section>
-
-        {/* Снимок статистики */}
-        <Section title="Снимок статистики" eyebrow="задача №3 · график"
-          action={
-            <div className="flex items-center gap-2">
-              <span className="label">вкл</span>
-              <Toggle
-                on={settings.snapshot_enabled === "true"}
-                onChange={(v) => set("snapshot_enabled", v ? "true" : "false")}
-              />
-            </div>
-          }
-        >
-          <div className="flex flex-col gap-4 px-5 py-5">
-            <div>
-              <div className="label mb-1.5">Время снимка</div>
-              <input
-                className="input input-mono"
-                placeholder="21:00"
-                value={settings.snapshot_time}
-                onChange={(e) => set("snapshot_time", e.target.value)}
-              />
-              <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-                Ежедневно. Сохраняет точку онлайн-статистики в таблицу графика на главной странице,
-                запись об этом появляется в журнале (вкладка «Сайт»).
-              </p>
-            </div>
-            <div className="flex items-center gap-2 text-[12px]" style={{ color: "var(--muted)" }}>
-              <CalendarClock size={14} style={{ color: "var(--green)" }} />
-              Часовой пояс — из настройки выше (по умолчанию Europe/Moscow).
-            </div>
-          </div>
-        </Section>
-
-        {/* Контроль вышедших из состава */}
-        <Section title="Контроль вышедших из состава" eyebrow="задача №4 · пинг при выходе"
-          action={
-            <div className="flex items-center gap-2">
-              <span className="label">вкл</span>
-              <Toggle
-                on={settings.left_members_check === "true"}
-                onChange={(v) => set("left_members_check", v ? "true" : "false")}
-              />
-            </div>
-          }
-        >
-          <div className="flex flex-col gap-4 px-5 py-5">
-            <div className="grid grid-cols-2 items-start gap-3">
-              <div className="flex min-w-0 flex-col items-start">
-                <div className="label mb-1.5 flex min-h-[3rem] w-full items-end">ID канала проверок</div>
-                <input
-                  className="input input-mono w-full"
-                  placeholder="например 1185432109876543210"
-                  value={settings.left_check_channel_id}
-                  onChange={(e) => set("left_check_channel_id", e.target.value.replace(/[^\d]/g, ""))}
-                />
-                <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                  Если пусто — используется основной канал для пингов из блока Discord.
-                </p>
-              </div>
-              <div className="flex min-w-0 flex-col items-start">
-                <div className="label mb-1.5 flex min-h-[3rem] w-full items-end">ID роли «Командирский состав»</div>
-                <input
-                  className="input input-mono w-full"
-                  placeholder="например 1392552505162072264"
-                  value={settings.command_role_id}
-                  onChange={(e) => set("command_role_id", e.target.value.replace(/[^\d]/g, ""))}
-                />
-                <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                  Эта роль пингуется, если у вышедшего бойца сутки не сняты роли клана.
-                </p>
-              </div>
-            </div>
-            <div className="flex items-start gap-2.5 text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
-              <ShieldCheck size={14} className="mt-0.5 flex-none" style={{ color: "var(--amber)" }} />
-              <span>
-                Боец пропал из состава rs-red.com и с него не сняли роли клана в течение суток —
-                бот отправит однократный пинг командирскому составу. При возвращении бойца в состав
-                флаг сбрасывается, и проверка сработает снова при следующем выходе.
-              </span>
-            </div>
-          </div>
-        </Section>
+      <div className="flex flex-col gap-3">
+        <SettingsTabBar active={tab} onChange={setTab} />
+        <p className="text-[12px]" style={{ color: "var(--dim)" }}>
+          {current.hint}
+        </p>
       </div>
 
-      {/* Автосинхронизация cookie */}
-      <Section
-        glow
-        title="Автосинхронизация cookie"
-        eyebrow="расширение v5 · автоматический перехват ключа"
-        action={
-          <a className="btn btn-primary btn-sm" href="https://addons.opera.com/ru/extensions/" target="_blank" rel="noreferrer">
-            <Download size={13} />
-            Установить из магазина
-          </a>
-        }
-      >
-        <div className="grid gap-6 px-5 py-5 lg:grid-cols-2">
-          <div>
-            <div className="mb-3 flex items-center gap-1.5 text-[13px] font-semibold">
-              <Puzzle size={14} style={{ color: "var(--red)" }} />
-              Установка в один клик
-            </div>
-            <ol className="flex flex-col gap-2.5">
-              {[
-                "Установите расширение RED ATK из магазина Opera (кнопка справа вверху).",
-                "Просто обновите эту страницу (или зайдите на сайт).",
-                "Расширение само перехватит ваш уникальный ключ и начнёт работу.",
-              ].map((step, i) => (
-                <li key={i} className="flex gap-3">
-                  <span
-                    className="display flex items-center justify-center font-bold"
-                    style={{
-                      width: 24,
-                      height: 24,
-                      borderRadius: 8,
-                      flex: "none",
-                      fontSize: 11,
-                      background: "var(--red-soft)",
-                      color: "#fca5a5",
-                      border: "1px solid rgba(239,68,68,.3)",
-                    }}
-                  >
-                    {i + 1}
-                  </span>
-                  <span className="text-[12.5px] leading-relaxed" style={{ color: "var(--muted)" }}>
-                    {step}
-                  </span>
-                </li>
-              ))}
-            </ol>
-            <p className="mt-4 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-              Больше никаких ZIP-архивов. Расширение само отправляет cookie при входе на rs-red.com и каждые 10 минут, а также умеет «будить» панель.
-            </p>
-          </div>
+      {/* Панель рендерится только активной вкладки: неактивные не запрашивают
+          данные и не держат в DOM десятки полей. */}
+      {tab === "integrations" && (
+        <SettingsTabPanel id="integrations">
+          <IntegrationsTab
+            settings={settings}
+            set={set}
+            env={env}
+            cookieUpdatedAt={cookieUpdatedAt}
+            syncKey={syncKey}
+            origin={origin}
+            copied={copied}
+            copy={copy}
+            regenerateKey={regenerateKey}
+            regenerating={regenerating}
+          />
+        </SettingsTabPanel>
+      )}
 
-          <div className="flex flex-col gap-4">
-            <div>
-              <div className="label mb-1.5">Адрес сервера (для расширения)</div>
-              <div className="flex gap-2">
-                <input className="input input-mono" readOnly value={origin} onFocus={(e) => e.target.select()} />
-                <button className="btn btn-icon" onClick={() => copy("origin", origin)} title="Скопировать">
-                  {copied === "origin" ? <CheckCircle2 size={14} style={{ color: "var(--green)" }} /> : <Copy size={14} />}
-                </button>
-              </div>
-              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                Скрипт расширения получает этот адрес автоматически с этой страницы.
-              </p>
-            </div>
-            <div>
-              <div className="label mb-1.5">Ключ синхронизации</div>
-              <div className="flex gap-2">
-                <input className="input input-mono" readOnly value={syncKey} onFocus={(e) => e.target.select()} />
-                <button className="btn btn-icon" onClick={() => copy("key", syncKey)} title="Скопировать">
-                  {copied === "key" ? <CheckCircle2 size={14} style={{ color: "var(--green)" }} /> : <Copy size={14} />}
-                </button>
-                <button className="btn" onClick={regenerateKey} disabled={regenerating} title="Перевыпустить ключ">
-                  {regenerating ? <Spinner /> : <RefreshCw size={14} />}
-                  Новый
-                </button>
-              </div>
-              <p className="mt-1.5 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                Ключ защищает панель от перезаписи данных. «Новый» — старый ключ мгновенно перестаёт работать.
-              </p>
-            </div>
-            <div
-              className="flex items-start gap-2.5 rounded-xl border px-3.5 py-3 text-[12px] leading-relaxed"
-              style={{ borderColor: "var(--stroke-soft)", background: "rgba(255,255,255,.025)", color: "var(--muted)" }}
-            >
-              <Link2 size={14} className="mt-0.5 flex-none" style={{ color: "var(--amber)" }} />
-              <span>
-                {cookieUpdatedAt
-                  ? `Последняя cookie получена ${fmtDateLong(cookieUpdatedAt)}. Если сайт начнёт отвечать 403 — просто откройте rs-red.com, расширение само передаст свежую.`
-: "Cookie ещё ни разу не приходила от расширения. Установите его из магазина и зайдите на этот сайт, чтобы передать настройки."}
-              </span>
-            </div>
-          </div>
-        </div>
-      </Section>
+      {tab === "scheduler" && (
+        <SettingsTabPanel id="scheduler">
+          <SchedulerTab settings={settings} set={set} days={days} toggleDay={toggleDay} />
+        </SettingsTabPanel>
+      )}
 
-      {/* Контент */}
-      <Section title="Тексты и гифки для операций" eyebrow="ротация контента" action={<FileText size={15} style={{ color: "var(--dim)" }} />}>
-        <div className="grid gap-5 px-5 py-5 lg:grid-cols-2">
-          <div>
-            <div className="label mb-1.5">Тексты пинга — по одному на строку</div>
-            <textarea
-              className="textarea"
-              style={{ minHeight: 180 }}
-              value={settings.op_texts}
-              onChange={(e) => set("op_texts", e.target.value)}
-            />
-            <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-              На каждый пинг выбирается случайная строка.
-            </p>
-          </div>
-          <div>
-            <div className="label mb-1.5">Гифки — прямые ссылки, по одной на строку</div>
-            <textarea
-              className="textarea"
-              style={{ minHeight: 180 }}
-              value={settings.op_gifs}
-              onChange={(e) => set("op_gifs", e.target.value)}
-            />
-            <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-              Нужны прямые ссылки на .gif: с Giphy откройте гифку → «Copy Link» → вариант вида{" "}
-              <span className="kbd">media.giphy.com/media/…/giphy.gif</span>. Если ссылка битая —
-              сообщение уйдёт просто без картинки.
-            </p>
-          </div>
-        </div>
-      </Section>
+      {tab === "content" && (
+        <SettingsTabPanel id="content">
+          <ContentTab settings={settings} set={set} />
+        </SettingsTabPanel>
+      )}
 
-      {/* Обслуживание системы: резервные копии, синхронизация ШДС, очистка.
-          Отдельный компонент со своими запросами: действия здесь применяются
-          сразу, а не кнопкой «Сохранить всё». */}
-      <MaintenancePanel />
-
-      {/* Статус автоматики */}
-      <Section title="Автоматика" eyebrow="что происходит само">
-        <div className="grid gap-3 px-5 py-5 sm:grid-cols-3">
-          {[
-            {
-              icon: Bot,
-              title: "Каждую минуту",
-              text: "Планировщик проверяет расписание и запускает задачи точно в слот",
-            },
-            {
-              icon: Cookie,
-              title: "Каждые 30 минут",
-              text: "Состав подразделения обновляется с rs-red.com в фоне",
-            },
-            {
-              icon: ShieldCheck,
-              title: "Защита от дублей",
-              text: "Каждый слот фиксируется в базе — повторных пингов не будет",
-            },
-          ].map((f) => (
-            <div key={f.title} className="flex gap-3 rounded-2xl border p-4" style={{ borderColor: "var(--stroke-soft)", background: "rgba(255,255,255,.02)" }}>
-              <f.icon size={17} className="mt-0.5 flex-none" style={{ color: "var(--red)" }} />
-              <div>
-                <div className="text-[13px] font-bold">{f.title}</div>
-                <div className="mt-1 text-[11.5px] leading-relaxed" style={{ color: "var(--dim)" }}>
-                  {f.text}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </Section>
+      {tab === "maintenance" && (
+        <SettingsTabPanel id="maintenance">
+          <MaintenanceTab settings={settings} set={set} />
+        </SettingsTabPanel>
+      )}
 
       <button className="btn btn-primary self-end" onClick={save} disabled={saving}>
         {saving ? <Spinner /> : <Save size={15} />}
@@ -1029,13 +259,12 @@ export default function SettingsPage() {
       </button>
 
       {/* Скрытый блок для передачи данных в расширение (content.js) */}
-      <div 
-        id="atk-extension-data" 
-        data-url={origin} 
-        data-key={syncKey} 
-        style={{ display: 'none' }}
+      <div
+        id="atk-extension-data"
+        data-url={origin}
+        data-key={syncKey}
+        style={{ display: "none" }}
       ></div>
-
     </div>
   );
 }

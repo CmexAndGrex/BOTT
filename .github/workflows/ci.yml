@@ -17,9 +17,40 @@ permissions:
   contents: read
 
 jobs:
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Полная история: gitleaks проверяет не только рабочее дерево, но и
+          # коммиты — секрет мог быть удалён из файла, но остаться в истории.
+          fetch-depth: 0
+
+      # 1. Собственный сканер проекта: работает из репозитория, без установки и
+      #    сети, ловит форматы секретов, встречающиеся именно здесь (паспорт
+      #    Google, токен Discord-бота, cookie rs-red, ключ синхронизации).
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Project secret scan
+        run: node scripts/secret-scan.mjs
+
+      # 2. Внешний детектор: дополнительная проверка истории общим списком
+      #    правил (шире, чем встроенный сканер).
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   verify:
     name: test / typecheck / lint / build
     runs-on: ubuntu-latest
+    # Сборка не начинается, пока не подтверждено, что секреты не утекли
+    needs: secret-scan
 
     env:
       # next build выполняет модули с проверками на этапе загрузки, поэтому

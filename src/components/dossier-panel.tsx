@@ -8,10 +8,11 @@
  * допуска не дублируется: карточки техники рисуются по отчёту из API, который
  * посчитан боевым getAvailableVehicles() на сервере.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Badge, CheckCircle2, Clock3, Crosshair, FileText, Gauge, Lock, LockOpen, MessageCircle, Palmtree,
-  RadioTower, RefreshCw, Send, ShieldAlert, ShieldCheck, Truck, Users, Wrench, X,
+  Badge, CheckCircle2, Clock3, Crosshair, Crown, FileText, Gauge, Gem, Lock, LockOpen, Medal,
+  MessageCircle, Palmtree, RadioTower, RefreshCw, Send, ShieldAlert, ShieldCheck, Truck, Users,
+  Wrench, X,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Section, Spinner, fmtDate } from "@/components/ui";
@@ -19,9 +20,13 @@ import { ReportForm, type SessionMember } from "@/components/reports-panel";
 import { reportTypeMeta, type ServiceReportType } from "@/lib/reports";
 import {
   VEHICLE_CATEGORY_LABELS,
+  VEHICLE_VIP_FILTERS,
+  matchesVipFilter,
+  vipFilterCounts,
   type Vehicle,
   type VehicleAccessReport,
   type VehicleCard,
+  type VehicleVipFilter,
 } from "@/lib/vehicles";
 
 /* ------------------------------------------------------------------ */
@@ -399,6 +404,49 @@ function priceLabel(vehicle: Vehicle): string {
   return vehicle.price === null ? "по решению штаба" : `$${vehicle.price}`;
 }
 
+/**
+ * Оформление уровней VIP: VIP 1 — янтарное золото, VIP 2 — пурпур.
+ *
+ * Цвета вынесены в константы, а не разбросаны по разметке: один и тот же
+ * уровень должен выглядеть одинаково и на бейдже карточки, и на кнопке фильтра,
+ * иначе боец перестаёт связывать кнопку с техникой.
+ */
+const VIP_STYLE: Record<1 | 2, { color: string; label: string; icon: typeof Crown }> = {
+  1: { color: "var(--amber)", label: "VIP 1", icon: Crown },
+  2: { color: "#c084fc", label: "VIP 2", icon: Gem },
+};
+
+/** Бейдж уровня VIP: на базовой технике не рисуется — там нечего сообщать */
+function VipBadge({ tier }: { tier: Vehicle["vipTier"] }) {
+  if (tier === 0) return null;
+  const style = VIP_STYLE[tier];
+  const Icon = style.icon;
+  return (
+    <span
+      className="badge"
+      style={{
+        fontSize: "0.6rem",
+        color: style.color,
+        background: `color-mix(in srgb, ${style.color} 12%, transparent)`,
+        border: `1px solid color-mix(in srgb, ${style.color} 38%, transparent)`,
+      }}
+    >
+      <Icon size={11} />
+      {style.label}
+    </span>
+  );
+}
+
+/** Бейдж минимального звания: «Лейтенант» — то, что требует реестр гаража */
+function RankBadge({ rank }: { rank: NonNullable<Vehicle["requiredRank"]> }) {
+  return (
+    <span className="badge badge-reserve" style={{ fontSize: "0.6rem" }} title="Минимальное звание">
+      <Medal size={11} />
+      {rank}
+    </span>
+  );
+}
+
 /** Карточка единицы техники: название, категория, цена и состояние допуска */
 function VehicleTile({ card }: { card: VehicleCard }) {
   const Icon = CATEGORY_ICON[card.vehicle.category] ?? Truck;
@@ -446,6 +494,8 @@ function VehicleTile({ card }: { card: VehicleCard }) {
         >
           {card.statusLabel}
         </span>
+        <VipBadge tier={card.vehicle.vipTier} />
+        {card.vehicle.requiredRank && <RankBadge rank={card.vehicle.requiredRank} />}
         {!unlocked && card.missing.length > 0 && (
           <span className="text-[11px]" style={{ color: "var(--amber)" }}>
             нужно: {card.missing.join(", ")}
@@ -456,13 +506,90 @@ function VehicleTile({ card }: { card: VehicleCard }) {
   );
 }
 
-/** Полоса прогресса до следующего допуска */
+/**
+ * Переключатель уровней VIP: «Все · Базовая · VIP 1 · VIP 2» со счётчиками.
+ *
+ * Фильтр работает только на клиенте и ничего не перезапрашивает: списки открытой
+ * и закрытой техники уже приехали в отчёте досье, и фильтрация — это отбор из
+ * готового массива. Счётчики считаются по тому же массиву, что и показывается,
+ * поэтому цифра на кнопке всегда совпадает с числом карточек под ней.
+ */
+function VipFilterBar({
+  value,
+  counts,
+  onChange,
+}: {
+  value: VehicleVipFilter;
+  counts: Record<VehicleVipFilter, number>;
+  onChange: (next: VehicleVipFilter) => void;
+}) {
+  const labelOf = (key: VehicleVipFilter): string =>
+    key === "all" ? "Все" : key === "base" ? "Базовая" : VIP_STYLE[key === "vip1" ? 1 : 2].label;
+  const accentOf = (key: VehicleVipFilter): string | null =>
+    key === "vip1" ? VIP_STYLE[1].color : key === "vip2" ? VIP_STYLE[2].color : null;
+
+  return (
+    <div
+      className="inline-flex flex-wrap items-center gap-1 rounded-full p-1"
+      style={{ border: "1px solid var(--stroke)", background: "rgba(255,255,255,.02)" }}
+      role="group"
+      aria-label="Фильтр техники по уровню VIP"
+    >
+      {VEHICLE_VIP_FILTERS.map((key) => {
+        const active = value === key;
+        const accent = accentOf(key);
+        // Активная кнопка окрашивается в цвет своего уровня: янтарная для VIP 1,
+        // пурпурная для VIP 2, фирменная бордовая — для «Все» и «Базовая».
+        const activeColor = accent ?? "#fff";
+        return (
+          <button
+            key={key}
+            type="button"
+            className="chip"
+            aria-pressed={active}
+            onClick={() => onChange(key)}
+            style={{
+              borderRadius: 999,
+              fontSize: "0.72rem",
+              ...(active
+                ? accent
+                  ? {
+                      background: `color-mix(in srgb, ${accent} 14%, transparent)`,
+                      borderColor: `color-mix(in srgb, ${accent} 42%, transparent)`,
+                      color: activeColor,
+                    }
+                  : {
+                      background: "var(--red-soft)",
+                      borderColor: "rgba(190,18,60,.45)",
+                      color: activeColor,
+                    }
+                : accent
+                  ? { color: `color-mix(in srgb, ${accent} 72%, var(--muted))` }
+                  : undefined),
+            }}
+          >
+            {labelOf(key)}
+            <span className="mono" style={{ fontSize: "0.66rem", opacity: 0.75 }}>
+              {counts[key]}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Полоса прогресса до следующего допуска: бордовый градиент с неоновым отсветом */
 function ProgressBar({ percent }: { percent: number }) {
   return (
     <div className="hours-track" style={{ width: "100%" }}>
       <div
         className="hours-fill"
-        style={{ width: `${Math.max(0, Math.min(100, percent))}%`, background: "var(--red)" }}
+        style={{
+          width: `${Math.max(0, Math.min(100, percent))}%`,
+          background: "var(--red-grad)",
+          boxShadow: "var(--red-glow)",
+        }}
       />
     </div>
   );
@@ -477,11 +604,28 @@ function ProgressBar({ percent }: { percent: number }) {
  */
 export function VehicleAccessGrid({ report }: { report: VehicleAccessReport }) {
   const [tab, setTab] = useState<"unlocked" | "locked">("unlocked");
+  /**
+   * Уровень VIP, выбранный фильтром. Живёт отдельно от вкладки и её не сбрасывает:
+   * боец смотрит «что даст повышение» и одновременно уточняет «только VIP 2».
+   */
+  const [vip, setVip] = useState<VehicleVipFilter>("all");
 
   const chipStyle = (active: boolean) =>
     active
-      ? { background: "var(--red-soft)", borderColor: "rgba(239,68,68,.45)", color: "#fff" }
+      ? { background: "var(--red-soft)", borderColor: "rgba(190,18,60,.45)", color: "#fff" }
       : undefined;
+
+  const activeList = tab === "unlocked" ? report.unlocked : report.locked;
+  /**
+   * Счётчики и отбор считаются от списка текущей вкладки. useMemo не для
+   * «оптимизации» на два десятка карточек, а чтобы не пересоздавать массив на
+   * каждом рендере виджета: фильтр обязан быть мгновенным и без внешних запросов.
+   */
+  const counts = useMemo(() => vipFilterCounts(activeList), [activeList]);
+  const shown = useMemo(
+    () => activeList.filter((card) => matchesVipFilter(card.vehicle, vip)),
+    [activeList, vip]
+  );
 
   if (report.division === "unknown") {
     return (
@@ -495,7 +639,6 @@ export function VehicleAccessGrid({ report }: { report: VehicleAccessReport }) {
     );
   }
 
-  const shown = tab === "unlocked" ? report.unlocked : report.locked;
   const nextTier =
     report.division === "tank" && report.progress.next
       ? report.tiers.find((tier) => tier.rank === report.progress.next)
@@ -594,6 +737,9 @@ export function VehicleAccessGrid({ report }: { report: VehicleAccessReport }) {
           </div>
         )}
 
+        {/* Фильтр по уровню VIP: мгновенный отбор внутри выбранной вкладки */}
+        <VipFilterBar value={vip} counts={counts} onChange={setVip} />
+
         {shown.length > 0 ? (
           <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
             {shown.map((card) => (
@@ -602,9 +748,11 @@ export function VehicleAccessGrid({ report }: { report: VehicleAccessReport }) {
           </div>
         ) : (
           <p className="text-[12.5px]" style={{ color: "var(--dim)" }}>
-            {tab === "unlocked"
-              ? "Пока ничего не открыто — начните с базовых нормативов и ближайшего повышения."
-              : "Вся техника подразделения открыта. Дальше — только по решению штаба."}
+            {counts.all === 0
+              ? tab === "unlocked"
+                ? "Пока ничего не открыто — начните с базовых нормативов и ближайшего повышения."
+                : "Вся техника подразделения открыта. Дальше — только по решению штаба."
+              : "В этой категории техники нет — переключите уровень VIP или вкладку."}
           </p>
         )}
       </div>
@@ -623,7 +771,14 @@ export function VehicleAccessGrid({ report }: { report: VehicleAccessReport }) {
  * боец подаёт чаще всего, чтобы не заставлять его искать «Отпуск» в общем списке
  * из пяти пунктов. Порядок — как в задании: экзамен, отпуск, перевод.
  */
-export const DOSSIER_REPORT_TABS: readonly ServiceReportType[] = ["exam", "vacation", "role"];
+export const DOSSIER_REPORT_TABS: readonly ServiceReportType[] = [
+  "exam",
+  "vacation",
+  "role",
+  // Перевод по должности ШДС: рапорт подаётся не из раздела «Экзамены», а здесь.
+  // Без него тип рапорта существовал бы только в API, и боец не смог бы его подать
+  "position_transfer",
+];
 
 /**
  * Модальное окно подачи рапорта.
@@ -701,7 +856,7 @@ export function ReportModal({
             style={{
               background: "var(--modal)",
               backdropFilter: "blur(14px)",
-              borderColor: "rgba(239,68,68,0.28)",
+              borderColor: "rgba(190,18,60,0.28)",
             }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -750,7 +905,7 @@ export function ReportModal({
                       active
                         ? {
                             background: "var(--red-soft)",
-                            borderColor: "rgba(239,68,68,.45)",
+                            borderColor: "rgba(190,18,60,.45)",
                             color: "#fff",
                           }
                         : undefined
@@ -767,7 +922,7 @@ export function ReportModal({
             {error && (
               <div
                 className="mx-5 mt-4 flex items-center gap-2 rounded-xl px-3 py-2.5"
-                style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.35)" }}
+                style={{ background: "rgba(190,18,60,.08)", border: "1px solid rgba(190,18,60,.35)" }}
               >
                 <ShieldAlert size={15} style={{ color: "var(--red)", flex: "none" }} />
                 <span className="text-[12.5px]" style={{ color: "var(--red)" }}>

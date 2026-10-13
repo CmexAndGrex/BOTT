@@ -53,7 +53,9 @@ RUN addgroup -S nodejs && adduser -S nextjs -G nodejs
 # экспорт «таблица за таблицей», в котором не восстанавливаются внешние ключи и
 # индексы. Версия клиента совпадает с сервером (postgres:16-alpine в compose) —
 # pg_dump старшей версии к младшему серверу не подключится.
-RUN apk add --no-cache postgresql16-client
+# curl нужен healthcheck'у docker-compose (проверка /api/health): в node:alpine
+# его нет, и без пакета контейнер навсегда оставался бы «unhealthy».
+RUN apk add --no-cache postgresql16-client curl
 
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static

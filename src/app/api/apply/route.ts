@@ -21,15 +21,25 @@ import { MEMBER_OAUTH_PENDING_COOKIE, requestIp, unpackDiscordProfile } from "@/
 import { buildRecruitEmbed } from "@/lib/reports";
 import { publishReviewMessage, recruitsChannelId } from "@/lib/review";
 import {
+  APPLICATION_KIND_LABELS,
+  APPLICATION_KIND_RECRUIT,
+  APPLICATION_KIND_RESERVE_RETURN,
+  DEFAULT_APPLICATION_KIND,
   DEFAULT_RANK,
+  FULL_NAME_MAX_LENGTH,
+  FULL_NAME_MIN_LENGTH,
   isCallsign,
   isDiscordSnowflake,
+  isFullName,
+  isRecruitApplicationKind,
   LoginThrottle,
   MANUAL_DISCORD_ID,
   normalizeCallsign,
+  normalizeFullName,
   PENDING_NOTICE,
   readApplication,
   validateApplication,
+  type RecruitApplicationKind,
 } from "@/lib/recruits";
 import { registerThrottle } from "@/lib/throttle-registry";
 
@@ -56,6 +66,10 @@ type ApplyBody = {
   discordId?: unknown;
   /** Логин или глобальное имя в Discord: заполняется вручную, если нет OAuth-контакта */
   discordTag?: unknown;
+  /** Вид заявки: recruit (по умолчанию) или reserve_return */
+  kind?: unknown;
+  /** ФИО возвращающегося из запаса: по нему ищется строка на листе «Запас» */
+  fullName?: unknown;
 };
 
 /**
@@ -79,6 +93,32 @@ export async function POST(req: NextRequest) {
     body = (await req.json()) as ApplyBody;
   } catch {
     return NextResponse.json({ ok: false, error: "Некорректный JSON" }, { status: 400 });
+  }
+
+  /**
+   * Вид заявки. Неизвестное значение трактуем как «новобранец», а не как
+   * ошибку: прежние клиенты поля не шлют вовсе, и заявка обязана приниматься.
+   * Возврат из запаса отличается только решением модератора — набор полей
+   * анкеты тот же, поэтому отдельной ветки проверки не требуется.
+   */
+  const kind: RecruitApplicationKind = isRecruitApplicationKind(body.kind)
+    ? body.kind
+    : DEFAULT_APPLICATION_KIND;
+
+  /**
+   * ФИО обязательно только для возврата: по нему модератор и бот находят
+   * строку бойца на листе «Запас». Для новобранца поле не нужно — оно и
+   * раньше не заполнялось.
+   */
+  const fullName = kind === APPLICATION_KIND_RESERVE_RETURN ? normalizeFullName(body.fullName) : "";
+  if (kind === APPLICATION_KIND_RESERVE_RETURN && !isFullName(fullName)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: `Возврат из запаса: укажите ФИО так, как оно записано в табеле (${FULL_NAME_MIN_LENGTH}–${FULL_NAME_MAX_LENGTH} символов)`,
+      },
+      { status: 400 }
+    );
   }
 
   const state = throttle.check(ip);
@@ -110,6 +150,8 @@ export async function POST(req: NextRequest) {
     armaExperience: body.armaExperience,
     specialization: body.specialization,
     comment: body.comment,
+    // Вид заявки решает, что обязательно: возврат из запаса анкеты не требует
+    kind,
   });
   if (!application.ok) {
     return NextResponse.json({ ok: false, error: application.error }, { status: 400 });
@@ -121,8 +163,13 @@ export async function POST(req: NextRequest) {
     discordIdRaw: typeof body.discordId === "string" ? body.discordId : "",
     discordTag: typeof body.discordTag === "string" ? body.discordTag : "",
     data: application.data,
+    // Вид заявки и ФИО передаются дальше: по ним модерация отличает возврат
+    // из запаса от зачисления и находит строку бойца на листе «Запас»
+    kind,
+    fullName,
   });
 }
+
 /**
  * Создание бойца со статусом pending.
  * Вынесено отдельно, чтобы основной обработчик читался как последовательность
@@ -131,13 +178,7 @@ export async function POST(req: NextRequest) {
 async function createRecruit(
   req: NextRequest,
   ip: string,
-  input: {
-    callsign: string;
-    password: string;
-    discordIdRaw: string;
-    discordTag: string;
-    data: { age: number; armaExperience: string; specialization: string; comment: string };
-  }
+  input: ApplicationInput & { password: string; discordIdRaw: string }
 ): Promise<NextResponse> {
   // Контакт Discord: из cookie (доверенный) либо ручной ввод из формы
   const fromCookie = unpackDiscordProfile(req.cookies.get(MEMBER_OAUTH_PENDING_COOKIE)?.value);
@@ -152,6 +193,51 @@ async function createRecruit(
   const discordId = fromCookie?.id ?? manualId;
 
   try {
+    /**
+     * Возврат из запаса: карточка бойца в панели УЖЕ существует (в запас
+     * переводили именно её), поэтому новую создавать нельзя — иначе получился
+     * бы дубль, а позывной занят (members.callsign уникален) и форма отвечала
+     * бы «Позывной уже занят» самому же возвращающемуся.
+     *
+     * Поэтому здесь только находится прежняя карточка, а заявка привязывается
+     * к ней. Никаких INSERT: восстановление выполняет approveReserveReturn
+     * (active = true + перенос строки ШДС с листа «Запас»).
+     */
+    if (input.kind === APPLICATION_KIND_RESERVE_RETURN) {
+      const all = await db.select().from(members);
+      const wanted = input.fullName.toLowerCase();
+      const callsignWanted = input.callsign.toLowerCase();
+      const found = all.find(
+        (row) =>
+          (row.name || "").trim().toLowerCase() === wanted ||
+          (row.callsign || "").trim().toLowerCase() === wanted ||
+          (row.callsign || "").trim().toLowerCase() === callsignWanted
+      );
+
+      if (!found) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: `Боец «${input.fullName}» не найден в составе. Проверьте ФИО или обратитесь к штабу — заявку на возврат подаёт боец, уже переведённый в запас`,
+          },
+          { status: 404 }
+        );
+      }
+
+      // В строю — возвращаться некуда: это не запас, и восстанавливать нечего
+      if (found.active && found.status !== "dismissed") {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: `«${found.callsign || found.name}» числится в строю — отдельная заявка на возврат не нужна`,
+          },
+          { status: 409 }
+        );
+      }
+
+      return createApplicationForMember(req, ip, found, input, discordId, fromCookie);
+    }
+
     // Позывной — это логин, поэтому он должен быть свободен
     const [existing] = await db
       .select({ id: members.id })
@@ -210,14 +296,60 @@ async function createRecruit(
       return NextResponse.json({ ok: false, error: "Не удалось создать рапорт" }, { status: 500 });
     }
 
+    return finalizeApplication(req, ip, created, input, discordId, fromCookie);
+  } catch (e) {
+    console.error("[apply] Не удалось создать рапорт:", e);
+    return NextResponse.json({ ok: false, error: "Ошибка сервера" }, { status: 500 });
+  }
+}
+
+/**
+ * Проверенные данные заявки, передаваемые из основного обработчика в оформление.
+ *
+ * Общий тип для обеих веток — новобранца и возврата из запаса: после проверок
+ * они неразличимы, кроме вида заявки и ФИО, а копия набора полей разошлась бы.
+ */
+type ApplicationInput = {
+  callsign: string;
+  discordTag: string;
+  data: { age: number; armaExperience: string; specialization: string; comment: string };
+  /** Вид заявки: recruit — зачисление, reserve_return — возврат из запаса */
+  kind: RecruitApplicationKind;
+  /** ФИО возвращающегося (пусто для новобранца) */
+  fullName: string;
+};
+
+/**
+ * Общий финал подачи заявки: запись в recruit_applications, публикация в
+ * канале штаба, журнал и ответ кандидату.
+ *
+ * Вынесен отдельной функцией, потому что заявки подают два разных человека:
+ * новобранец (карточку создаём здесь же) и возвращающийся из запаса (карточка
+ * уже есть, и создавать её нельзя). Шаг после карточки у них одинаковый, а
+ * копия кода разошлась бы — например, возврат потерял бы вид заявки и снова
+ * показывался бы как обычное зачисление.
+ */
+async function finalizeApplication(
+  req: NextRequest,
+  ip: string,
+  member: { id: number; callsign: string | null },
+  input: ApplicationInput,
+  discordId: string | null,
+  fromCookie: ReturnType<typeof unpackDiscordProfile>
+): Promise<NextResponse> {
+  try {
     // Заявка дублируется в отдельную таблицу: именно её показывает канал
     // Discord с кнопками, и по ней принимается решение. Карточка бойца —
     // следствие решения, а не сама заявка.
     const [applicationRow] = await db
       .insert(recruitApplications)
       .values({
-        memberId: created.id,
-        callsign: created.callsign || input.callsign,
+        memberId: member.id,
+        callsign: member.callsign || input.callsign,
+        // Вид заявки и ФИО хранятся в своих колонках: по ним модерация
+        // отличает возврат из запаса от зачисления и находит строку бойца
+        kind: input.kind,
+        fullName: input.fullName || null,
         discordTag: input.discordTag.trim().slice(0, 64) || fromCookie?.username || "",
         discordId,
         age: input.data.age,
@@ -245,6 +377,10 @@ async function createRecruit(
           about: applicationRow.about || "",
           createdAt: applicationRow.createdAt,
           status: "pending",
+          // Модератор сразу видит, что это возврат из запаса, а не зачисление:
+          // заголовок Embed меняется вместе с видом заявки
+          kind: applicationRow.kind,
+          fullName: applicationRow.fullName,
         })
       );
 
@@ -262,20 +398,26 @@ async function createRecruit(
     // создания аккаунтов (ошибки ввода выше в лимит не идут)
     throttle.registerFailure(ip);
 
+    const isReserveReturn = input.kind === APPLICATION_KIND_RESERVE_RETURN;
+
     await db.insert(logs).values({
       category: "edit",
       author: input.callsign,
-      action: "подал рапорт на вступление",
+      action: isReserveReturn ? "подал запрос на возврат из запаса" : "подал рапорт на вступление",
       details: {
         "Позывной": input.callsign,
+        "Вид заявки": APPLICATION_KIND_LABELS[input.kind],
+        ...(input.fullName ? { "ФИО": input.fullName } : {}),
         "Возраст": String(input.data.age),
         "Специализация": input.data.specialization,
         "Discord": discordId || "не указан",
         "Источник": fromCookie ? "вход через Discord" : "ручной ввод",
       },
       kind: "system",
-      title: "Новый рапорт",
-      detail: `Рапорт от ${input.callsign} ожидает рассмотрения штаба`,
+      title: isReserveReturn ? "Запрос на возврат из запаса" : "Новый рапорт",
+      detail: isReserveReturn
+        ? `Запрос на возврат из запаса от ${input.fullName} (позывной ${input.callsign}) ожидает решения штаба`
+        : `Рапорт от ${input.callsign} ожидает рассмотрения штаба`,
       ok: true,
     });
 
@@ -283,14 +425,50 @@ async function createRecruit(
       ok: true,
       status: "pending",
       message: PENDING_NOTICE,
-      callsign: created.callsign,
+      callsign: member.callsign || input.callsign,
+      kind: input.kind,
       application: readApplication(input.data),
     });
     // Контакт Discord больше не нужен: он сохранён в анкете
     response.cookies.delete(MEMBER_OAUTH_PENDING_COOKIE);
     return response;
   } catch (e) {
-    console.error("[apply] Не удалось создать рапорт:", e);
+    console.error("[apply] Не удалось оформить заявку:", e);
     return NextResponse.json({ ok: false, error: "Ошибка сервера" }, { status: 500 });
   }
+}
+
+/**
+ * Заявка на возврат из запаса по существующей карточке бойца.
+ *
+ * Новую карточку не создаём (members.callsign уникален, и боец уже есть в
+ * табеле), а только оформляем заявку: решение по ней выполнит
+ * approveReserveReturn — восстановит active и перенесёт строку ШДС.
+ */
+function createApplicationForMember(
+  req: NextRequest,
+  ip: string,
+  member: typeof members.$inferSelect,
+  input: ApplicationInput,
+  discordId: string | null,
+  fromCookie: ReturnType<typeof unpackDiscordProfile>
+): Promise<NextResponse> {
+  // Discord ID обновляем, только если у бойца его ещё нет: у возвращающегося
+  // он обычно уже записан в табеле, и затирать его вводом из формы нельзя
+  if (discordId && !member.discordId) {
+    void db
+      .update(members)
+      .set({ discordId, updatedAt: new Date() })
+      .where(eq(members.id, member.id))
+      .catch((e) => console.error("[apply] Не удалось записать Discord ID:", e));
+  }
+
+  return finalizeApplication(
+    req,
+    ip,
+    { id: member.id, callsign: member.callsign },
+    input,
+    discordId,
+    fromCookie
+  );
 }

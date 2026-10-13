@@ -44,6 +44,9 @@ const cookieAuthApiPaths = [
   // Правка Discord ID: запрос меняет запись бойца и внешний документ, поэтому
   // межсайтовый PATCH отклоняется (роут проверяет источник и сам)
   "/api/admin/roster",
+  // Удаление профиля бойца: запрос необратим, чужой сайт не должен уметь
+  // отправить DELETE за администратора (роут проверяет источник и сам)
+  "/api/admin/members",
 ];
 
 /**
@@ -285,6 +288,113 @@ export async function middleware(req: NextRequest) {
     return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
   }
 
+  /**
+   * Правка Discord ID из табеля «Состав»: командир или администратор.
+   *
+   * Проверка стоит ДО общей ветки protectedPaths намеренно: роут внесён в
+   * protectedPaths, а та ветка требует cookie панели (auth_token) и ответила бы
+   * 401 командиру, который работает из кабинета бойца (member_token) — ровно
+   * тот случай, когда «в табеле поле заблокировано». Здесь допускается любая из
+   * двух сессий: middleware лишь не пускает заведомо чужих, а полную проверку
+   * прав (роль из БД, должность, звание) выполняет сам роут через
+   * requireRosterEditor.
+   */
+  if (pathname.startsWith("/api/admin/roster")) {
+    const panelToken = req.cookies.get("auth_token")?.value;
+    const role = panelToken ? await panelRole(panelToken) : null;
+    if (role === "admin" || role === "officer" || role === "commander") {
+      return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
+    }
+
+    const memberToken = req.cookies.get("member_token")?.value;
+    if (memberToken && (await memberClaims(memberToken))) {
+      return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
+    }
+
+    if (isApi) {
+      return NextResponse.json(
+        { error: "Только для командиров и администраторов" },
+        { status: panelToken || memberToken ? 403 : 401 }
+      );
+    }
+    return NextResponse.redirect(new URL("/", req.url));
+  }
+
+  /**
+   * Удаление профиля бойца (/api/admin/members): СТРОГО администратор.
+   *
+   * Ветка отдельная от правки состава намеренно. Правка карточки (roster) —
+   * инструмент командира подразделения, а удаление уничтожает личное дело
+   * вместе с допусками, историей и связью с Discord, поэтому командир здесь
+   * получает 403, а не 200. Проверяются обе сессии: у администратора панели
+   * может не быть строки в табеле, а у бойца-администратора — cookie панели.
+   *
+   * Middleware лишь отсекает заведомо чужих (роль из токена, без обращения к
+   * БД); окончательное решение — memberDeletionDecision в самом роуте, где
+   * роль читается из базы и понижение прав действует немедленно.
+   */
+  if (pathname.startsWith("/api/admin/members")) {
+    const panelToken = req.cookies.get("auth_token")?.value;
+    const role = panelToken ? await panelRole(panelToken) : null;
+    if (role === "admin") {
+      return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
+    }
+
+    const memberToken = req.cookies.get("member_token")?.value;
+    const claims = memberToken ? await memberClaims(memberToken) : null;
+    if (claims?.role === "admin") {
+      return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
+    }
+
+    if (isApi) {
+      return NextResponse.json(
+        { error: "Только для администратора" },
+        { status: panelToken || memberToken ? 403 : 401 }
+      );
+    }
+    return NextResponse.redirect(new URL("/", req.url));
+  }
+
+  /**
+   * «Журнал» (/logs и /api/logs): командир или администратор.
+   *
+   * Ветка стоит до общей проверки protectedPaths намеренно: /logs и /api/logs
+   * внесены в protectedPaths, а та ветка требует cookie панели (auth_token) и
+   * ответила бы редиректом/401 командиру, который работает из кабинета бойца
+   * (member_token) — ровно симптом «клик по Журналу уводит на /login?error=pending».
+   *
+   * Middleware лишь не пускает заведомо чужих: действующую сессию бойца
+   * пропускаем независимо от роли, а полную проверку прав (роль, должность,
+   * звание — resolvePanelRights) выполняют страница (через /api/me) и сам роут
+   * через requireStaff. Так командир подразделения по должности тоже открывает
+   * журнал, а обычный боец получает внятный отказ внутри страницы/роута.
+   */
+  if (
+    pathname === "/logs" ||
+    pathname.startsWith("/logs/") ||
+    pathname === "/api/logs" ||
+    pathname.startsWith("/api/logs/")
+  ) {
+    const panelToken = req.cookies.get("auth_token")?.value;
+    const role = panelToken ? await panelRole(panelToken) : null;
+    if (role === "admin" || role === "officer" || role === "commander") {
+      return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
+    }
+
+    const memberToken = req.cookies.get("member_token")?.value;
+    if (memberToken && (await memberClaims(memberToken))) {
+      return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
+    }
+
+    if (isApi) {
+      return NextResponse.json(
+        { error: "Только для командиров и администраторов" },
+        { status: panelToken || memberToken ? 403 : 401 }
+      );
+    }
+    return NextResponse.redirect(new URL("/login", req.url));
+  }
+
   if (!isProtected) return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
 
   const token = req.cookies.get("auth_token")?.value;
@@ -308,10 +418,7 @@ export async function middleware(req: NextRequest) {
       // необратимы, поэтому командира сюда не пускаем ещё на входе. Роут
       // дублирует проверку (requireMaintenance) — обход middleware не должен
       // открывать доступ.
-      pathname.startsWith("/api/admin/maintenance") ||
-      // Правка Discord ID с записью в Google Таблицу ШДС — полномочие
-      // администратора; роут дублирует проверку (requireRole) 
-      pathname.startsWith("/api/admin/roster");
+      pathname.startsWith("/api/admin/maintenance");
 
     if (isAdminArea && role !== "admin") {
       if (isApi) {
@@ -319,6 +426,7 @@ export async function middleware(req: NextRequest) {
       }
       return NextResponse.redirect(new URL("/", req.url));
     }
+
     return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
   } catch {
     if (isApi) return NextResponse.json({ error: "Сессия устарела" }, { status: 401 });

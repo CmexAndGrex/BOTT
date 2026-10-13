@@ -7,9 +7,11 @@
  * border-hairline, text-ink), чтобы цвета темы брались и классами, а не только
  * inline-стилями.
  *
- * Палитра: deep dark / tactical OLED. Подложка намеренно нейтральная, глубокий
- * уголь без сине-серой «выбеленности»: цвет отдают статусы (изумрудный
- * «в строю», янтарный отпуск, тактический красный акцент), а не поверхности.
+ * Палитра: deep graphite / tactical OLED. Подложка намеренно нейтральная,
+ * глубокий графит без сине-серой «выбеленности»: цвет отдают статусы
+ * (изумрудный «в строю», янтарный отпуск, неоново-бордовый акцент CTA), а не
+ * поверхности. Квадратной сетки на фоне нет: фон держат арт-обои и мягкая
+ * радиальная виньетка к краям.
  */
 @theme inline {
   --color-canvas: var(--bg);
@@ -24,30 +26,34 @@
 }
 
 :root {
-  /* Фон приложения — глубокий угольно-чёрный */
-  --bg: #090a0c;
-  /* Поверхности карточек: тёмный асфальт (#151821 → #12151b) */
-  --panel: rgba(21, 24, 33, 0.92);
-  --panel-solid: #12151b;
+  /* Фон приложения — глубокий графит (нейтральный, без синевы) */
+  --bg: #0c0d10;
+  /* Поверхности карточек: матовый графит (#14161b → #15171d) */
+  --panel: rgba(20, 22, 27, 0.94);
+  --panel-solid: #15171d;
   /* Плотные окна: модальные диалоги и плавающие панели */
-  --modal: rgba(15, 18, 22, 0.98);
-  /* Сайдбар и мобильное меню — глубокий графит */
-  --sidebar: #080a0d;
+  --modal: rgba(20, 22, 27, 0.98);
+  /* Сайдбар и мобильное меню — самый глубокий графит */
+  --sidebar: #090a0c;
   /* Поля ввода, врезки и «утопленные» блоки */
-  --field: #0d0f14;
-  /* Границы и разделители: нейтрально-тёмные с легкой резкостью */
-  --stroke: #1e232d;
+  --field: #101116;
+  /* Границы и разделители: тонкие графитовые */
+  --stroke: #242731;
   --stroke-soft: rgba(255, 255, 255, 0.07);
   /* Затемнение под модальными окнами */
-  --overlay: rgba(4, 5, 7, 0.78);
-  /* Текст: молочные заголовки, читаемый серый для лейблов */
-  --text: #f8fafc;
-  --muted: #94a3b8;
-  --dim: #7d8798;
-  /* Фирменный тактический красный */
-  --red: #ef4444;
-  --red-deep: #dc2626;
-  --red-soft: rgba(239, 68, 68, 0.14);
+  --overlay: rgba(5, 6, 8, 0.78);
+  /* Текст: мягкий светло-серый и нейтральные приглушённые оттенки */
+  --text: #e2e8f0;
+  --muted: #8e95a5;
+  --dim: #6b7280;
+  /* Фирменный неоново-бордовый акцент (рубиновый) */
+  --red: #be123c;
+  --red-deep: #881337;
+  --red-soft: rgba(136, 19, 55, 0.25);
+  /* Бордовый градиент главных кнопок действия и его неоновый отсвет */
+  --red-grad: linear-gradient(135deg, #700d2b 0%, #be123c 100%);
+  --red-grad-hover: linear-gradient(135deg, #9f1239 0%, #e11d48 100%);
+  --red-glow: 0 0 16px rgba(190, 18, 60, 0.35);
   --amber: #ffb020;
   --amber-soft: rgba(255, 176, 32, 0.14);
   /* Изумрудный: «в строю», сданные нормативы (emerald-950/500/400/300) */
@@ -72,7 +78,7 @@ html {
   color-scheme: dark;
   /* Firefox: тонкая графитовая полоса прокрутки в тон темы */
   scrollbar-width: thin;
-  scrollbar-color: rgba(148, 163, 184, 0.22) transparent;
+  scrollbar-color: rgba(142, 149, 165, 0.22) transparent;
 }
 
 body {
@@ -85,7 +91,7 @@ body {
 }
 
 ::selection {
-  background: rgba(239, 68, 68, 0.35);
+  background: rgba(190, 18, 60, 0.35);
   color: #fff;
 }
 
@@ -107,35 +113,32 @@ body {
 ::-webkit-scrollbar-thumb {
   /* background-color, а не шорткат background: шорткат сбрасывает
      background-clip, и прозрачная рамка «размывала» бы полосу */
-  background-color: rgba(148, 163, 184, 0.16);
+  background-color: rgba(142, 149, 165, 0.16);
   background-clip: content-box;
   border: 2px solid transparent;
   border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background-color: rgba(148, 163, 184, 0.3);
+  background-color: rgba(142, 149, 165, 0.3);
 }
 
-/* ---------- Фоновые слои ---------- */
+/*
+ * Фоновые слои.
+ *
+ * Квадратной сетки здесь больше нет: слой .fx-grid с linear-gradient-клеткой
+ * и background-size: 46px 46px удалён. Он читался как чертёжная миллиметровка
+ * поверх арт-обоев и спорил с таблицами, поэтому фон держат только фотографии
+ * и мягкая радиальная виньетка к краям (см. .fx-slide-vignette).
+ */
 .fx-bg {
   position: fixed;
   inset: 0;
   z-index: 0;
   pointer-events: none;
 }
-.fx-grid {
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.033) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.033) 1px, transparent 1px);
-  background-size: 46px 46px;
-  mask-image: radial-gradient(ellipse 90% 65% at 75% 0%, black, transparent 78%);
-  -webkit-mask-image: radial-gradient(ellipse 90% 65% at 75% 0%, black, transparent 78%);
-}
+/* Мягкий бордовый отсвет в правом верхнем углу: акцент CTA, а не синева */
 .fx-glow-red {
-  background: radial-gradient(ellipse 55% 42% at 82% -8%, rgba(255, 45, 45, 0.17), transparent 66%);
-}
-.fx-glow-blue {
-  background: radial-gradient(ellipse 42% 36% at -12% 108%, rgba(86, 116, 255, 0.09), transparent 62%);
+  background: radial-gradient(ellipse 55% 42% at 82% -8%, rgba(190, 18, 60, 0.16), transparent 66%);
 }
 .fx-noise {
   opacity: 0.55;
@@ -156,31 +159,32 @@ body {
  *
  * Плотность поднята намеренно: фото спорило с текстом таблиц («Состав»,
  * «Экзамены»), и цифры читались хуже, чем должны. Нижняя треть темнее верхней —
- * там стоят таблицы, а фон не отвлекает.
+ * там стоят таблицы, а фон не отвлекает. Тон затемнения — нейтральный графит
+ * без синевы, в тон --bg.
  */
 .fx-slide-overlay {
   position: absolute;
   inset: 0;
   background: linear-gradient(
     180deg,
-    rgba(4, 5, 7, 0.72),
-    rgba(4, 5, 7, 0.82) 55%,
-    rgba(4, 5, 7, 0.88)
+    rgba(5, 6, 8, 0.72),
+    rgba(5, 6, 8, 0.82) 55%,
+    rgba(5, 6, 8, 0.88)
   );
 }
 
 /*
  * Второй слой затемнения с фокусом в центре: по краям арт-обои приглушены
- * сильнее, в центре — читаемая «сцена». Так фон остаётся, но не конкурирует с
- * содержимым страницы.
+ * сильнее, в центре — читаемая «сцена». Это единственный «рисунок» на фоне:
+ * никаких полос и клеток, только мягкая радиальная виньетка к краям.
  */
 .fx-slide-vignette {
   position: absolute;
   inset: 0;
   background: radial-gradient(
     ellipse 78% 62% at 50% 38%,
-    rgba(9, 10, 12, 0.34),
-    rgba(4, 5, 7, 0.86) 100%
+    rgba(12, 13, 16, 0.34),
+    rgba(5, 6, 8, 0.86) 100%
   );
 }
 
@@ -189,6 +193,18 @@ body {
   font-family: var(--font-display);
   letter-spacing: -0.01em;
 }
+/*
+ * Врезка ошибки: бордовая рамка и мягкая заливка в тон акценту CTA.
+ * Раньше такие сообщения собирались Tailwind-классами red-500/red-400 —
+ * это была палитра Tailwind (алый), а не палитра темы, и она выбивалась из
+ * графитово-бордовой гаммы. Теперь врезка берёт токены темы.
+ */
+.alert-red {
+  background: rgba(136, 19, 55, 0.16);
+  border: 1px solid rgba(190, 18, 60, 0.4);
+  color: #fda4af;
+}
+
 .eyebrow {
   font-size: 0.7rem;
   letter-spacing: 0.3em;
@@ -215,7 +231,7 @@ body {
   position: relative;
   border-radius: 22px;
   border: 1px solid var(--stroke);
-  /* Тёмный асфальт: поверхность чуть светлее подложки, но без синевы */
+  /* Матовый графит: поверхность чуть светлее подложки, но без синевы */
   background: linear-gradient(180deg, var(--panel), var(--panel-solid));
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
@@ -242,7 +258,7 @@ body {
   inset: -1px;
   border-radius: 22px;
   padding: 1px;
-  background: linear-gradient(135deg, rgba(239, 68, 68, 0.55), transparent 40%, transparent 70%, rgba(239, 68, 68, 0.25));
+  background: linear-gradient(135deg, rgba(190, 18, 60, 0.55), transparent 40%, transparent 70%, rgba(190, 18, 60, 0.25));
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;
@@ -285,19 +301,27 @@ body {
   cursor: wait;
   transform: none;
 }
+/*
+ * Главные кнопки действия: бордовый градиент с мягким неоновым отсветом.
+ * Токены --red-grad / --red-grad-hover / --red-glow держат градиент и свечение
+ * в одном месте, поэтому «Подать рапорт», активный сегмент прогресс-бара и
+ * бейджи читаются как один акцент, а не как три оттенка красного.
+ */
 .btn-primary {
-  background: linear-gradient(135deg, #ef4444, #dc2626 60%, #b91c1c);
-  border-color: rgba(248, 113, 113, 0.45);
+  background: var(--red-grad);
+  border-color: rgba(190, 18, 60, 0.5);
   color: #fff;
   box-shadow:
-    0 16px 34px -14px rgba(220, 38, 38, 0.6),
+    var(--red-glow),
+    0 16px 34px -14px rgba(136, 19, 55, 0.7),
     inset 0 1px 0 rgba(255, 255, 255, 0.26);
 }
 .btn-primary:hover {
-  background: linear-gradient(135deg, #f87171, #ef4444 60%, #dc2626);
+  background: var(--red-grad-hover);
   filter: brightness(1.06);
   box-shadow:
-    0 20px 40px -14px rgba(220, 38, 38, 0.7),
+    0 0 20px rgba(225, 29, 72, 0.45),
+    0 20px 40px -14px rgba(136, 19, 55, 0.8),
     inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 .btn-sm {
@@ -336,7 +360,7 @@ body {
 }
 .dot-err {
   background: var(--red);
-  box-shadow: 0 0 10px rgba(239, 68, 68, 0.9);
+  box-shadow: 0 0 10px rgba(190, 18, 60, 0.9);
 }
 .dot-warn {
   background: var(--amber);
@@ -379,9 +403,9 @@ body {
 .input:focus,
 .textarea:focus,
 .select:focus {
-  /* Чёткая граница при фокусе: фирменный красный акцент */
+  /* Чёткая граница при фокусе: фирменный бордовый акцент с мягким свечением */
   border-color: var(--red-deep);
-  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.16);
+  box-shadow: 0 0 0 3px rgba(136, 19, 55, 0.22);
 }
 .input:disabled,
 .textarea:disabled,
@@ -492,6 +516,11 @@ body {
   background: rgba(255, 255, 255, 0.08);
   overflow: hidden;
 }
+/*
+ * Красная заливка прогресс-бара (выработка часов, нормативы): тот же бордовый
+ * градиент и неоновый отсвет, что у главных кнопок действия. Градиент задаётся
+ * inline-стилем из токенов --red-grad / --red-glow — класс держит переход ширины.
+ */
 .hours-fill {
   height: 100%;
   border-radius: 99px;
@@ -540,7 +569,7 @@ body {
   /* Глубокий графит: темнее поверхностей карточек, чтобы меню «уходило» назад.
      Значение дублирует --sidebar осознанно: color-mix с transparent Lightning CSS
      сворачивает в непрозрачный var(--sidebar), и полупрозрачность под blur теряется */
-  background: rgba(8, 10, 13, 0.94);
+  background: rgba(9, 10, 12, 0.94);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
 }
@@ -567,8 +596,8 @@ body {
   position: absolute;
   inset: 0;
   border-radius: 12px;
-  background: linear-gradient(90deg, rgba(239, 68, 68, 0.18), rgba(239, 68, 68, 0.04));
-  border: 1px solid rgba(239, 68, 68, 0.32);
+  background: linear-gradient(90deg, rgba(190, 18, 60, 0.18), rgba(136, 19, 55, 0.04));
+  border: 1px solid rgba(190, 18, 60, 0.32);
   z-index: 0;
 }
 
@@ -610,7 +639,7 @@ body {
     padding: 12px 14px;
     border-bottom: 1px solid var(--stroke);
     /* Тот же графит, что у сайдбара, но плотнее: панель перекрывает контент */
-    background: rgba(8, 10, 13, 0.97);
+    background: rgba(9, 10, 12, 0.97);
     backdrop-filter: blur(18px);
     overflow-x: auto;
   }
@@ -662,7 +691,7 @@ body {
   font-weight: 800;
   letter-spacing: 0.03em;
   color: #fff;
-  background: linear-gradient(135deg, #2f3542, #1a1e26);
+  background: linear-gradient(135deg, #2a2d36, #191b21);
   border: 1px solid rgba(255, 255, 255, 0.12);
   flex: none;
 }
@@ -690,11 +719,16 @@ body {
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-/* Фирменный красный акцент — нарушения, выбывшие, отказы */
+/*
+ * Фирменный бордовый акцент — нарушения, выбывшие, отказы.
+ * Главный акцентный бейдж носит тот же бордовый градиент с неоновым отсветом,
+ * что и кнопки действия: цвет и форма читаются как один язык интерфейса.
+ */
 .badge-red {
-  background: var(--red-soft);
-  border-color: rgba(239, 68, 68, 0.4);
-  color: #fca5a5;
+  background: var(--red-grad);
+  border-color: rgba(190, 18, 60, 0.5);
+  color: #fff;
+  box-shadow: var(--red-glow);
 }
 .badge-amber {
   background: var(--amber-soft);
@@ -741,6 +775,61 @@ body {
   border-top: none;
 }
 
+/* ---------- Вкладки страницы настроек ---------- */
+/*
+ * Полоса вкладок: на узком экране прокручивается по горизонтали, а не сжимает
+ * подписи до нечитаемого состояния — «Контент и роли» и «Обслуживание» иначе
+ * ломались бы по слогам.
+ */
+.tabs {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0.3rem;
+  border-radius: 14px;
+  border: 1px solid var(--stroke);
+  background: rgba(255, 255, 255, 0.025);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex: none;
+  padding: 0.5rem 0.9rem;
+  border-radius: 11px;
+  border: 1px solid transparent;
+  background: transparent;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    color 0.2s,
+    background 0.2s,
+    border-color 0.2s;
+  white-space: nowrap;
+}
+.tab:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+}
+.tab:focus-visible {
+  outline: none;
+  border-color: var(--red-deep);
+  box-shadow: 0 0 0 3px rgba(136, 19, 55, 0.22);
+}
+.tab[data-on="true"] {
+  background: var(--red-grad);
+  color: #fff;
+  border-color: rgba(190, 18, 60, 0.5);
+  box-shadow: 0 8px 20px -10px rgba(136, 19, 55, 0.8);
+}
+
 .day-pill {
   min-width: 42px;
   padding: 0.42rem 0;
@@ -759,10 +848,10 @@ body {
   color: var(--text);
 }
 .day-pill[data-on="true"] {
-  background: linear-gradient(135deg, var(--red), var(--red-deep));
+  background: var(--red-grad);
   color: #fff;
-  border-color: rgba(248, 113, 113, 0.5);
-  box-shadow: 0 8px 20px -10px rgba(220, 38, 38, 0.7);
+  border-color: rgba(190, 18, 60, 0.5);
+  box-shadow: 0 8px 20px -10px rgba(136, 19, 55, 0.8);
 }
 
 .kbd {
@@ -779,8 +868,8 @@ body {
   fill: rgba(255, 255, 255, 0.04);
 }
 .tooltip-box {
-  /* Асфальт темы, слегка разрежённый: подсказка читается поверх графика */
-  background: rgba(18, 21, 27, 0.96);
+  /* Матовый графит темы, слегка разрежённый: подсказка читается поверх графика */
+  background: rgba(21, 23, 29, 0.96);
   border: 1px solid var(--stroke);
   border-radius: 12px;
   padding: 0.6rem 0.8rem;

@@ -11,6 +11,11 @@ import React from "react";
 import { ThumbsDown, ThumbsUp } from "lucide-react";
 import { Section, Spinner, fmtDate } from "@/components/ui";
 import { reportTypeMeta, type ReviewStatus, type ServiceReportType } from "@/lib/reports";
+import {
+  APPLICATION_KIND_RESERVE_RETURN,
+  APPLICATION_KIND_TITLES,
+  type RecruitApplicationKind,
+} from "@/lib/recruits";
 
 export type ReportRow = {
   id: number;
@@ -31,6 +36,10 @@ export type RecruitRow = {
   id: number;
   memberId: number | null;
   callsign: string;
+  /** Вид заявки: recruit — новобранец, reserve_return — возврат из запаса */
+  kind?: RecruitApplicationKind | null;
+  /** ФИО возвращающегося из запаса: по нему ищется строка на листе «Запас» */
+  fullName?: string | null;
   discordTag: string | null;
   discordId: string | null;
   age: number | null;
@@ -164,7 +173,7 @@ function DecisionBar({
         onClick={() => onDecide(id, "reject")}
         className="btn btn-sm"
         disabled={inFlight}
-        style={{ color: "var(--red)", borderColor: "transparent", background: "rgba(239,68,68,0.1)" }}
+        style={{ color: "var(--red)", borderColor: "transparent", background: "rgba(190,18,60,0.1)" }}
       >
         <ThumbsDown size={14} /> Отклонить
       </button>
@@ -189,15 +198,30 @@ export function RecruitsQueue({ rows, ...handlers }: QueueHandlers & { rows: Rec
 
   return (
     <div className="flex flex-col gap-4">
-      {rows.map((row) => (
+      {rows.map((row) => {
+        /**
+         * Вид заявки показывается явно: возврат из запаса — «Запрос на возврат
+         * из запаса». Модератор обязан видеть разницу до нажатия «Одобрить»,
+         * потому что решение по возврату переносит строку в Google Таблице,
+         * а не зачисляет нового бойца.
+         */
+        const isReserveReturn = row.kind === APPLICATION_KIND_RESERVE_RETURN;
+        return (
         <Section
           key={row.id}
           title={`#${row.id} · ${row.callsign}`}
-          eyebrow="заявка на вступление"
+          eyebrow={
+            isReserveReturn
+              ? APPLICATION_KIND_TITLES.reserve_return
+              : "заявка на вступление"
+          }
           action={<span className={`badge ${STATUS_BADGE[row.status]}`}>{STATUS_LABEL[row.status]}</span>}
         >
           <div className="flex flex-col gap-3 p-5">
             <div className="flex flex-wrap items-center gap-3 text-[12.5px]">
+              {isReserveReturn && (
+                <span className="badge badge-amber">{APPLICATION_KIND_TITLES.reserve_return}</span>
+              )}
               <span className="chip">{row.age ? `${row.age} лет` : "возраст не указан"}</span>
               {row.discordTag && <span className="chip">Discord: {row.discordTag}</span>}
               {row.discordId && (
@@ -209,6 +233,16 @@ export function RecruitsQueue({ rows, ...handlers }: QueueHandlers & { rows: Rec
                 {fmtDate(row.createdAt)}
               </span>
             </div>
+
+            {/* ФИО возвращающегося: по нему бот ищет строку на листе «Запас» */}
+            {isReserveReturn && (
+              <div>
+                <div className="label mb-1">ФИО в табеле / «Запасе»</div>
+                <p className="text-[12.5px]" style={{ color: row.fullName ? "var(--text)" : "var(--red)" }}>
+                  {row.fullName || "не указано — строку в «Запасе» найти нечем"}
+                </p>
+              </div>
+            )}
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <div>
@@ -234,7 +268,8 @@ export function RecruitsQueue({ rows, ...handlers }: QueueHandlers & { rows: Rec
             <DecisionBar scope="recruit" id={row.id} status={row.status} {...handlers} />
           </div>
         </Section>
-      ))}
+        );
+      })}
     </div>
   );
 }

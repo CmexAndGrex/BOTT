@@ -11,7 +11,13 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { parseRequestText, SHDS_ACTIONS, resolveLayout } from "@/lib/gsheets.ts";
+import {
+  defaultPostFor,
+  parseRequestText,
+  SHDS_ACTIONS,
+  resolveLayout,
+  sheetRank,
+} from "@/lib/gsheets.ts";
 
 /** Заявка как её шлёт бот формы или пишет человек */
 const request = (...lines: string[]) => lines.join("\n");
@@ -273,11 +279,36 @@ describe("resolveLayout — раскладка ШДС по подразделе�
     assert.deepEqual(layout.overall, { top: 10, bottom: 56 });
   });
 
-  test("Артиллерийский дивизион: колонка D, добавление в строки 32–41", () => {
+  test("Артиллерийский дивизион: та же раскладка строки, добавление в строки 32–41", () => {
+    // Колонка имени у обоих листов одна («C»): раскладка строки ШДС одинакова —
+    // B звание, C фамилия, D должность, E Steam ID, F Discord ID. Пока у
+    // дивизиона стояло «D», всё, что писалось рядом с фамилией, уезжало на
+    // колонку вправо.
     const layout = resolveLayout("Артиллерийский дивизион");
     assert.equal(layout.key, "AD");
-    assert.equal(layout.nameCol, "D");
+    assert.equal(layout.nameCol, "C");
     assert.deepEqual(layout.addRange, { top: 32, bottom: 41 });
+  });
+
+  test("штатная должность секции подставляется по номеру строки", () => {
+    const tr = resolveLayout("Танковая рота");
+    // Учебное отделение ТР (строки 42–56) и блок мехводов/наводчиков
+    assert.equal(defaultPostFor(tr, 45), "Логист-снабженец/резерв");
+    assert.equal(defaultPostFor(tr, 30), "Специалист Мех.водитель");
+    assert.equal(defaultPostFor(tr, 22), "Специалист Наводчик-Оператор");
+
+    const ad = resolveLayout("Артиллерийский дивизион");
+    assert.equal(defaultPostFor(ad, 35), "Логист-снабженец");
+  });
+
+  test("звание для листа: пустое и «Курсант» заменяются на «Рядовой»", () => {
+    assert.equal(sheetRank("Курсант"), "Рядовой");
+    assert.equal(sheetRank("курсант"), "Рядовой");
+    assert.equal(sheetRank("   "), "Рядовой");
+    assert.equal(sheetRank(""), "Рядовой");
+    assert.equal(sheetRank("Сержант"), "Сержант");
+    // Звание со званиями из справочника остаётся как есть
+    assert.equal(sheetRank("Лейтенант"), "Лейтенант");
   });
 
   test("название не строгое: «танковая рота» в нижнем регистре работает", () => {

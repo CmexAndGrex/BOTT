@@ -13,7 +13,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { members } from "@/db/schema";
 import { getSettings, setSettingQuiet } from "@/lib/settings";
-import { getDoc } from "@/lib/gsheets";
+import { columnIndexOf, getDoc, resolveLayout } from "@/lib/gsheets";
 import { sendChannelMessage } from "@/lib/discord";
 
 export type FormResponse = {
@@ -149,7 +149,10 @@ export async function enrichDiscordId(resp: FormResponse): Promise<void> {
       );
       if (!sheet) continue;
       await sheet.loadCells();
-      const nameCol = /дивизион|артиллер/i.test(title) ? 3 : 2; // D или C
+      // Колонка имени берётся из раскладки ШДС (gsheets.ts), а не выписывается
+      // буквой: раскладка строки одна у обоих листов, и вторая её копия здесь
+      // разошлась бы при любой правке — Discord ID искался бы не в той колонке
+      const nameCol = columnIndexOf(resolveLayout(title).nameCol);
       for (let r = 1; r < sheet.rowCount; r++) {
         const v = String(sheet.getCell(r, nameCol).value ?? "").trim().toLowerCase();
         if (v && v === resp.userName.trim().toLowerCase()) {

@@ -77,7 +77,9 @@ const LAYOUTS = {
   TR: { title: "Танковая рота", nameCol: 2, top: 10, bottom: 56, addTop: 42, addBottom: 56 },
   AD: {
     title: "Артиллерийский дивизион",
-    nameCol: 3,
+    // Колонка имени у обоих листов одна («C», индекс 2): раскладка строки
+    // ШДС одинакова — B звание, C фамилия, D должность, E Steam, F Discord
+    nameCol: 2,
     top: 12,
     bottom: 41,
     addTop: 32,
@@ -125,6 +127,30 @@ async function inspectUnit(doc, key) {
   return { key, title: layout.title, found: true, members, vacantFree };
 }
 
+/**
+ * Служебные колонки листа «Запас».
+ *
+ * Новый формат (после расширения снапшота строки до A–AG): AH(33)=подразделение,
+ * AI(34)=роли, AJ(35)=дата. Старый формат (снапшот A–T): U(20), V(21), W(22) —
+ * такие строки читаются по-прежнему, чтобы отчёт не врал про уже лежащих в
+ * запасе бойцов.
+ */
+const RESERVE_META = {
+  new: { unit: 33, roles: 34, date: 35, label: "AH..AJ" },
+  legacy: { unit: 20, roles: 21, date: 22, label: "U..W" },
+};
+/** Порог длины строки, после которого метаданные считаются новыми (колонка AH) */
+const NEW_META_MIN_COLS = 34;
+
+/** Ширина занятой части строки (индекс последней непустой ячейки + 1) */
+function occupiedWidth(sheet, row) {
+  const last = Math.min(RESERVE_META.new.date, sheet.columnCount - 1);
+  for (let c = last; c >= 0; c--) {
+    if (String(sheet.getCell(row, c).value ?? "").trim()) return c + 1;
+  }
+  return 0;
+}
+
 async function inspectReserve(doc, sheetName) {
   const sheet = Object.values(doc.sheetsById).find(
     (s) => (s.title || "").trim().toLowerCase() === sheetName.toLowerCase()
@@ -134,10 +160,13 @@ async function inspectReserve(doc, sheetName) {
   await sheet.loadCells();
   const rows = [];
   for (let r = 0; r < sheet.rowCount; r++) {
-    // Служебные колонки листа запаса: U(20)=подразделение, V(21)=роли, W(22)=дата
-    const unit = String(sheet.getCell(r, 20).value ?? "").trim();
-    const roles = String(sheet.getCell(r, 21).value ?? "").trim();
-    const date = String(sheet.getCell(r, 22).value ?? "").trim();
+    const meta =
+      occupiedWidth(sheet, r) >= NEW_META_MIN_COLS
+        ? RESERVE_META.new
+        : RESERVE_META.legacy;
+    const unit = cell(sheet, r + 1, meta.unit);
+    const roles = cell(sheet, r + 1, meta.roles);
+    const date = cell(sheet, r + 1, meta.date);
     // Ищем имя в A–D
     let name = "";
     let nameColFound = -1;
@@ -157,6 +186,9 @@ async function inspectReserve(doc, sheetName) {
       unit: unit || "—",
       rolesCount: roles ? roles.split(",").filter(Boolean).length : 0,
       date: date || "—",
+      metaCols: meta.label,
+      // Сколько колонок строки занято: у новых записей ожидается ≥ 34 (снапшот A..AG)
+      filledCols: occupiedWidth(sheet, r),
     });
   }
   return { title: sheetName, found: true, rows };
@@ -194,10 +226,19 @@ function printReserve(r) {
     return;
   }
   console.log(`  записей: ${r.rows.length}`);
+  console.log(
+    "  служебные колонки: новые — AH..AJ, старые записи — U..W (читаются оба формата)"
+  );
   for (const x of r.rows) {
     console.log(
-      `  стр ${String(x.excelRow).padEnd(4)} ${x.name.padEnd(22)} подразделение: ${x.unit.padEnd(22)} ролей сохранено: ${x.rolesCount}  ушёл: ${x.date}`
+      `  стр ${String(x.excelRow).padEnd(4)} ${x.name.padEnd(22)} подразделение: ${x.unit.padEnd(22)} ролей сохранено: ${x.rolesCount}  ушёл: ${x.date}  [${x.metaCols}, занято колонок: ${x.filledCols}]`
     );
+    // Снапшот строки бойца — A..AG (33 колонки) плюс служебные AH..AJ: строка
+    // короче 34 колонок означает запись СТАРОГО формата (снапшот A–T), и хвост
+    // отметок (уставы, ПВО, БПЛА, береты) у неё не сохранён
+    if (x.metaCols === "U..W" && x.name !== "(без имени)") {
+      console.log("       ⚠️  запись старого формата: снапшот A–T, хвост отметок не сохранён");
+    }
   }
 }
 

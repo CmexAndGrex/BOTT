@@ -16,7 +16,7 @@ import { db } from "@/db";
 import { members } from "@/db/schema";
 import { getAuthUser } from "@/lib/api-auth";
 import { getSessionMember } from "@/lib/member-auth";
-import { canViewPrivateFields } from "@/lib/validation";
+import { resolvePanelRights } from "@/lib/panel-rights";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,7 +24,22 @@ export const dynamic = "force-dynamic";
 /** Имеет ли зритель право видеть приватные поля бойцов (Discord ID) */
 async function canViewPrivate(req: NextRequest): Promise<boolean> {
   const [user, member] = await Promise.all([getAuthUser(req), getSessionMember(req)]);
-  return canViewPrivateFields(user?.role, member?.role);
+  /**
+   * Правило одно на сервер и интерфейс — resolvePanelRights (lib/panel-rights.ts).
+   *
+   * Раньше здесь вызывался canViewPrivateFields(panelRole, memberRole), который
+   * смотрел только роли. Командиру подразделения («Волков»), у которого роль
+   * штаба в колонке role не выставлена, а должность записана, поле приходило
+   * как null: в табеле колонка была видна, но пуста — и правка выглядела
+   * «заблокированной». Право считается по обеим сессиям и по должности со
+   * званием из табеля, ровно как на страницах панели.
+   */
+  return resolvePanelRights({
+    panelRole: user?.role,
+    memberRole: member?.role,
+    memberPost: member?.post,
+    memberRank: member?.rank,
+  }).canViewPrivate;
 }
 
 export async function GET(req: NextRequest) {

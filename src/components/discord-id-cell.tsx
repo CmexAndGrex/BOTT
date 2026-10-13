@@ -180,7 +180,7 @@ function DiscordIdDialog({
         style={{
           background: "var(--modal)",
           backdropFilter: "blur(14px)",
-          borderColor: "rgba(239,68,68,0.28)",
+          borderColor: "rgba(190,18,60,0.28)",
         }}
         onClick={(e) => e.stopPropagation()}
       >

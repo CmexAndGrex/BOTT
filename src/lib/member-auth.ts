@@ -22,12 +22,12 @@ import { getJwtSecret } from "@/lib/auth";
 import { getAuthUser, isSecureRequest } from "@/lib/api-auth";
 import {
   hasProfileAccess,
-  isStaffRole,
   MANUAL_DISCORD_ID,
   type MemberRole,
   type MemberStatus,
 } from "@/lib/recruits";
 import { pickMemberForPanelAccount, CABINET_STATE_MESSAGES, type CabinetState, type PanelMemberCandidate } from "@/lib/panel-link";
+import { normalizeCommanderRole, resolvePanelRights } from "@/lib/panel-rights";
 
 /* ------------------------------------------------------------------ */
 /* Константы                                                           */
@@ -67,6 +67,14 @@ export type SessionMember = {
   discordId: string | null;
   rank: string;
   unit: string | null;
+  /**
+   * Должность из табеля.
+   *
+   * Нужна для прав: должность «Командир подразделения» даёт командира даже
+   * без роли штаба в колонке role (см. resolvePanelRights). Без неё страница
+   * «Контроль» и правка Discord ID отказывали командиру с сессией кабинета.
+   */
+  post: string | null;
   status: MemberStatus;
   role: MemberRole;
   avatarUrl: string | null;
@@ -159,6 +167,7 @@ async function loadSessionMember(memberId: number): Promise<LoadedMember | null>
       discordId: members.discordId,
       rank: members.rank,
       unit: members.unit,
+      post: members.post,
       status: members.status,
       role: members.role,
       avatarUrl: members.avatarUrl,
@@ -180,6 +189,7 @@ async function loadSessionMember(memberId: number): Promise<LoadedMember | null>
       discordId: row.discordId,
       rank: row.rank,
       unit: row.unit,
+      post: row.post,
       status: row.status,
       role: row.role,
       avatarUrl: row.avatarUrl,
@@ -441,7 +451,7 @@ export async function requireStaff(req: NextRequest): Promise<MemberAuthResult> 
   const member = await getSessionMember(req);
   if (
     member &&
-    isStaffRole(member.role) &&
+    hasStaffRights(member) &&
     member.status !== "dismissed" &&
     member.status !== "pending"
   ) {
@@ -449,21 +459,23 @@ export async function requireStaff(req: NextRequest): Promise<MemberAuthResult> 
   }
 
   const admin = await getAuthUser(req);
-  if (admin && (admin.role === "admin" || admin.role === "officer")) {
+  if (admin && isPanelStaffValue(admin.role)) {
+    /**
+     * Роль берётся из ПАНЕЛЬНОЙ сессии, а не из карточки бойца.
+     *
+     * Администратор может быть связан с бойцом, у которого роль «member»
+     * (привязка не понижает панельные права). Верни мы карточку бойца как есть
+     * — подпись в журнале и решениях стала бы «Командир», хотя распорядился
+     * администратор, и разбор истории запутался бы.
+     *
+     * Позывной бойца при этом сохраняем: он понятнее логина панели.
+     */
     return {
       ok: true,
       member: {
-        id: 0,
-        callsign: admin.username || "",
-        discordId: null,
-        rank: "",
-        unit: null,
-        status: "active",
-        role: admin.role,
-        avatarUrl: null,
-        hasPassword: true,
-        hasDiscord: false,
-        createdAt: new Date(0),
+        ...(member ?? EMPTY_SESSION_MEMBER),
+        role: normalizeCommanderRole(admin.role) ?? "officer",
+        callsign: member?.callsign || admin.username || "",
       },
     };
   }
@@ -473,6 +485,104 @@ export async function requireStaff(req: NextRequest): Promise<MemberAuthResult> 
     response: NextResponse.json(
       { ok: false, error: "Недостаточно прав: раздел доступен командирам и администраторам" },
       { status: 403 }
+    ),
+  };
+}
+
+/**
+ * Права штаба у бойца: роль officer/admin (в том числе в написании «commander»)
+ * ИЛИ должность/звание командира подразделения из табеля.
+ *
+ * Должность учитывается намеренно: командир подразделения может не иметь роли
+ * штаба в колонке role, но модерация и правка состава — его работа. Командир
+ * НЕ получает прав администратора: /settings и обслуживание системы закрыты
+ * отдельно (isAdminArea в middleware и requireMaintenance).
+ */
+export function hasStaffRights(member: { role: unknown; post?: unknown; rank?: unknown }): boolean {
+  return resolvePanelRights({
+    memberRole: member.role,
+    memberPost: member.post,
+    memberRank: member.rank,
+  }).canControl;
+}
+
+/** Роль панели относится к штабу (admin/officer/commander) */
+function isPanelStaffValue(role: unknown): boolean {
+  const normalized = normalizeCommanderRole(role);
+  return normalized === "admin" || normalized === "officer";
+}
+
+/**
+ * Пустая карточка бойца для сессий без строки в табеле.
+ *
+ * Нужна там, где гвард допускает панельную сессию без связанного бойца
+ * (администратор ведёт бота и статистику, и требовать от него регистрацию в
+ * составе абсурдно). Прав такая карточка не добавляет — решение о доступе уже
+ * принято, — и служит только для подписи в журнале и ответа API.
+ */
+const EMPTY_SESSION_MEMBER: SessionMember = {
+  id: 0,
+  callsign: "",
+  discordId: null,
+  rank: "",
+  unit: null,
+  post: null,
+  status: "active",
+  role: "officer",
+  avatarUrl: null,
+  hasPassword: true,
+  hasDiscord: false,
+  createdAt: new Date(0),
+};
+
+/**
+ * Доступ к правке строки состава (Discord ID, отпуск).
+ *
+ * Гвард отдельный от requireStaff намеренно: правка табеля — инструмент
+ * командира подразделения, и он обязан работать у бойца, вошедшего в кабинет
+ * (у него нет сессии панели), а также у командира, чья должность записана в
+ * табеле, но роль штаба в колонке role не выставлена.
+ *
+ * Правило не дублируется: права считает resolvePanelRights — тот же модуль,
+ * что и интерфейс. Иначе «на клиенте поле открыто, а сервер отвечает 403»
+ * (ровно этот рассинхрон и пришёл как баг).
+ */
+export async function requireRosterEditor(req: NextRequest): Promise<MemberAuthResult> {
+  const user = await getAuthUser(req);
+  const member = await getSessionMember(req);
+
+  const rights = resolvePanelRights({
+    panelRole: user?.role,
+    memberRole: member?.role,
+    memberPost: member?.post,
+    memberRank: member?.rank,
+  });
+
+  if (rights.canEditRosterDiscordId) {
+    /**
+     * Роль в карточке — из ПАНЕЛЬНОЙ сессии, когда она есть: администратор,
+     * связанный с бойцом-«member», остаётся администратором (привязка не
+     * понижает панельные права), и подпись в журнале правки ШДС должна
+     * отражать того, кто распорядился.
+     *
+     * Позывной бойца сохраняем: он понятнее логина панели.
+     */
+    const panelRole = normalizeCommanderRole(user?.role);
+    return {
+      ok: true,
+      member: {
+        ...(member ?? EMPTY_SESSION_MEMBER),
+        role: panelRole === "admin" || panelRole === "officer" ? panelRole : (member?.role ?? "officer"),
+        callsign: member?.callsign || user?.username || "",
+      },
+    };
+  }
+
+  return {
+    ok: false,
+    response: NextResponse.json(
+      { ok: false, error: "Недостаточно прав: правка состава доступна командирам и администраторам" },
+      { status: user ? 403 : 401 }
     ),
   };
 }

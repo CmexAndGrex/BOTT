@@ -11,7 +11,12 @@ import bcrypt from "bcryptjs";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { logs, members, recruitApplications, serviceReports } from "@/db/schema";
-import { editChannelMessage, sendDirectMessage, type DiscordActionRow } from "@/lib/discord";
+import {
+  editChannelMessage,
+  sendDirectMessage,
+  type DiscordActionRow,
+  type DmResult,
+} from "@/lib/discord";
 import type { DiscordEmbed } from "@/lib/discord";
 import {
   BERET_CODE,
@@ -19,11 +24,14 @@ import {
   buildReportEmbed,
   columnExamFor,
   examColumnTokens,
+  findPositionSection,
   formatIsoDate,
+  missingSectionExams,
   readReportPayload,
   reviewCustomId,
   type ExamItem,
   type ExamPayload,
+  type PositionTransferPayload,
   type ReservePayload,
   type ReviewStatus,
   type RolePayload,
@@ -33,10 +41,15 @@ import {
 // Пароль — серверная часть (node:crypto), вынесена из reports.ts: тот модуль
 // используется и в браузере, где crypto-модуль Node недоступен
 import { generateTempPassword } from "@/lib/temp-password";
-import { DEFAULT_RANK, MEMBER_STATUS } from "@/lib/recruits";
+import { DEFAULT_RANK, MEMBER_STATUS, APPLICATION_KIND_RESERVE_RETURN } from "@/lib/recruits";
 import { COMMON_ROLE_IDS } from "@/lib/roles";
+import { statusTrackingFields } from "@/lib/roles-monitor";
 import { isBeretPassed } from "@/lib/exams";
 import { getSettings } from "@/lib/settings";
+// Сданные нормативы можно проставить правкой таблицы, а не рапортом через
+// панель: без чтения отметок из листа ШДС зачёт берёта и требований ступени
+// опирался бы только на электронные рапорты и пропускал ручные отметки.
+import { examsFromSheet } from "@/lib/gsheets";
 
 /* ------------------------------------------------------------------ */
 /* Общий тип результата решения                                        */
@@ -53,6 +66,106 @@ export type ReviewOutcome = {
 /** Тексты ошибок вынесены отдельно: одно и то же слово в боте и в панели */
 const ALREADY_DECIDED = "Решение по этой записи уже принято";
 const NOT_FOUND = "Запись не найдена";
+
+/* ------------------------------------------------------------------ */
+/* Discord — «мягкий» внешний сервис                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Единая формулировка для журнала: по ней ищут инциденты «зачисление упало
+ * из-за Discord». Текст один на все вызовы, чтобы не было двух похожих фраз и
+ * поиск по логам не делился на два варианта.
+ */
+const DISCORD_WARNING = "[review] Ошибка Discord, продолжаем зачисление:";
+
+/**
+ * Безопасный вызов Discord.
+ *
+ * Почему обёртка, а не try/catch на каждом вызове: Discord — внешний сервис, и
+ * его отказ (400 Invalid Form Body, 404 Unknown Message, 500 у самого Discord,
+ * обрыв сети) не имеет права отменять решение штаба. Порядок в этом модуле
+ * жёсткий — сначала PostgreSQL и ШДС, и любое исключение отсюда долетело бы до
+ * catch вызывающей функции, превратив уже принятое решение в «ошибку
+ * зачисления». Ошибка только журналируется, а вызывающий получает fallback.
+ */
+async function safeDiscord<T>(label: string, run: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    console.warn(DISCORD_WARNING, label, err);
+    return fallback;
+  }
+}
+
+/**
+ * Реальный ID Discord (снежинка) или пустая строка.
+ *
+ * ID берутся из настроек панели и из БД и подставляются прямо в путь запроса
+ * `/channels/:id/messages`. Значение-плейсхолдер («:id», «undefined», «123/../..»),
+ * обрезанная строка или «не привязан» — это НЕ ID: сетевой запрос по такому
+ * значению не отправляется вовсе (Discord ответил бы 400 «Invalid Form Body»),
+ * а вызывающий код получает «не отправлено» вместо исключения.
+ */
+function realDiscordId(value: string | null | undefined): string {
+  const id = String(value ?? "").trim();
+  return /^\d{5,25}$/.test(id) ? id : "";
+}
+
+/** Тип строки бойца: нужен там, где решение работает с уже существующей карточкой */
+type MemberRow = typeof members.$inferSelect;
+
+/**
+ * Итог поиска бойца по позывному при одобрении заявки.
+ *
+ * Три состояния вместо «нашли/не нашли»: повторная попытка и чужой позывной —
+ * принципиально разные случаи. Первый надо довести до конца, второй — отклонить
+ * (иначе одобрение заявки перехватило бы чужой действующий аккаунт).
+ */
+type CallsignLookup =
+  | { kind: "free" }
+  | { kind: "retry"; member: MemberRow }
+  | { kind: "taken" };
+
+/**
+ * Чей позывной уже занят при одобрении заявки.
+ *
+ * Зачем это нужно. Зачисление — не одна транзакция: сначала INSERT бойца, потом
+ * решение в БД, потом Discord и синхронизация. Если на полпути что-то падает
+ * (например, Discord отвечает 400 на отправку сообщения или запись в ШДС), боец
+ * уже существует, а заявка осталась `pending`. Повторный клик офицера в этом
+ * случае упирался в CALLSIGN_TAKEN, и зачисление нельзя было завершить вообще:
+ * штаб должен был вручную править позывной, порождая дубль в табеле.
+ *
+ * Здесь такая карточка опознаётся как «созданная этой же заявкой» и
+ * подхватывается. Признаки намеренно узкие: роль новобранца, статус «в строю»,
+ * отсутствие подразделения и метка рассмотрения, оставленная предыдущей
+ * попыткой. Действующий боец с тем же позывным под них не попадает — для него
+ * сохраняется прежний отказ CALLSIGN_TAKEN.
+ */
+async function lookupCallsignForApplication(
+  application: typeof recruitApplications.$inferSelect,
+  callsign: string
+): Promise<CallsignLookup> {
+  const [taken] = await db.select().from(members).where(eq(members.callsign, callsign));
+  if (!taken) return { kind: "free" };
+
+  // Связь с заявкой записалась в прошлый раз — это точно та же попытка
+  if (application.memberId === taken.id) return { kind: "retry", member: taken };
+
+  const reviewed = Boolean(taken.applicationData?.reviewedAt && taken.applicationData?.reviewedBy);
+  const freshRecruit =
+    taken.role === "recruit" && taken.status === MEMBER_STATUS.ACTIVE && !taken.unit;
+  const sameDiscord =
+    Boolean(application.discordId) && application.discordId === taken.discordId;
+
+  // Совпадение Discord ID подтверждает, что карточка заведена этой заявкой; при
+  // заявке без Discord остаётся признак «свежая карточка новобранца без места»
+  if (freshRecruit && reviewed && (sameDiscord || !application.discordId)) {
+    return { kind: "retry", member: taken };
+  }
+
+  return { kind: "taken" };
+}
 
 /* ------------------------------------------------------------------ */
 /* Заявка на вступление                                                */
@@ -108,8 +221,93 @@ async function grantRecruitRole(discordId: string | null): Promise<void> {
     await addGuildMemberRole(guildId, discordId, COMMON_ROLE_IDS.RECRUIT);
   } catch (e) {
     // Роль — не критичная часть: доступ в ЛК уже выдан
-    console.warn("[review] Не удалось выдать роль новобранца:", e);
+    console.warn(DISCORD_WARNING, "роль новобранца не выдана", e);
   }
+}
+
+/**
+ * Запись бойца в Google Таблицу (ШДС) при зачислении.
+ *
+ * Шаг намеренно «мягкий»: он идёт ПОСЛЕ записи в PostgreSQL, и падение Google
+ * API не имеет права отменять уже принятое решение штаба. Ошибка возвращается
+ * текстом в итог решения и попадает в журнал — штаб повторит синхронизацию из
+ * панели, где для этого есть отдельное действие.
+ *
+ * Подразделение на момент зачисления обычно ещё не назначено (его выбирает
+ * штаб), и тогда строку записывать некуда — сообщаем об этом прямо, а не молчим.
+ */
+async function writeMemberToShds(memberId: number, callsign: string): Promise<string> {
+  try {
+    const [member] = await db.select().from(members).where(eq(members.id, memberId));
+    if (!member) return "боец для записи в ШДС не найден";
+    if (!member.unit) return "подразделение не назначено — строку в ШДС заведёт штаб";
+
+    const { applyShdsRequest, SHDS_ACTIONS } = await import("@/lib/gsheets");
+    const result = await applyShdsRequest({
+      raw: `Зачисление из панели модерации (${callsign})`,
+      isVacation: false,
+      vacationRemove: false,
+      shdsAction: SHDS_ACTIONS.ADD,
+      // Имя листа = подразделение бойца
+      unit: member.unit,
+      userName: member.callsign || member.name,
+      rank: member.rank || DEFAULT_RANK,
+      steamId: "",
+      discordId: realDiscordId(member.discordId),
+      отделение: "",
+      должность: member.post || "",
+      exams: [],
+      grade: "",
+      examiner: "",
+      rolesGive: "",
+      rolesRemove: "",
+      vacationDates: "",
+      reason: "Одобрение заявки на вступление",
+    });
+
+    return result.ok ? result.message : `ШДС: ошибка (${result.error})`;
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    console.error("[review] Запись в ШДС при зачислении не удалась:", e);
+    return `ШДС: ошибка (${error})`;
+  }
+}
+
+/**
+ * Идемпотентная запись бойца в ШДС.
+ *
+ * Повторный проход по заявке (см. lookupCallsignForApplication) не должен
+ * добавлять ВТОРУЮ строку в таблицу: боец с прежней попытки там уже может
+ * стоять, и «Добавление в ШДС» заняло бы ещё одну строку «Вакант», оставив
+ * первую с его именем. Поэтому сначала ищем бойца на листе подразделения —
+ * findNameRow ищет ровно ту же строку по колонке имени, что и сценарий
+ * добавления, — и только если его там нет, пишем.
+ */
+async function ensureShdsRowForMember(memberId: number, callsign: string): Promise<string> {
+  try {
+    const [member] = await db.select().from(members).where(eq(members.id, memberId));
+    if (!member?.unit) return "подразделение не назначено — строку в ШДС заведёт штаб";
+
+    const { findNameRow, getSheet, resolveLayout } = await import("@/lib/gsheets");
+    const sheet = await getSheet(member.unit);
+    const layout = resolveLayout(member.unit);
+    await sheet.loadCells();
+
+    const names = [member.callsign, member.name, callsign].filter(
+      (n): n is string => Boolean(n && n.trim())
+    );
+    for (const name of names) {
+      if (findNameRow(sheet, layout, name)) {
+        return `боец уже стоит в листе «${sheet.title}» — повторная запись не нужна`;
+      }
+    }
+  } catch (e) {
+    // Проверка не удалась — не повод отказываться от записи: сценарий добавления
+    // сам найдёт свободную строку, а расхождение штаб увидит по итогу решения
+    console.warn("[review] Не удалось проверить строку бойца в ШДС:", e);
+  }
+
+  return writeMemberToShds(memberId, callsign);
 }
 
 export type ApproveRecruitResult = ReviewOutcome & {
@@ -121,11 +319,199 @@ export type ApproveRecruitResult = ReviewOutcome & {
 };
 
 /**
+ * Решение по заявке на вступление с учётом её вида.
+ *
+ * Единая точка входа для кнопок Discord и панели модерации: обе обязаны
+ * принимать одинаковое решение, а вид заявки («Новобранец» или «Возврат из
+ * запаса») хранится в БД. Выбор вида живёт здесь, а не в каждом вызывающем
+ * коде, — иначе панель и бот разошлись бы, и заявка на возврат зачислялась бы
+ * как новый боец.
+ */
+export async function approveRecruitByKind(
+  applicationId: number,
+  reviewer: string
+): Promise<ApproveRecruitResult> {
+  const [application] = await db
+    .select({ kind: recruitApplications.kind })
+    .from(recruitApplications)
+    .where(eq(recruitApplications.id, applicationId));
+
+  if (!application) return { ok: false, message: NOT_FOUND, error: NOT_FOUND };
+
+  return application.kind === APPLICATION_KIND_RESERVE_RETURN
+    ? approveReserveReturn(applicationId, reviewer)
+    : approveRecruitApplication(applicationId, reviewer);
+}
+
+/**
+ * Одобрение возврата из запаса.
+ *
+ * Отличается от зачисления принципиально: бойца не создают заново, а
+ * восстанавливают. Порядок шагов намеренный — сначала строка в Google Таблице
+ * (её двигает returnFromReserve: лист «Запас» → свободная строка «Вакант»
+ * подразделения, роль «Запас» и прежние роли из колонки AI; у записей старого
+ * формата роли лежат в V), затем запись в базе панели.
+ *
+ * Почему не наоборот: перенос строки может отказать (боец не найден на листе
+ * «Запас» или в подразделении кончились свободные строки), и тогда лучше
+ * оставить бойца в запасе, чем «восстановить» его в панели при отсутствующей
+ * строке в ШДС — расхождение пришлось бы разбирать вручную.
+ *
+ * Роли Discord возвращает бот: он один владеет сервером ролей и умеет снять
+ * «Запас», а сохранённый список лежит в колонке AI листа «Запас» (его читает
+ * returnFromReserve; у записей старого формата — в колонке V). Здесь
+ * возвращается только отчёт о результате.
+ */
+export async function approveReserveReturn(
+  applicationId: number,
+  reviewer: string
+): Promise<ApproveRecruitResult> {
+  const [application] = await db
+    .select()
+    .from(recruitApplications)
+    .where(eq(recruitApplications.id, applicationId));
+
+  if (!application) return { ok: false, message: NOT_FOUND, error: NOT_FOUND };
+  if (application.status !== "pending") {
+    return { ok: false, message: ALREADY_DECIDED, error: ALREADY_DECIDED };
+  }
+
+  // ФИО — ключ поиска строки на листе «Запас»: без него восстановление
+  // невозможно, и выдумывать его по позывному нельзя (за время службы позывной
+  // могли сменить, а в запасе строка подписана прежним ФИО)
+  const fullName = (application.fullName || "").trim();
+  if (!fullName) {
+    return {
+      ok: false,
+      message: "У заявки нет ФИО — строку в «Запасе» найти нечем",
+      error: "EMPTY_FULL_NAME",
+    };
+  }
+
+  // Боец в панели ищется по ФИО или позывному: за время запаса его карточка
+  // сохраняется, поэтому нужен именно тот же человек, а не однофамилец
+  const candidates = await db.select().from(members);
+  const member = candidates.find(
+    (row) =>
+      (row.name || "").trim().toLowerCase() === fullName.toLowerCase() ||
+      (row.callsign || "").trim().toLowerCase() === fullName.toLowerCase()
+  );
+
+  if (!member) {
+    return {
+      ok: false,
+      message: `Боец «${fullName}» не найден в составе — восстановите карточку до возврата`,
+      error: "MEMBER_NOT_FOUND",
+    };
+  }
+
+  try {
+    // 1. Google Таблица: строка целиком (с отметками экзаменов) возвращается в
+    //    подразделение, лист «Запас» очищается, прежние роли читаются из колонки AI
+    const { returnFromReserve } = await import("@/lib/reserve");
+    const sheet = await returnFromReserve({
+      userName: member.callsign || member.name,
+      unit: member.unit || undefined,
+      rank: member.rank,
+      discordId: realDiscordId(member.discordId),
+      post: member.post || "",
+    });
+
+    if (!sheet.ok) {
+      // Решение не фиксируем: строка осталась в запасе, состояние согласовано,
+      // и модератор повторит попытку после устранения причины
+      return {
+        ok: false,
+        message: `Возврат из запаса не выполнен: ${sheet.error}`,
+        error: "SHEET_FAILED",
+      };
+    }
+
+    // 2. База панели: боец снова в строю (active = true), кабинет открывается
+    const [updated] = await db
+      .update(members)
+      .set({
+        active: true,
+        status: MEMBER_STATUS.ACTIVE,
+        // Возврат в строй закрывает контроль ролей: момент исключения и признак
+        // отправленного напоминания снимаются, при следующем исключении отсчёт
+        // начнётся заново.
+        ...statusTrackingFields(MEMBER_STATUS.ACTIVE, member.status),
+        // Смена версии токена не нужна: боец возвращается, а не исключается
+        updatedAt: new Date(),
+      })
+      .where(eq(members.id, member.id))
+      .returning();
+
+    // 3. Заявка закрывается с итогом — панель и Embed показывают результат
+    const [decided] = await db
+      .update(recruitApplications)
+      .set({
+        status: "approved",
+        memberId: member.id,
+        reviewedBy: reviewer,
+        updatedAt: new Date(),
+      })
+      .where(eq(recruitApplications.id, applicationId))
+      .returning();
+
+    /**
+     * Роли Discord: снятие «Запас» и возврат сохранённых ролей выполняет бот —
+     * он единственный владеет шлюзом сервера. Здесь только фиксируем, что
+     * список прежних ролей найден, чтобы штаб видел ожидаемый итог.
+     */
+    const rolesRestored = (sheet.roles?.length ?? 0) > 0;
+    const outcome = rolesRestored
+      ? `Строку вернули в подразделение, роль «Запас» снимает бот, прежних ролей к возврату: ${sheet.roles?.length}`
+      : "Строку вернули в подразделение; сохранённых ролей в «Запасе» не было — выдайте их в канале запросов ролей";
+
+    await db.insert(logs).values({
+      category: "edit",
+      author: reviewer || "Штаб",
+      action: `одобрил возврат из запаса ${fullName}`,
+      details: {
+        "Заявка": `#${applicationId}`,
+        "ФИО": fullName,
+        "Позывной": member.callsign || "—",
+        "Подразделение": member.unit || "не назначено",
+        "Лист ШДС": sheet.message,
+        "Роли": outcome,
+      },
+      kind: "system",
+      title: "Возврат из запаса",
+      detail: `${fullName} восстановлен: ${sheet.message}`,
+      ok: true,
+    });
+
+    if (decided) {
+      await refreshRecruitMessage({ ...decided, status: "approved" }, outcome);
+    }
+
+    return {
+      ok: true,
+      message: `${fullName} возвращён из запаса. ${outcome}`,
+      memberId: updated?.id ?? member.id,
+      dmDelivered: false,
+    };
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    console.error("[review] Ошибка возврата из запаса:", e);
+    return { ok: false, message: `Ошибка возврата из запаса: ${error}`, error };
+  }
+}
+
+/**
  * Одобрение заявки: создаёт бойца, выдаёт доступ и уведомляет рекрута в ЛС.
  *
  * Порядок важен: сначала фиксируем решение и создаём аккаунт (необратимая
  * часть), затем уведомляем и правим сообщение. Если ЛС закрыто, решение
  * остаётся в силе, а пароль возвращается вызывающему — офицер продиктует сам.
+ *
+ * Повторный клик по «Одобрить» не падает с CALLSIGN_TAKEN, а ЗАВЕРШАЕТ начатое:
+ * боец с таким позывным уже может существовать из-за упавшей предыдущей попытки
+ * (Discord ответил 400, ШДС был недоступен), и офицер вправе просто нажать
+ * кнопку ещё раз. Разбор — в lookupCallsignForApplication; действующий боец с
+ * чужим позывным по-прежнему получает отказ.
  */
 export async function approveRecruitApplication(
   applicationId: number,
@@ -147,11 +533,8 @@ export async function approveRecruitApplication(
   }
 
   // Позывной — это логин: занятый позывной создал бы дубль в табеле ШДС
-  const [taken] = await db
-    .select({ id: members.id })
-    .from(members)
-    .where(eq(members.callsign, callsign));
-  if (taken) {
+  const lookup = await lookupCallsignForApplication(application, callsign);
+  if (lookup.kind === "taken") {
     return {
       ok: false,
       message: `Позывной «${callsign}» уже занят — поправьте его в панели модерации`,
@@ -159,74 +542,135 @@ export async function approveRecruitApplication(
     };
   }
 
-  const tempPassword = generateTempPassword();
-  const passwordHash = await bcrypt.hash(tempPassword, 10);
+  const isRetry = lookup.kind === "retry";
+
+  /**
+   * Временный пароль.
+   *
+   * При повторной попытке он ВСЕГДА перевыпускается: исходный открытый текст
+   * жил только в памяти упавшего запроса и уже потерян. Оставить хеш прежним
+   * означало бы бойца без входа — ни он, ни офицер пароля не знают. Прежний
+   * временный пароль при этом становится недействительным, и офицер об этом
+   * предупреждается в итоге решения: если прошлый проход успел-таки отправить
+   * ЛС, бойцу нужно сообщить актуальный.
+   */
+  let tempPassword = "";
+  let passwordNote = "";
+  /** Итог записи в ШДС: он виден офицеру в ответе решения и в журнале */
+  let shdsOutcome = "";
 
   try {
-    const [created] = await db
-      .insert(members)
-      .values({
-        name: callsign,
-        callsign,
-        passwordHash,
-        rank: DEFAULT_RANK,
-        // Подразделение назначает штаб в панели: от него зависит лист ШДС,
-        // и угадывать его по заявке нельзя
-        unit: null,
-        status: MEMBER_STATUS.ACTIVE,
-        role: "recruit",
-        discordId: application.discordId,
-        applicationData: {
-          age: application.age ?? undefined,
-          armaExperience: application.armaExperience ?? "",
-          comment: application.about ?? "",
+    let memberId: number;
+    /** Свежая строка заявки после фиксации решения: из неё строится Embed */
+    let decided: typeof recruitApplications.$inferSelect | null = null;
+
+    if (isRetry) {
+      memberId = lookup.member.id;
+      tempPassword = generateTempPassword();
+      await db
+        .update(members)
+        .set({ passwordHash: await bcrypt.hash(tempPassword, 10), updatedAt: new Date() })
+        .where(eq(members.id, memberId));
+      passwordNote = ", временный пароль перевыпущен";
+      console.warn(
+        `[review] Повторное одобрение заявки #${applicationId}: боец «${callsign}» уже создан (id ${memberId}), доводим процедуру`
+      );
+
+      // Заявка закрывается тем же итогом, что и при первом проходе: иначе она
+      // осталась бы в очереди модерации навсегда
+      [decided] = await db
+        .update(recruitApplications)
+        .set({ status: "approved", memberId, reviewedBy: reviewer, updatedAt: new Date() })
+        .where(eq(recruitApplications.id, applicationId))
+        .returning();
+
+      // Прогоняем и запись в ШДС: прошлая попытка могла не дойти до неё, а
+      // «зачислен без строки в таблице» — то самое расхождение, которое штаб
+      // потом разбирает вручную
+      shdsOutcome = await ensureShdsRowForMember(memberId, callsign);
+    } else {
+      tempPassword = generateTempPassword();
+      const passwordHash = await bcrypt.hash(tempPassword, 10);
+
+      const [created] = await db
+        .insert(members)
+        .values({
+          name: callsign,
+          callsign,
+          passwordHash,
+          rank: DEFAULT_RANK,
+          // Подразделение назначает штаб в панели: от него зависит лист ШДС,
+          // и угадывать его по заявке нельзя
+          unit: null,
+          status: MEMBER_STATUS.ACTIVE,
+          role: "recruit",
+          discordId: application.discordId,
+          applicationData: {
+            age: application.age ?? undefined,
+            armaExperience: application.armaExperience ?? "",
+            comment: application.about ?? "",
+            reviewedBy: reviewer,
+            reviewedAt: new Date().toISOString(),
+            source: application.discordId ? "discord" : "password",
+          },
+        })
+        .returning({ id: members.id });
+
+      if (!created) {
+        return { ok: false, message: "Не удалось создать бойца", error: "INSERT_FAILED" };
+      }
+      memberId = created.id;
+
+      [decided] = await db
+        .update(recruitApplications)
+        .set({
+          status: "approved",
+          memberId: created.id,
           reviewedBy: reviewer,
-          reviewedAt: new Date().toISOString(),
-          source: application.discordId ? "discord" : "password",
-        },
-      })
-      .returning({ id: members.id });
+          updatedAt: new Date(),
+        })
+        .where(eq(recruitApplications.id, applicationId))
+        .returning();
 
-    if (!created) {
-      return { ok: false, message: "Не удалось создать бойца", error: "INSERT_FAILED" };
+      shdsOutcome = await ensureShdsRowForMember(created.id, callsign);
     }
-
-    const [updated] = await db
-      .update(recruitApplications)
-      .set({
-        status: "approved",
-        memberId: created.id,
-        reviewedBy: reviewer,
-        updatedAt: new Date(),
-      })
-      .where(eq(recruitApplications.id, applicationId))
-      .returning();
 
     // Уведомление и роль — «мягкие» шаги: их сбой не отменяет зачисление
     let dmDelivered = false;
-    if (application.discordId) {
-      const dm = await sendDirectMessage(application.discordId, {
-        content: recruitDmText(callsign, tempPassword),
-      });
+    const realDiscord = realDiscordId(application.discordId);
+    if (realDiscord) {
+      const dm = await safeDiscord<DmResult>(
+        `ЛС рекруту ${realDiscord}`,
+        () => sendDirectMessage(realDiscord, { content: recruitDmText(callsign, tempPassword) }),
+        { ok: false, error: "Discord недоступен" }
+      );
       dmDelivered = dm.ok;
       if (!dm.ok) {
         console.warn(
-          `[review] ЛС рекруту ${application.discordId} не доставлено (закрыты ЛС?): ${dm.error}`
+          `[review] ЛС рекруту ${realDiscord} не доставлено (закрыты ЛС?): ${dm.error}`
         );
       }
+    } else if (application.discordId) {
+      // Значение похоже на плейсхолдер («:id», «undefined») или обрезано —
+      // запрос по нему не отправляем, боец просто получит пароль от офицера
+      console.warn(
+        `[review] Discord ID заявки #${applicationId} не является числовым — ЛС не отправлено`
+      );
     }
 
-    await grantRecruitRole(application.discordId);
+    await grantRecruitRole(realDiscordId(application.discordId) || null);
 
     await db.insert(logs).values({
       category: "edit",
       author: reviewer || "Штаб",
-      action: `одобрил заявку на вступление ${callsign}`,
+      action: `${isRetry ? "завершил зачисление" : "одобрил заявку на вступление"} ${callsign}`,
       details: {
         "Заявка": `#${applicationId}`,
         "Позывной": callsign,
         "Discord": application.discordId || "не привязан",
         "ЛС с доступом": dmDelivered ? "доставлено" : "не доставлено",
+        "ШДС": shdsOutcome || "не выполнялось",
+        "Повтор": isRetry ? "да" : "нет",
       },
       kind: "system",
       title: "Заявка одобрена",
@@ -234,14 +678,23 @@ export async function approveRecruitApplication(
       ok: true,
     });
 
-    await refreshRecruitMessage(updated ?? { ...application, status: "approved" as ReviewStatus });
+    // Сообщение в Discord правится последним и «мягко»: даже отказ Discord не
+    // должен менять уже сформированный ответ офицеру
+    await safeDiscord(
+      `обновление сообщения заявки #${applicationId}`,
+      () =>
+        refreshRecruitMessage(
+          decided ?? { ...application, status: "approved" as ReviewStatus, memberId }
+        ),
+      false
+    );
 
     return {
       ok: true,
       message: `${callsign} зачислен${
         dmDelivered ? ", доступ выслан в ЛС" : " — ЛС не доставлено, продиктуйте пароль"
-      }`,
-      memberId: created.id,
+      }${passwordNote}${shdsOutcome ? `. ${shdsOutcome}` : ""}`,
+      memberId,
       dmDelivered,
       tempPassword,
     };
@@ -331,11 +784,6 @@ export function vacationUntilFromReport(to: string): Date | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(to)) return null;
   const date = new Date(`${to}T00:01:00+03:00`);
   return Number.isNaN(date.getTime()) ? null : date;
-}
-
-/** Discord ID бойца: реальная снежинка, а не маркер «не привязан» */
-function realDiscordId(value: string | null): string {
-  return value && /^\d{5,25}$/.test(value) ? value : "";
 }
 
 /**
@@ -438,6 +886,15 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
         const passedCodes = await previousExamsOf(member.id);
         for (const exam of exams) passedCodes.add(exam.exam_code);
 
+        // Плюс отметки, уже стоящие в листе ШДС: норматив могли зачесть правкой
+        // таблицы (без рапорта), и тогда «Берет» должен закрыться по
+        // совокупности — как и в переводе по должности ниже.
+        const sheetExams = await examsFromSheet({
+          unit: member.unit,
+          names: [member.callsign || member.name, member.name],
+        });
+        for (const code of sheetExams) passedCodes.add(code);
+
         /** Код столбца → элемент рапорта (оценка нужна для записи в ячейку) */
         const toMark = new Map<string, ExamItem>();
         for (const exam of exams) {
@@ -451,9 +908,15 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
         }
 
         if (toMark.size) {
-          // Все выбранные нормативы закрашиваются в ШДС, но оценка пишется в один
-          // столбец заявки: берём оценку первого норматива с оценкой. Остальные
-          // видны в исходном Embed рапорта — модератор их проверит при надобности.
+          /**
+           * Оценка каждого норматива передаётся ОТДЕЛЬНО (examGrades).
+           *
+           * Раньше в таблицу уезжала одна оценка — первая с оценкой, — и она
+           * попадала во все закрашенные столбцы: боец, сдавший пять нормативов
+           * с разными оценками (или часть без оценки), получал «Отлично» в
+           * каждом. Поле `grade` оставлено для заявок из Discord, где оценка
+           * действительно одна на всю заявку.
+           */
           const items = [...toMark.values()];
           const { applyShdsRequest, SHDS_ACTIONS } = await import("@/lib/gsheets");
           const result = await applyShdsRequest({
@@ -469,6 +932,9 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
             отделение: "",
             должность: "",
             exams: examColumnTokens(items.map((e) => e.exam_code)),
+            // Порядок нормативов тот же, что в `exams`: столбцы сопоставляются
+            // тем же разбором, поэтому оценки не разъедутся с нормативами
+            examGrades: items.map((e) => ({ code: e.exam_code, grade: e.grade })),
             grade: items.find((e) => e.grade)?.grade || "",
             examiner: report.reviewedBy || "",
             rolesGive: "",
@@ -527,6 +993,77 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
         break;
       }
 
+      case "position_transfer": {
+        /**
+         * Перевод по должности ШДС: строка бойца переезжает в секцию новой
+         * должности вместе с отметками экзаменов, прежнее место возвращается в
+         * «Вакант».
+         *
+         * Порядок шагов: сначала проверка требований ступени (несданные
+         * нормативы — это не «ошибка синхронизации», а законное основание
+         * отказать), затем строка в таблице, и только потом карточка в БД.
+         * Так должность в панели не разойдётся с таблицей при сбое API Google.
+         */
+        const transfer = payload as PositionTransferPayload;
+        const section = findPositionSection(transfer.section);
+        if (!section) {
+          parts.push("секция должности не распознана — перевод не выполнен");
+          break;
+        }
+        if (!member.unit) {
+          parts.push("подразделение не назначено — перевод в ШДС не выполнен");
+          break;
+        }
+        if (section.unit !== member.unit) {
+          // Секция есть только у своего подразделения: перевести танкиста в
+          // блок артдивизиона нельзя, это разные листы
+          parts.push(
+            `должность «${section.title}» относится к «${section.unit}», а боец в «${member.unit}»`
+          );
+          break;
+        }
+
+        // Обязательные экзамены: сданные ранее (одобренные рапорты) плюс
+        // отметки, уже стоящие в листе ШДС. Одного источника мало: норматив
+        // могли зачесть правкой таблицы, а не рапортом через панель
+        const passedCodes = await previousExamsOf(member.id);
+        const { transferShdsPosition } = await import("@/lib/gsheets");
+        const sheetExams = await examsFromSheet({
+          unit: member.unit,
+          names: [member.callsign || member.name, member.name],
+        });
+        for (const code of sheetExams) passedCodes.add(code);
+
+        const missing = missingSectionExams(
+          section,
+          [...passedCodes].map((code) => ({ code }))
+        );
+        if (missing.length) {
+          parts.push(
+            `перевод на «${section.title}» не выполнен: не сданы ${missing.join(", ")}`
+          );
+          break;
+        }
+
+        const result = await transferShdsPosition({
+          unit: member.unit,
+          names: [member.callsign || member.name, member.name],
+          section,
+          passedExams: [...passedCodes].map((code) => ({ code })),
+        });
+        parts.push(result.ok ? result.message : `ШДС: ошибка (${result.error})`);
+
+        // Карточка бойца обновляется только после успешного переноса строки
+        if (result.ok) {
+          await db
+            .update(members)
+            .set({ post: section.post, updatedAt: new Date() })
+            .where(eq(members.id, member.id));
+          parts.push(`должность «${section.post}» зафиксирована в карточке`);
+        }
+        break;
+      }
+
       case "vacation": {
         const vacation = payload as VacationPayload;
         await db
@@ -544,9 +1081,23 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
         if (discordId && leaveRoleId) {
           const guildId = await resolveGuildId((map.get("guild_id") || "").trim());
           if (guildId) {
-            const { addGuildMemberRole } = await import("@/lib/discord");
-            await addGuildMemberRole(guildId, discordId, leaveRoleId);
-            parts.push("роль «Отпуск» выдана");
+            // Роль — «мягкий» шаг: статус отпуска уже записан в БД, и отказ
+            // Discord не должен отменять его. Обёртка нужна и потому, что без
+            // неё исключение прервало бы обработку рапорта целиком
+            const granted = await safeDiscord(
+              `роль «Отпуск» для ${discordId}`,
+              async () => {
+                const { addGuildMemberRole } = await import("@/lib/discord");
+                await addGuildMemberRole(guildId, discordId, leaveRoleId);
+                return true;
+              },
+              false
+            );
+            parts.push(
+              granted
+                ? "роль «Отпуск» выдана"
+                : "роль «Отпуск» не выдана (ошибка Discord) — выдайте вручную"
+            );
           } else {
             parts.push("guild_id не задан — роль «Отпуск» не выдана");
           }
@@ -576,10 +1127,18 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
           result.ok ? `${result.message} (${reserve.reason})` : `запас: ошибка (${result.error})`
         );
         if (result.ok) {
-          // «Запас» — не строевой статус: кабинет закрывается, как при увольнении
+          // «Запас» — не строевой статус: кабинет закрывается, как при увольнении.
+          // Отсчёт контроля ролей начинается здесь: в запас уходит с той же
+          // ролью подразделения на сервере, и через сутки комсоставу придёт
+          // напоминание, если её не снимут.
           await db
             .update(members)
-            .set({ active: false, status: MEMBER_STATUS.DISMISSED, updatedAt: new Date() })
+            .set({
+              active: false,
+              status: MEMBER_STATUS.DISMISSED,
+              ...statusTrackingFields(MEMBER_STATUS.DISMISSED, member.status),
+              updatedAt: new Date(),
+            })
             .where(eq(members.id, member.id));
           parts.push("статус в базе: переведён в запас");
         }
@@ -662,19 +1221,33 @@ export async function recruitsChannelId(): Promise<string> {
   );
 }
 
-/** Отправка Embed с кнопками «Одобрить / Отклонить» в указанный канал */
+/**
+ * Отправка Embed с кнопками «Одобрить / Отклонить» в указанный канал.
+ *
+ * Канал проверяется ДО запроса: настройка могла остаться плейсхолдером («:id»,
+ * «undefined»), и POST по пути `/channels/:id/messages` Discord отвергает с
+ * 400 Invalid Form Body — запись при этом уже в БД, и шумная ошибка ничего не
+ * даёт. Возвращаем понятную причину, вызывающий код только пишет её в журнал.
+ */
 export async function publishReviewMessage(
   channelId: string,
   scope: "recruit" | "report",
   id: number,
   embed: DiscordEmbed
 ): Promise<PublishResult> {
+  const channel = realDiscordId(channelId);
   if (!channelId) {
     return { ok: false, error: "Канал Discord не настроен — решение доступно в панели модерации" };
   }
+  if (!channel) {
+    return {
+      ok: false,
+      error: `Канал Discord задан некорректно («${channelId.slice(0, 40)}») — публикация только в панели модерации`,
+    };
+  }
   try {
     const { sendChannelMessage } = await import("@/lib/discord");
-    const message = await sendChannelMessage(channelId, {
+    const message = await sendChannelMessage(channel, {
       embeds: [embed],
       components: [
         {
@@ -696,10 +1269,10 @@ export async function publishReviewMessage(
       // Упоминаний нет: Embed содержит позывные и свободный текст бойца
       allowed_mentions: { parse: [], users: [], roles: [] },
     });
-    return { ok: true, messageId: message.id, channelId };
+    return { ok: true, messageId: message.id, channelId: channel };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
-    console.error("[review] Не удалось опубликовать сообщение в Discord:", e);
+    console.warn(DISCORD_WARNING, `публикация ${scope} #${id}`, e);
     return { ok: false, error };
   }
 }
@@ -858,11 +1431,31 @@ function disabledActionRow(
  * Перерисовывает сообщение-заявку: цвет и заголовок по статусу, кнопки
  * отключаются. Ошибка Discord не отменяет решение — источник правды в БД,
  * а сообщение при сбое можно поправить вручную, поэтому только логируем.
+ *
+ * `outcomeOverride` нужен возврату из запаса: итог там свой (строка ШДС
+ * перенесена, роли возвращает бот), а не «доступ в ЛК выслан». Без него
+ * модератор видел бы в канале формулировку зачисления — и не понял бы,
+ * что строка в таблице уже перенесена.
  */
 export async function refreshRecruitMessage(
-  application: typeof recruitApplications.$inferSelect
+  application: typeof recruitApplications.$inferSelect,
+  outcomeOverride?: string | null
 ): Promise<boolean> {
-  if (!application.discordMessageId || !application.discordChannelId) return false;
+  // ID проверяются ДО любого сетевого запроса: значение из БД могло остаться
+  // плейсхолдером («:id», обрезанная строка), а PATCH по такому пути Discord
+  // отвергает с 400 Invalid Form Body. Тихо выходим — сообщение просто не
+  // перерисуется, а решение штаба останется в силе.
+  const channelId = realDiscordId(application.discordChannelId);
+  const messageId = realDiscordId(application.discordMessageId);
+  if (!channelId || !messageId) {
+    if (application.discordChannelId || application.discordMessageId) {
+      console.warn(
+        `[review] Заявка #${application.id}: ID сообщения Discord не числовой — сообщение не обновлено`
+      );
+    }
+    return false;
+  }
+
   try {
     const [member] = application.memberId
       ? await db
@@ -882,13 +1475,18 @@ export async function refreshRecruitMessage(
       createdAt: application.createdAt,
       status: application.status,
       reviewedBy: application.reviewedBy,
+      // Вид заявки и ФИО: без них Embed «Запроса на возврат из запаса»
+      // потерял бы свой заголовок после решения
+      kind: application.kind,
+      fullName: application.fullName,
       outcome:
-        application.status === "approved"
+        outcomeOverride ??
+        (application.status === "approved"
           ? `доступ в ЛК выслан${member?.unit ? `, подразделение «${member.unit}»` : ""}`
-          : null,
+          : null),
     });
 
-    await editChannelMessage(application.discordChannelId, application.discordMessageId, {
+    await editChannelMessage(channelId, messageId, {
       embeds: [embed],
       components: disabledActionRow(
         "✅ Одобрено",
@@ -899,7 +1497,7 @@ export async function refreshRecruitMessage(
     });
     return true;
   } catch (e) {
-    console.error("[review] Не удалось обновить сообщение заявки в Discord:", e);
+    console.warn(DISCORD_WARNING, `сообщение заявки #${application.id} не обновлено`, e);
     return false;
   }
 }
@@ -910,7 +1508,18 @@ export async function refreshReportMessage(
   member?: { unit: string | null; rank: string } | null,
   outcome?: string | null
 ): Promise<boolean> {
-  if (!report.discordMessageId || !report.discordChannelId) return false;
+  // Та же проверка, что и у заявок: по нечисловому ID запрос не отправляется
+  const channelId = realDiscordId(report.discordChannelId);
+  const messageId = realDiscordId(report.discordMessageId);
+  if (!channelId || !messageId) {
+    if (report.discordChannelId || report.discordMessageId) {
+      console.warn(
+        `[review] Рапорт #${report.id}: ID сообщения Discord не числовой — сообщение не обновлено`
+      );
+    }
+    return false;
+  }
+
   try {
     const embed = buildReportEmbed({
       id: report.id,
@@ -926,7 +1535,7 @@ export async function refreshReportMessage(
       outcome,
     });
 
-    await editChannelMessage(report.discordChannelId, report.discordMessageId, {
+    await editChannelMessage(channelId, messageId, {
       embeds: [embed],
       components: disabledActionRow(
         "✅ Одобрено",
@@ -937,7 +1546,7 @@ export async function refreshReportMessage(
     });
     return true;
   } catch (e) {
-    console.error("[review] Не удалось обновить сообщение рапорта в Discord:", e);
+    console.warn(DISCORD_WARNING, `сообщение рапорта #${report.id} не обновлено`, e);
     return false;
   }
 }

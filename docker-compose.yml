@@ -7,7 +7,9 @@ services:
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Укажите POSTGRES_PASSWORD в файле .env}"
       POSTGRES_DB: app_db
     ports:
-      - "5432:5432"
+      # Только локальный интерфейс: наружу база не публикуется, подключиться к
+      # ней можно лишь с самого сервера (или из app по внутренней сети Docker).
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -74,6 +76,18 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    # Проверка живости панели по HTTP: статус видно в `docker compose ps`, а
+    # внешние проверки (uptime-робот, мониторинг) могут опираться на него вместо
+    # разбора логов. Важно: политика restart=always реагирует на выход процесса,
+    # а не на «unhealthy» — docker сам контейнер по этой проверке не перезапустит.
+    # start_period даёт серверу прогреться после миграций, чтобы на старте не
+    # было ложных «unhealthy».
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     ports:
       # Вариант без домена: приложение сразу доступно как http://IP-СЕРВЕРА:3000
       - "3000:3000"

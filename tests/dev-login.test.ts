@@ -9,6 +9,10 @@
  * обход пароля. Ошибка в isDevLoginEnabled() открыла бы его на боевом стенде
  * (любой вошёл бы командиром), а расхождение списка званий с recruits.ts
  * создало бы бойца с несуществующим званием — допуск к технике поехал бы.
+ *
+ * С новым правилом «двух ключей» ручка требует ОБА условия: NODE_ENV не
+ * production И явный флаг ENABLE_DEV_LOGIN=true. Иначе стенд без
+ * NODE_ENV=production снова открывал бы создание админа с известным паролем.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -37,16 +41,45 @@ const read = (rel: string) => readFileSync(path.join(root, rel), "utf8");
 /* Режим: набор обязан быть выключен в production                      */
 /* ------------------------------------------------------------------ */
 
-describe("Dev-вход: доступность только вне production", () => {
-  test("в production выключен, в dev и в тестах — включён", () => {
+describe("Dev-вход: доступность только при двух ключах", () => {
+  test("в production выключен при любом флаге", () => {
+    // Второй ключ (ENABLE_DEV_LOGIN) не должен переопределять боевой режим:
+    // иначе админ-доступ с известным паролем открылся бы на проде.
     assert.equal(isDevLoginEnabled(fakeEnv({ NODE_ENV: "production" })), false);
-    assert.equal(isDevLoginEnabled(fakeEnv({ NODE_ENV: "development" })), true);
-    assert.equal(isDevLoginEnabled(fakeEnv({ NODE_ENV: "test" })), true);
-    // Пустое окружение — это не production: локальный запуск без NODE_ENV
-    assert.equal(isDevLoginEnabled(fakeEnv({})), true);
+    assert.equal(
+      isDevLoginEnabled(fakeEnv({ NODE_ENV: "production", ENABLE_DEV_LOGIN: "true" })),
+      false
+    );
   });
 
-  test("решение принимается по NODE_ENV, а не по адресу запроса", () => {
+  test("вне production ручка закрыта без явного флага", () => {
+    // Это и есть закрытие исходной дыры: «забыли» NODE_ENV=production — уже
+    // недостаточно, ручка по умолчанию недоступна.
+    assert.equal(isDevLoginEnabled(fakeEnv({ NODE_ENV: "development" })), false);
+    assert.equal(isDevLoginEnabled(fakeEnv({ NODE_ENV: "test" })), false);
+    assert.equal(isDevLoginEnabled(fakeEnv({})), false);
+  });
+
+  test("вне production с флагом ENABLE_DEV_LOGIN=true ручка открывается", () => {
+    assert.equal(
+      isDevLoginEnabled(fakeEnv({ NODE_ENV: "development", ENABLE_DEV_LOGIN: "true" })),
+      true
+    );
+    assert.equal(
+      isDevLoginEnabled(fakeEnv({ NODE_ENV: "test", ENABLE_DEV_LOGIN: "true" })),
+      true
+    );
+    // Значение флага нечувствительно к регистру и пробелам
+    assert.equal(isDevLoginEnabled(fakeEnv({ NODE_ENV: "test", ENABLE_DEV_LOGIN: "TRUE" })), true);
+    // Иные значения (в т.ч. «1» и пустое) ручку не открывают
+    assert.equal(isDevLoginEnabled(fakeEnv({ NODE_ENV: "test", ENABLE_DEV_LOGIN: "1" })), false);
+    assert.equal(
+      isDevLoginEnabled(fakeEnv({ NODE_ENV: "test", ENABLE_DEV_LOGIN: "false" })),
+      false
+    );
+  });
+
+  test("решение принимается по NODE_ENV и флагу, а не по адресу запроса", () => {
     // Адрес приходит заголовком Host и подделывается: проверка по «localhost»
     // открыла бы боевой вход тому, кто подменит заголовок.
     //
@@ -54,7 +87,10 @@ describe("Dev-вход: доступность только вне production", 
     // комментарии (он объясняет, почему так делать нельзя), и буквальная
     // проверка «нет слова localhost» ловила бы собственное пояснение.
     const source = read("src/lib/dev-accounts.ts");
-    assert.match(source, /env\.NODE_ENV !== "production"/);
+    // Оба ключа обязательны: боевой режим закрывает ручку безусловно...
+    assert.match(source, /env\.NODE_ENV === "production"/);
+    // ...а вне прода — только явный флаг ENABLE_DEV_LOGIN=true.
+    assert.match(source, /env\.ENABLE_DEV_LOGIN/);
 
     const body = source.slice(
       source.indexOf("export function isDevLoginEnabled"),

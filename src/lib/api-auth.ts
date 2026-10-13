@@ -305,6 +305,17 @@ export type CronAuthResult =
   | { ok: false; response: NextResponse };
 
 /**
+ * Заглушки CRON_SECRET из репозитория (.env.example). В продакшене они
+ * запрещены наравне с пустым значением: секрет лежит в открытом файле примера,
+ * поэтому любой, кто его прочитал, мог бы дёргать cron-роуты (снимки, синк
+ * ролей) от имени расписания.
+ */
+const DEFAULT_CRON_SECRETS: readonly string[] = [
+  "replace_me_with_another_random_secret_32_characters_ok",
+  "your_random_cron_secret_here",
+];
+
+/**
  * Проверка секрета для внешних расписаний (cron).
  *
  * Секрет принимается в заголовке `X-Cron-Secret` или (для обратной
@@ -319,6 +330,23 @@ export function authorizeCron(req: NextRequest): CronAuthResult {
       ok: false,
       response: NextResponse.json(
         { error: "CRON_SECRET не задан на сервере" },
+        { status: 503 }
+      ),
+    };
+  }
+
+  // Отдельно и только для продакшена: в разработке заглушка из .env.example
+  // удобна, но в проде она равнозначна отсутствию секрета — роут отключаем
+  // целиком (503), а не просто отклоняем запрос, чтобы ошибка конфигурации
+  // была видна сразу, а не выглядела как неверный ключ.
+  if (process.env.NODE_ENV === "production" && DEFAULT_CRON_SECRETS.includes(expected)) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          error:
+            "CRON_SECRET равен значению-заглушке из .env.example. Задайте свой случайный секрет и перезапустите приложение.",
+        },
         { status: 503 }
       ),
     };

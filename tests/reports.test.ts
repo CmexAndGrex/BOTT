@@ -14,16 +14,24 @@ import {
   allExamCodes,
   buildRecruitEmbed,
   buildReportEmbed,
+  columnExamFor,
   examCatalog,
   examColumnTokens,
   EXAM_GRADES,
   findExam,
+  findPositionSection,
+  formExamGroups,
   formatIsoDate,
+  isCommandPost,
+  isCommandSection,
   isReasonableIsoDate,
   isReviewStatus,
   isServiceReportType,
+  missingSectionExams,
   normalizeExamCode,
   parseReviewCustomId,
+  POSITION_SECTIONS,
+  positionSections,
   readReportPayload,
   reportTypeMeta,
   REPORT_TEXT_MAX,
@@ -37,6 +45,7 @@ import { checkPasswordPolicy } from "../src/lib/password-policy.ts";
 import { matchExamColumns } from "../src/lib/gsheets.ts";
 import type {
   ExamPayload,
+  PositionTransferPayload,
   ReservePayload,
   ReviewEmbed,
   RolePayload,
@@ -120,6 +129,68 @@ describe("Каталог нормативов", () => {
     assert.equal(normalizeExamCode("КМБТ"), "кмбт");
     assert.equal(findExam("минометное дело (обучение)")?.code, "Миномётное дело (обучение)");
   });
+
+  test("каталог роты разложен по блокам сетки листа", () => {
+    // Блоки — реальные секции листа ШДС: боец видит норматив там же, где его
+    // столбец, а требования ступеней собираются из этих же блоков
+    const groups = formExamGroups("Танковая рота");
+    assert.deepEqual(
+      groups.map((group) => group.group),
+      ["Механик - Водитель", "Наводчик-Оператор", "от Мл. Сержанта", "Спецкурсы", "Экзамен на берет"]
+    );
+
+    const driver = groups[0];
+    assert.equal(driver.exams.length, 8);
+    assert.deepEqual(
+      driver.exams.map((exam) => exam.code),
+      [
+        "КМБТ",
+        "Снаряжение, обслуживание техники",
+        "Огневая подготовка",
+        "ТТХ (Часть 1)",
+        "Физ. Подготовка",
+        "ПМП",
+        "Езда в сложно-проходимых условиях",
+        "Сдача на Мех. Водителя",
+      ]
+    );
+
+    // Производный «Берет» в форме не появляется ни в одном блоке: он
+    // закрывается автоматически после четырёх нормативов экзамена на берет
+    for (const group of groups) {
+      assert.equal(
+        group.exams.some((exam) => exam.code === "Берет"),
+        false,
+        `«Берет» не подаётся рапортом, а попал в блок «${group.group}»`
+      );
+    }
+  });
+
+  test("каталог дивизиона разложен по своим блокам", () => {
+    const groups = formExamGroups("Артиллерийский дивизион");
+    assert.deepEqual(
+      groups.map((group) => group.group),
+      [
+        "Допуск на Минометы",
+        "Мех-вод.",
+        "Допуск на САУ + Гаубицы",
+        "Допуск на РСЗО",
+        "Дополнительно",
+        "Экзамены на берет",
+      ]
+    );
+
+    const mortar = groups[0];
+    assert.equal(mortar.exams.length, 7);
+    assert.ok(mortar.exams.some((exam) => exam.code === "Миномётное дело (Экзамен)"));
+
+    // Курсы дивизиона не подмешиваются в роту и наоборот
+    const trCodes = formExamGroups("Танковая рота").flatMap((g) => g.exams.map((e) => e.code));
+    const adCodes = groups.flatMap((g) => g.exams.map((e) => e.code));
+    assert.equal(trCodes.includes("БПЛА"), false);
+    assert.equal(trCodes.includes("РСЗО (Экзамен)"), false);
+    assert.equal(adCodes.includes("ТТХ (Часть 1)"), false);
+  });
 });
 
 /** Реальные шапки листов (скопированы из рабочей таблицы ШДС) */
@@ -158,6 +229,14 @@ const TR_HEADERS = [
   "Берет",
 ];
 
+/**
+ * Шапка дивизиона.
+ *
+ * Перед блоком оценок у дивизиона на один служебный столбец больше, чем у роты:
+ * экзамены начинаются с «I», а не с «H» (см. examStartCol/examEndCol в LAYOUTS).
+ * Пустой заголовок сопоставление игнорирует, поэтому расширить перечень
+ * нормативов он не может — но индексы столбцов приводятся к реальной сетке.
+ */
 const AD_HEADERS = [
   "Звание",
   "Фамилии, инициалы",
@@ -165,6 +244,7 @@ const AD_HEADERS = [
   "Steam ID",
   "Discord ID",
   "Заметки",
+  "",
   "КМБТ",
   "Физ. Подготовка",
   "ТТХ (минометы)",
@@ -192,9 +272,160 @@ const AD_HEADERS = [
   "Берет",
 ];
 
+describe("Секции ШДС: перевод по должности", () => {
+  test("бойцу доступны только ступени своего подразделения", () => {
+    // У роты — мехвод и наводчик-оператор, у дивизиона — четыре специальности.
+    // Чужих ступеней нет ни в одном случае: рапорт танкиста не может предложить
+    // «Специалист расчёта РСЗО» (и наоборот — это разные листы ШДС)
+    assert.deepEqual(
+      positionSections("Танковая рота").map((section) => section.key),
+      ["tr_driver", "tr_gunner"]
+    );
+    assert.deepEqual(
+      positionSections("Артиллерийский дивизион").map((section) => section.key),
+      ["ad_mortar", "ad_driver", "ad_gunner", "ad_mlrs"]
+    );
+    assert.deepEqual(positionSections(null), []);
+    assert.deepEqual(positionSections("Морская пехота"), []);
+  });
+
+  test("командирские должности есть в справочнике, но рапортом недоступны", () => {
+    // Признак секции: командирские описаны (по ним штаб видит блок строк),
+    // но positionSections их отсеивает
+    const command = POSITION_SECTIONS.filter((section) => section.isCommand === true);
+    assert.ok(command.length >= 4, "командирские секции должны быть описаны в справочнике");
+    for (const section of command) {
+      assert.equal(isCommandSection(section), true, `секция ${section.key} не помечена командной`);
+      assert.equal(
+        positionSections(section.unit).some((item) => item.key === section.key),
+        false,
+        `командирская секция ${section.key} попала в список для бойца`
+      );
+    }
+
+    // Признак командирской должности ловит и текст из старых заявок
+    assert.equal(isCommandPost("Командир отделения"), true);
+    assert.equal(isCommandPost("Командование"), true);
+    assert.equal(isCommandPost("КБМ"), true);
+    assert.equal(isCommandPost("Специалист Мех.водитель"), false);
+
+    // …и ключ командной секции тоже: обойти форму прямым запросом к API нельзя
+    assert.equal(isCommandSection(findPositionSection("tr_bcm")), true);
+    assert.equal(isCommandSection(findPositionSection("ad_command")), true);
+    assert.equal(isCommandSection(findPositionSection("tr_driver")), false);
+  });
+
+  test("у секций заданы блоки строк листа и штатные должности", () => {
+    const driver = findPositionSection("tr_driver");
+    assert.ok(driver);
+    assert.equal(driver.post, "Специалист Мех.водитель");
+    // Секция мехводов: строки 28–39
+    assert.deepEqual(driver.rows, { top: 28, bottom: 39 });
+
+    const gunner = findPositionSection("tr_gunner");
+    assert.ok(gunner);
+    assert.equal(gunner.post, "Специалист Наводчик-Оператор");
+    // Секция наводчиков-операторов: строки 20–27
+    assert.deepEqual(gunner.rows, { top: 20, bottom: 27 });
+
+    // Дивизион: миномётный расчёт — 1 ООВ, остальные специальности — 2 ООВ
+    assert.deepEqual(findPositionSection("ad_mortar")?.rows, { top: 12, bottom: 20 });
+    assert.deepEqual(findPositionSection("ad_driver")?.rows, { top: 22, bottom: 30 });
+    assert.deepEqual(findPositionSection("ad_gunner")?.rows, { top: 22, bottom: 30 });
+    assert.deepEqual(findPositionSection("ad_mlrs")?.rows, { top: 22, bottom: 30 });
+  });
+
+  test("требования ступени роты: весь блок мехвода, затем блок наводчика", () => {
+    const driver = findPositionSection("tr_driver");
+    assert.ok(driver);
+    // Мехвод — все восемь нормативов блока «Механик - Водитель»
+    assert.equal(driver.required.length, 8);
+    assert.deepEqual(
+      driver.required.map((r) => r.title),
+      [
+        "КМБТ",
+        "Снаряжение, обслуживание техники",
+        "Огневая подготовка",
+        "ТТХ (Часть 1)",
+        "Физ. Подготовка",
+        "ПМП",
+        "Езда в сложно-проходимых условиях",
+        "Сдача на Мех. Водителя",
+      ]
+    );
+
+    // Наводчик-оператор — мехвод ПЛЮС блок «Наводчик-Оператор» (пять нормативов):
+    // ступень требует сдать машину как мехвод, а потом сдать на наводчика
+    const gunner = findPositionSection("tr_gunner");
+    assert.ok(gunner);
+    assert.equal(gunner.required.length, 13);
+    assert.deepEqual(
+      gunner.required.slice(8).map((r) => r.title),
+      ["ТТХ (Часть 2)", "Тактическая Подготовка", "Техника АТК", "Учебные стрельбы", "Устав АТК"]
+    );
+
+    // Ничего не сдано — перечислены все требования ступени
+    assert.equal(missingSectionExams(driver, []).length, 8);
+    // Требование закрывается любым написанием норматива из листа: «Сдача на
+    // мехвода» — тот же столбец, что «Сдача на Мех. Водителя»
+    const passed = driver.required.map((r) => ({ code: r.code }));
+    assert.deepEqual(missingSectionExams(driver, passed), []);
+    assert.deepEqual(
+      missingSectionExams(gunner, [...passed, { code: "сдача на мехвода" }]),
+      ["ТТХ (Часть 2)", "Тактическая Подготовка", "Техника АТК", "Учебные стрельбы", "Устав АТК"]
+    );
+    assert.deepEqual(
+      missingSectionExams(gunner, gunner.required.map((r) => ({ code: r.code }))),
+      []
+    );
+  });
+
+  test("требования ступени дивизиона: блок листа каждой специальности", () => {
+    const mortar = findPositionSection("ad_mortar");
+    const driver = findPositionSection("ad_driver");
+    const gunner = findPositionSection("ad_gunner");
+    const mlrs = findPositionSection("ad_mlrs");
+    assert.ok(mortar && driver && gunner && mlrs);
+
+    // Миномётный расчёт — блок «Допуск на Минометы» (семь нормативов)
+    assert.equal(mortar.required.length, 7);
+    assert.ok(mortar.required.some((r) => r.title === "Миномётное дело (Экзамен)"));
+
+    // Мехвод САУ — блок «Мех-вод.» (пять нормативов)
+    assert.equal(driver.required.length, 5);
+    assert.ok(driver.required.some((r) => r.title === "Сдача на мехвода"));
+
+    // Наводчик и РСЗО — свои блоки допуска
+    assert.deepEqual(
+      gunner.required.map((r) => r.title),
+      ["Артиллерийское дело (обучение)", "Артиллирийское Дело (Экзамен)"]
+    );
+    assert.deepEqual(
+      mlrs.required.map((r) => r.title),
+      ["РСЗО (обучение)", "РСЗО (Экзамен)"]
+    );
+
+    // Каждый норматив требования сдаётся своим столбцом листа
+    for (const section of [mortar, driver, gunner, mlrs]) {
+      for (const requirement of section.required) {
+        assert.ok(
+          columnExamFor(section.unit, requirement.code),
+          `у требования «${requirement.title}» (${section.key}) нет столбца в листе`
+        );
+      }
+    }
+  });
+
+  test("неизвестный ключ секции не находится", () => {
+    assert.equal(findPositionSection("tr_unknown"), null);
+    assert.equal(findPositionSection(""), null);
+    assert.equal(findPositionSection(undefined), null);
+  });
+});
+
 describe("Типы рапортов и статусы", () => {
-  test("все пять типов из ТЗ распознаются", () => {
-    for (const type of ["exam", "role", "vacation", "reserve", "shds_entry"]) {
+  test("все шесть типов рапортов распознаются", () => {
+    for (const type of ["exam", "role", "position_transfer", "vacation", "reserve", "shds_entry"]) {
       assert.equal(isServiceReportType(type), true);
     }
     assert.equal(isServiceReportType("unknown"), false);
@@ -215,7 +446,7 @@ describe("Типы рапортов и статусы", () => {
   });
 
   test("каждому типу рапорта сопоставлена пиктограмма и заголовок", () => {
-    for (const type of ["exam", "role", "vacation", "reserve", "shds_entry"]) {
+    for (const type of ["exam", "role", "position_transfer", "vacation", "reserve", "shds_entry"]) {
       const meta = reportTypeMeta(type as never);
       assert.ok(meta.label.length > 3, `пустой заголовок у ${type}`);
       assert.ok(meta.icon.length > 0, `нет пиктограммы у ${type}`);
@@ -405,6 +636,95 @@ describe("Проверка payload: запись в ШДС", () => {
     assert.equal(
       validateReportPayload("shds_entry", { unit: "Танковая рота", rank: "Рядовой" }).ok,
       true
+    );
+  });
+});
+
+describe("Проверка payload: перевод по должности ШДС", () => {
+  test("секция из справочника принимается, должность берётся из неё", () => {
+    const result = validateReportPayload("position_transfer", {
+      section: "tr_gunner",
+      comment: "Опыт наводчика 2 года",
+    });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    const payload = result.payload as PositionTransferPayload;
+    assert.equal(payload.section, "tr_gunner");
+    // Должность подставлена справочником, а не присланным значением
+    assert.equal(payload.post, "Специалист Наводчик-Оператор");
+    assert.equal(payload.comment, "Опыт наводчика 2 года");
+  });
+
+  test("присланная должность не переопределяет справочник", () => {
+    const result = validateReportPayload("position_transfer", {
+      section: "tr_driver",
+      post: "Командир роты",
+    });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal((result.payload as PositionTransferPayload).post, "Специалист Мех.водитель");
+  });
+
+  test("командирская должность отклоняется: её назначает штаб", () => {
+    const result = validateReportPayload("position_transfer", {
+      section: "Командир отделения",
+    });
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.match(result.error, /штаб/);
+  });
+
+  test("неизвестная секция отклоняется, а не угадывается", () => {
+    const result = validateReportPayload("position_transfer", { section: "tr_marshal" });
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.match(result.error, /из списка/);
+  });
+
+  test("командные секции отклоняются по ключу, а не только по тексту", () => {
+    // Обход формы прямым запросом к API: ключ секции известен справочнику,
+    // но «перевестись» в командный блок рапортом бойца нельзя
+    for (const key of ["tr_bcm", "tr_bcm_full", "tr_command", "ad_command"]) {
+      const result = validateReportPayload("position_transfer", { section: key });
+      assert.equal(result.ok, false, `секция ${key} принята рапортом бойца`);
+      if (result.ok) return;
+      assert.match(result.error, /штаб/);
+    }
+  });
+
+  test("ступени дивизиона принимаются и берут должность из справочника", () => {
+    const result = validateReportPayload("position_transfer", {
+      section: "ad_mlrs",
+      comment: "Готов к РСЗО",
+    });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    const payload = result.payload as PositionTransferPayload;
+    assert.equal(payload.section, "ad_mlrs");
+    assert.equal(payload.post, "Специалист расчёта РСЗО");
+  });
+
+  test("чтение payload: должность снова берётся из справочника", () => {
+    // В jsonb мог лежать свободный текст старой записи — показывать его как
+    // должность нельзя: по этому полю бот ищет секцию и двигает строку
+    const payload = readReportPayload("position_transfer", {
+      section: "tr_driver",
+      post: "Что-то из прошлой версии",
+    }) as PositionTransferPayload;
+    assert.equal(payload.post, "Специалист Мех.водитель");
+
+    const broken = readReportPayload("position_transfer", { section: "нет-такой" }) as PositionTransferPayload;
+    assert.equal(broken.section, "");
+  });
+
+  test("выжимка рапорта показывает должность и комментарий", () => {
+    const payload = readReportPayload("position_transfer", {
+      section: "tr_gunner",
+      comment: "Перевожусь по рекомендации",
+    });
+    assert.equal(
+      summarizeReport("position_transfer", payload),
+      "Специалист Наводчик-Оператор · Перевожусь по рекомендации"
     );
   });
 });

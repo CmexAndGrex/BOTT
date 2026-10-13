@@ -55,6 +55,24 @@ export const members = pgTable("division_members", {
   vacationUntil: timestamp("vacation_until", { mode: 'date' }), // Дата выхода из отпуска
   vacationNotified: boolean("vacation_notified").notNull().default(false), // Было ли напоминание за 24ч
   leftNotified: boolean("left_notified").notNull().default(false), // Пинг Командирскому составу о выходе из подразделения уже отправлен
+  /**
+   * Момент перевода бойца в статус «dismissed» (исключён / переведён в запас).
+   *
+   * Нужен контролю снятия ролей Discord: «прошло ли уже 24 часа с исключения»
+   * нельзя считать по updatedAt — его меняет любая правка карточки (Discord ID,
+   * отпуск, звание), и напоминание комсоставу либо откладывалось бы бесконечно,
+   * либо срабатывало раньше срока. Сбрасывается в NULL при возвращении в строй.
+   */
+  dismissedAt: timestamp("dismissed_at", { withTimezone: true, mode: "date" }),
+  /**
+   * Момент отправки напоминания комсоставу о неснятых ролях.
+   *
+   * NULL — напоминание ещё не отправлялось; заполненное значение закрывает
+   * бойца для повторных проверок (иначе планировщик слал бы пинг каждый цикл).
+   * Ставится и тогда, когда роли уже сняты или человек вышел с сервера: иначе
+   * задача вечно возвращалась бы к одному и тому же бойцу.
+   */
+  rolesAlertSentAt: timestamp("roles_alert_sent_at", { withTimezone: true, mode: "date" }),
   discordId: text("discord_id"),
   active: boolean("active").notNull().default(true),
   warnings: integer("warnings").notNull().default(0),
@@ -102,7 +120,19 @@ export const members = pgTable("division_members", {
   updatedAt: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
-});
+}, (table) => [
+  /**
+   * Контроль снятия ролей Discord (lib/roles-monitor.ts): задача выбирает
+   * действующих бойцов с истёкшими 24 часами после исключения и ещё не
+   * отправленным напоминанием. Индекс закрывает всю тройку условий сразу,
+   * иначе планировщик сканировал бы весь состав на каждом цикле.
+   */
+  index("division_members_roles_alert_idx").on(
+    table.status,
+    table.rolesAlertSentAt,
+    table.dismissedAt
+  ),
+]);
 
 /**
  * Журнал входов новобранцев (аудит гибридной авторизации).
@@ -239,6 +269,14 @@ export const users = pgTable("users", {
 export type ReviewStatus = "pending" | "approved" | "rejected";
 
 /**
+ * Вид заявки на вступление (поле recruit_applications.kind).
+ *
+ * Значения совпадают с RECRUIT_APPLICATION_KINDS в src/lib/recruits.ts, поэтому
+ * в интерфейсе не нужны ни «магические» строки, ни приведение типов.
+ */
+export type RecruitApplicationKind = "recruit" | "reserve_return";
+
+/**
  * Заявка на вступление (страница /apply).
  *
  * Отдельная таблица, а не только jsonb в division_members: заявку нужно
@@ -251,9 +289,29 @@ export const recruitApplications = pgTable(
   "recruit_applications",
   {
     id: serial("id").primaryKey(),
-    /** Боец, созданный из заявки (null, если запись заведена без аккаунта) */
+    /**
+     * Боец, созданный из заявки (null, если запись заведена без аккаунта).
+     *
+     * set null, а не cascade: удаление профиля администратором не должно
+     * стирать историю модерации. Позывной кандидата лежит рядом отдельной
+     * колонкой (callsign), поэтому очередь и решения читаются и после чистки
+     * состава — связь с карточкой теряется, запись остаётся.
+     */
     memberId: integer("member_id").references(() => members.id, { onDelete: "set null" }),
     callsign: text("callsign").notNull(),
+    /**
+     * Вид заявки: recruit — новобранец, reserve_return — возврат из запаса.
+     *
+     * Хранится явной колонкой, а не выводится из текста комментария: по виду
+     * заявки выбирается решение (зачисление или восстановление строки ШДС),
+     * и свободный текст кандидата не должен этим управлять.
+     */
+    kind: varchar("kind", { length: 20 })
+      .$type<RecruitApplicationKind>()
+      .notNull()
+      .default("recruit"),
+    /** ФИО возвращающегося из запаса: по нему ищется строка на листе «Запас» */
+    fullName: text("full_name"),
     /** Логин или глобальное имя в Discord (поле формы, проверяется модератором) */
     discordTag: text("discord_tag"),
     /** Snowflake ID: заполняется из cookie Discord либо модератором */
@@ -280,8 +338,13 @@ export const recruitApplications = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  // Очередь модерации: фильтр по статусу и сортировка «свежие сверху»
-  (table) => [index("recruit_applications_status_created_idx").on(table.status, table.createdAt)]
+  (table) => [
+    // Очередь модерации: фильтр по статусу и сортировка «свежие сверху»
+    index("recruit_applications_status_created_idx").on(table.status, table.createdAt),
+    // Очередь отдельно по виду заявки (новобранцы / возврат из запаса):
+    // панель и бот фильтруют заявки по виду и статусу одновременно
+    index("recruit_applications_kind_status_idx").on(table.kind, table.status),
+  ]
 );
 
 /**
@@ -295,8 +358,14 @@ export const serviceReports = pgTable(
   "service_reports",
   {
     id: serial("id").primaryKey(),
-    /** Боец, подавший рапорт (callsign остаётся для истории при увольнении) */
-    memberId: integer("member_id").references(() => members.id, { onDelete: "cascade" }),
+    /**
+     * Боец, подавший рапорт.
+     *
+     * set null: текст решений штаба — служебный документ, и он остаётся в силе
+     * после увольнения. cascade здесь стирал бы историю рапортов вместе с
+     * карточкой бойца. Кто подавал рапорт, видно по колонке callsign ниже.
+     */
+    memberId: integer("member_id").references(() => members.id, { onDelete: "set null" }),
     callsign: text("callsign").notNull(),
     /** Тип рапорта: exam | role | vacation | reserve | shds_entry */
     type: varchar("type", { length: 20 }).$type<ServiceReportType>().notNull(),

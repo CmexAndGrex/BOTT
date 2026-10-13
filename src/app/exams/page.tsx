@@ -194,7 +194,7 @@ function ExamsInner() {
       </header>
 
       {error && (
-        <div className="card flex items-center gap-2.5 px-4 py-3" style={{ borderColor: "rgba(239,68,68,.45)" }}>
+        <div className="card flex items-center gap-2.5 px-4 py-3" style={{ borderColor: "rgba(190,18,60,.45)" }}>
           <ShieldAlert size={16} style={{ color: "var(--red)" }} />
           <span className="text-[13px]" style={{ color: "var(--red)" }}>
             {error}
@@ -245,7 +245,7 @@ function ExamsInner() {
                   title={item.blocked ? item.blockedHint : undefined}
                   style={
                     isActive
-                      ? { background: "var(--red-soft)", borderColor: "rgba(239,68,68,.45)", color: "#fff" }
+                      ? { background: "var(--red-soft)", borderColor: "rgba(190,18,60,.45)", color: "#fff" }
                       : undefined
                   }
                 >
@@ -412,7 +412,11 @@ function ProgressBar({ percent, tone }: { percent: number; tone: "green" | "red"
         className="hours-fill"
         style={{
           width: `${Math.max(0, Math.min(100, percent))}%`,
-          background: tone === "green" ? "var(--green)" : "var(--red)",
+          /* Сданный норматив — изумрудный, в работе — бордовый градиент с
+             неоновым отсветом: тот же акцент CTA, что у главных кнопок */
+          ...(tone === "green"
+            ? { background: "var(--green)" }
+            : { background: "var(--red-grad)", boxShadow: "var(--red-glow)" }),
         }}
       />
     </div>

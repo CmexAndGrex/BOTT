@@ -4,7 +4,6 @@ import {
   DiscordApiError,
   discordQueue,
   parseRetryAfterMs,
-  queueOptionsFromSettings,
 } from "@/lib/discord-queue";
 
 const DISCORD_API = "https://discord.com/api/v10";
@@ -65,22 +64,10 @@ async function discordRequest<T = unknown>(
   path: string,
   init: RequestInit = {}
 ): Promise<T> {
-  // Параметры очереди читаем из настроек: администратор может убавить
-  // параллелизм, если сервер уже ловит 429 на других задачах. Ошибка чтения
-  // настроек здесь не критична — работаем с текущими параметрами очереди.
-  try {
-    const map = await getSettings();
-    discordQueue().configure(
-      queueOptionsFromSettings({
-        concurrency: map.get("discord_rate_concurrency"),
-        intervalMs: map.get("discord_rate_interval_ms"),
-        attempts: map.get("discord_rate_attempts"),
-      })
-    );
-  } catch {
-    /* настройки недоступны — оставляем параметры как есть */
-  }
-
+  // Лимиты очереди (параллелизм, пауза, число попыток) зафиксированы в коде —
+  // см. DEFAULT_QUEUE_OPTIONS в src/lib/discord-queue.ts. Из настроек панели эти
+  // поля убраны: слишком легко было получить 429 по кругу или «зависшую» сверку.
+  //
   // Каждый запрос проходит через общую очередь: она держит лимит запросов к
   // Discord, а при 429 сама выдерживает Retry-After и повторяет попытку.
   return discordQueue().run(labelForPath(path), () => sendRequest<T>(path, init));

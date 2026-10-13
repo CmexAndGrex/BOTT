@@ -1,15 +1,21 @@
 /**
  * Запас — перевод бойца в запас и возврат.
  *
- * «Уйти в запас»: СТРОКА БОЙЦА ЦЕЛИКОМ (колонки A–T, включая заливки
+ * «Уйти в запас»: СТРОКА БОЙЦА ЦЕЛИКОМ (колонки A–AG, включая заливки
  * сданных экзаменов и форматирование) копируется на лист «Запас», на листе
  * подразделения затирается шаблоном «Вакант». Служебные данные (подразделение,
- * Discord-роли для восстановления, дата ухода) пишутся в колонки U–W листа
+ * Discord-роли для восстановления, дата ухода) пишутся в колонки AH–AJ листа
  * «Запас». В Discord снимаются все роли и выдаётся роль «Запас».
  *
- * «Вернуться из запаса»: строка целиком возвращается на лист подразделения
- * (первая свободная «Вакант»-строка) со ВСЕМИ отметками об экзаменах, строка
- * на листе «Запас» очищается. Роли восстанавливаются, роль «Запас» снимается.
+ * Почему A–AG, а не прежние A–T: у роты блок оценок кончается на «AE», у
+ * дивизиона — на «AG», и снапшот A–T обрезал последние нормативы (уставы, ПВО,
+ * БПЛА, береты). Боец, ушедший в запас и вернувшийся, терял эти отметки —
+ * возвращался с пустыми (белыми) колонками хвоста.
+ *
+ * «Вернуться из запаса»: строка целиком (A–AG) возвращается на лист
+ * подразделения (нижняя свободная «Вакант»-строка блока прежней должности) со
+ * ВСЕМИ отметками об экзаменах, строка на листе «Запас» очищается. Роли
+ * восстанавливаются, роль «Запас» снимается.
  */
 import { GoogleSpreadsheetWorksheet } from "google-spreadsheet";
 import { getSettings } from "@/lib/settings";
@@ -20,18 +26,54 @@ import {
   findVacantRow,
   copyRow,
   resolveLayout,
+  ensureColumnCount,
+  FULL_ROW_COL_COUNT,
   type UnitLayout,
 } from "@/lib/gsheets";
 
-/** Служебные колонки листа «Запас» (после снапшота строки A–T) */
+/**
+ * Служебные колонки листа «Запас» после снапшота строки A–AG.
+ *
+ * AH(33) — подразделение (имя листа), AI(34) — сохранённые Discord-роли через
+ * запятую, AJ(35) — дата ухода. Раньше метаданные лежали в U–W, но снапшот
+ * расширился до AG и накрыл бы их собой: строка бойца затирала бы служебные
+ * значения, и возврат из запаса терял бы подразделение и роли.
+ */
 const META_COL = {
-  unit: 20,  // U — подразделение (имя листа)
-  roles: 21, // V — сохранённые Discord-роли через запятую
-  date: 22,  // W — дата ухода
+  unit: 33,  // AH — подразделение (имя листа)
+  roles: 34, // AI — сохранённые Discord-роли через запятую
+  date: 35,  // AJ — дата ухода
 } as const;
 
-/** Границы копируемого снапшота строки */
-const SNAP_COLS = 20; // A–T
+/**
+ * Старые координаты метаданных (U–W) — только для ЧТЕНИЯ.
+ *
+ * Обратная совместимость: строки, положенные в «Запас» до расширения снапшота,
+ * лежат на 20–22-й колонке, и переносить их руками никто не будет. При чтении
+ * смотрим на ширину ЗАНЯТОЙ части строки (occupiedWidth): у старой строки
+ * правее прежних 23 колонок пусто, у новой занята как минимум колонка AH
+ * (подразделение) — 34 колонки. Порог и есть NEW_META_MIN_COLS.
+ */
+const LEGACY_META_COL = {
+  unit: 20,  // U
+  roles: 21, // V
+  date: 22,  // W
+} as const;
+
+/** Границы копируемого снапшота строки: A–AG (33 колонки A..AG) */
+const SNAP_COLS = FULL_ROW_COL_COUNT;
+
+/**
+ * Ширина строки, после которой метаданные считаются НОВЫМИ (AH–AJ).
+ *
+ * Порог 34 — колонка AH: у строки с метаданными в AH..AJ обязательно заполнена
+ * AH (подразделение), и длина непустой части такой строки не меньше 34. У
+ * старых строк правее W ничего нет, поэтому длина остаётся 20–22.
+ */
+const NEW_META_MIN_COLS = LEGACY_META_COL.date + 12; // 34 → колонка AH
+
+/** Последняя колонка служебного блока листа «Запас» */
+const META_LAST_COL = META_COL.date;
 
 export type ReserveResult = { ok: true; message: string } | { ok: false; error: string };
 
@@ -50,18 +92,80 @@ async function getReserveSheet(
   const existing = sheets.find(
     (s) => (s.title || "").trim().toLowerCase() === name.toLowerCase()
   );
-  if (existing) return existing;
+  if (existing) {
+    // Лист со старым (узким) снапшотом расширяем: правее прежних 26–30 колонок
+    // должен поместиться хвост строки (A..AG) и служебный блок AH..AJ
+    await ensureColumnCount(existing, META_LAST_COL + 1);
+    return existing;
+  }
 
-  const headers: string[] = new Array(SNAP_COLS).fill("");
+  // Шапка строится на всю ширину снапшота и служебного блока: пустые заголовки
+  // допустимы (библиотека проверяет уникальность только непустых)
+  const headers: string[] = new Array(META_LAST_COL + 1).fill("");
   headers[META_COL.unit] = "Подразделение";
   headers[META_COL.roles] = "Discord-роли (служебное)";
   headers[META_COL.date] = "Дата ухода";
-  return doc.addSheet({ title: name, headerValues: headers });
+  const sheet = await doc.addSheet({
+    title: name,
+    headerValues: headers,
+    // Google по умолчанию даёт 26 колонок — на них служебный блок AH..AJ не
+    // помещается, и запись метаданных упала бы с «Out of bounds»
+    gridProperties: { columnCount: META_LAST_COL + 1 },
+  });
+  return sheet;
+}
+
+/**
+ * Ширина занятой части строки листа «Запас»: индекс последней непустой ячейки + 1.
+ *
+ * Нужна для обратной совместимости чтения метаданных: по ней отличаем строку
+ * нового формата (снапшот A..AG + метаданные AH..AJ) от старой (снапшот A–T +
+ * метаданные U–W).
+ */
+function occupiedWidth(sheet: GoogleSpreadsheetWorksheet, row: number): number {
+  const last = Math.min(META_LAST_COL, sheet.columnCount - 1);
+  for (let c = last; c >= 0; c--) {
+    if (String(sheet.getCell(row - 1, c).value ?? "").trim()) return c + 1;
+  }
+  return 0;
+}
+
+/**
+ * Колонки метаданных по ширине занятой части строки.
+ *
+ * Новый формат (ширина ≥ 34, то есть занята колонка AH) — AH..AJ; старый
+ * (ширина меньше 34) — U–W. Вынесено отдельной чистой функцией, чтобы правило
+ * обратной совместимости проверялось тестом, а не только чтением живого листа.
+ */
+export function metaColumnsForWidth(
+  width: number
+): { unit: number; roles: number; date: number } {
+  return width >= NEW_META_MIN_COLS ? META_COL : LEGACY_META_COL;
+}
+
+/**
+ * Колонки метаданных для КОНКРЕТНОЙ строки листа «Запас».
+ *
+ * Строки, положенные до расширения снапшота, остаются читаемыми: их никто не
+ * переносит руками, а подразделение и роли им всё ещё нужны — без них боец не
+ * найдётся и вернётся без прежних ролей Discord.
+ */
+function metaColumnsFor(
+  sheet: GoogleSpreadsheetWorksheet,
+  row: number
+): { unit: number; roles: number; date: number } {
+  return metaColumnsForWidth(occupiedWidth(sheet, row));
 }
 
 /**
  * Копирование строки МЕЖДУ листами: значения + шрифты + заливки + выравнивание.
  * Именно заливки сохраняют зелёные отметки сданных экзаменов.
+ *
+ * Копируется ПОЛНАЯ строка A..AG (а не только блок оценок листа): у роты
+ * экзамены кончаются на «AE», и хвост строки (уставы, ПВО, БПЛА, береты)
+ * оставался на месте, пока боец в запасе. Ширина ограничивается сеткой ЛИСТОВ
+ * (у старого листа запаса могло быть всего 26 колонок) — за границей сетки
+ * `getCell` бросает «Out of bounds».
  */
 function copyRowBetween(
   srcSheet: GoogleSpreadsheetWorksheet,
@@ -69,7 +173,8 @@ function copyRowBetween(
   destSheet: GoogleSpreadsheetWorksheet,
   destRow: number
 ) {
-  for (let c = 0; c < SNAP_COLS; c++) {
+  const cols = Math.min(SNAP_COLS, srcSheet.columnCount, destSheet.columnCount);
+  for (let c = 0; c < cols; c++) {
     const src = srcSheet.getCell(srcRow - 1, c);
     const dest = destSheet.getCell(destRow - 1, c);
     dest.value = src.value;
@@ -90,11 +195,21 @@ function copyRowBetween(
   }
 }
 
-/** Первая свободная строка на листе запаса (нет имени и нет подразделения) */
+/**
+ * Первая свободная строка на листе запаса.
+ *
+ * Проверяется ВЕСЬ диапазон A..AJ, а не только блок нового формата: он накрывает
+ * и снапшот (A..AG), и новый служебный блок (AH..AJ), и старые метаданные U–W.
+ * Иначе строка со старыми метаданными (они правее прежнего снапшота A–T, но
+ * левее AH) выглядела бы «пустой», и следующего бойца положили бы поверх неё —
+ * потеряв и его данные, и возможность вернуть прежнего.
+ */
 function nextReserveRow(sheet: GoogleSpreadsheetWorksheet): number {
-  for (let r = 2; r <= Math.max(sheet.rowCount, 200); r++) {
+  const lastCol = Math.min(META_LAST_COL, sheet.columnCount - 1);
+  const lastRow = Math.max(sheet.rowCount, 200);
+  for (let r = 2; r <= lastRow; r++) {
     let empty = true;
-    for (let c = 0; c <= META_COL.date; c++) {
+    for (let c = 0; c <= lastCol; c++) {
       if (String(sheet.getCell(r - 1, c).value ?? "").trim()) {
         empty = false;
         break;
@@ -102,12 +217,15 @@ function nextReserveRow(sheet: GoogleSpreadsheetWorksheet): number {
     }
     if (empty) return r;
   }
-  return Math.max(sheet.rowCount, 200) + 1;
+  return lastRow + 1;
 }
 
 /**
  * Поиск строки бойца на листе запаса: имя ищем в той же колонке, где оно
- * лежит на листе подразделения (по сохранённому в U подразделению).
+ * лежит на листе подразделения (по сохранённому подразделению).
+ *
+ * Подразделение читается с учётом формата строки: у старых строк оно лежит в U,
+ * у новых — в AH (см. metaColumnsFor).
  */
 function findReserveRow(
   sheet: GoogleSpreadsheetWorksheet,
@@ -115,7 +233,8 @@ function findReserveRow(
 ): { row: number; unit: string; layout: UnitLayout } | null {
   const target = name.trim().toLowerCase();
   for (let r = 2; r <= sheet.rowCount; r++) {
-    const unit = String(sheet.getCell(r - 1, META_COL.unit).value ?? "").trim();
+    const meta = metaColumnsFor(sheet, r);
+    const unit = String(sheet.getCell(r - 1, meta.unit).value ?? "").trim();
     if (!unit) continue;
     let layout: UnitLayout;
     try {
@@ -130,9 +249,15 @@ function findReserveRow(
   return null;
 }
 
-/** Затереть строку запаса (снапшот + служебные колонки) */
+/**
+ * Затереть строку запаса: снапшот A..AG и ОБА варианта служебных колонок
+ * (U–W старого формата и AH..AJ нового). Чистить только текущий блок мало —
+ * у строки со старыми метаданными в U–W они остались бы «висеть» правее
+ * снапшота, и nextReserveRow считал бы такую строку занятой.
+ */
 async function clearReserveRow(sheet: GoogleSpreadsheetWorksheet, row: number) {
-  for (let c = 0; c <= META_COL.date; c++) {
+  const lastCol = Math.min(META_LAST_COL, sheet.columnCount - 1);
+  for (let c = 0; c <= lastCol; c++) {
     const cell = sheet.getCell(row - 1, c);
     cell.value = "";
     // v5: очистка формата выполняется методом (setters не принимают undefined)
@@ -194,19 +319,26 @@ export async function moveToReserve(req: {
     const layout = resolveLayout(req.unit);
     const unitSheet = await getSheet(req.unit);
 
-    // 1. Находим строку бойца на листе подразделения
+    // 1. Находим строку бойца на листе подразделения.
+    //    Перед чтением строка расширяется до полной ширины A..AG: у листа могло
+    //    быть меньше колонок, и хвост блока оценок (у дивизиона это «AF»–«AG»)
+    //    остался бы не скопированным — боец вернулся бы без части отметок
+    await ensureColumnCount(unitSheet, FULL_ROW_COL_COUNT);
     await unitSheet.loadCells();
     const srcRow = findNameRow(unitSheet, layout, req.userName);
     if (!srcRow) throw new Error(`Боец ${req.userName} не найден на листе «${req.unit}»`);
 
-    // 2. Копируем строку ЦЕЛИКОМ (с заливками экзаменов) на лист запаса
+    // 2. Копируем строку ЦЕЛИКОМ (A..AG, с заливками экзаменов) на лист запаса.
+    //    Сетку листа запаса расширяем до служебного блока: у существующего листа
+    //    колонок могло быть меньше, и хвост строки (уставы, ПВО, БПЛА, береты)
+    //    обрезался бы или запись метаданных падала бы с «Out of bounds»
     const reserveSheet = await getReserveSheet(doc);
     await reserveSheet.loadCells();
     const destRow = nextReserveRow(reserveSheet);
 
     copyRowBetween(unitSheet, srcRow, reserveSheet, destRow);
 
-    // Служебные данные для возврата
+    // Служебные данные для возврата — AH..AJ листа «Запас»
     reserveSheet.getCell(destRow - 1, META_COL.unit).value = req.unit;
     reserveSheet.getCell(destRow - 1, META_COL.roles).value = (req.roles || []).join(",");
     reserveSheet.getCell(destRow - 1, META_COL.date).value = new Date()
@@ -219,11 +351,16 @@ export async function moveToReserve(req: {
       layout.postRanges.find((r) => srcRow >= r.top && srcRow <= r.bottom) || layout.overall;
     const templateRow = findVacantRow(unitSheet, layout, range.top, range.bottom, srcRow);
     if (templateRow) {
-      copyRow(unitSheet, templateRow, srcRow);
+      // Раскладка листа передаётся явно: конец копирования — блок оценок ИМЕННО
+      // этого листа (AE у роты, AG у дивизиона), иначе хвост шапки не копировался
+      copyRow(unitSheet, layout, templateRow, srcRow);
     } else {
-      // Шаблона нет — чистим вручную, имя заменяем на «Вакант»
+      // Шаблона нет — чистим вручную, имя заменяем на «Вакант».
+      // Границы — по сетке ЛИСТА подразделения: колонок могло быть меньше
+      // полной строки, и обход до AG упал бы с «Out of bounds»
       const nameColIdx = layout.nameCol.charCodeAt(0) - 65;
-      for (let c = 0; c < SNAP_COLS; c++) {
+      const cols = Math.min(SNAP_COLS, unitSheet.columnCount);
+      for (let c = 0; c < cols; c++) {
         const cell = unitSheet.getCell(srcRow - 1, c);
         cell.value = c === nameColIdx ? "Вакант" : "";
         // v5: очистка заливки выполняется методом (setters не принимают undefined)
@@ -261,13 +398,17 @@ export async function returnFromReserve(req: {
     if (!found) throw new Error(`Боец ${req.userName} не найден на листе запаса`);
     const { row: resRow, unit, layout } = found;
 
-    // 2. Сохранённые Discord-роли для восстановления
-    const rolesRaw = String(reserveSheet.getCell(resRow - 1, META_COL.roles).value ?? "").trim();
+    // 2. Сохранённые Discord-роли для восстановления.
+    //    Колонки метаданных зависят от формата строки: новые записи держат их в
+    //    AH..AJ, положенные до расширения снапшота — в U–W (обратная совместимость)
+    const meta = metaColumnsFor(reserveSheet, resRow);
+    const rolesRaw = String(reserveSheet.getCell(resRow - 1, meta.roles).value ?? "").trim();
     const roles = rolesRaw ? rolesRaw.split(",").map((r) => r.trim()).filter(Boolean) : [];
 
-    // 3. Возвращаем строку ЦЕЛИКОМ (с экзаменами) на лист подразделения —
+    // 3. Возвращаем строку ЦЕЛИКОМ (A..AG, с экзаменами) на лист подразделения —
     //    в НИЖНЮЮ свободную строку блока прежней должности, чтобы не мешать другим
     const unitSheet = await getSheet(unit);
+    await ensureColumnCount(unitSheet, FULL_ROW_COL_COUNT);
     await unitSheet.loadCells();
     const nameColIdx = layout.nameCol.charCodeAt(0) - 65;
     const savedPost = String(

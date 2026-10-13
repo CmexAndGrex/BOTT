@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { cronRuns } from "@/db/schema";
-import { runCleanup, runDailySnapshot, runLeftMembersCheck, runOperationPing, runWeeklyCheck, runWeeklyRecord, runGoogleFormPoll, syncRoster } from "@/lib/tasks";
+import { runCleanup, runDailySnapshot, runDismissedRolesCheck, runLeftMembersCheck, runOperationPing, runWeeklyCheck, runWeeklyRecord, runGoogleFormPoll, syncRoster } from "@/lib/tasks";
 import {
   getSettings,
   nowInTz,
@@ -113,6 +113,21 @@ async function tick() {
         console.log(
           `[scheduler] auto sync: ${r.ok ? `${r.membersCount} members` : r.error}`
         );
+      }
+    }
+  }
+
+  // Контроль снятия ролей у исключённых (раз в 30 минут): боец исключён в
+  // панели (status = dismissed), но роль подразделения на сервере осталась —
+  // через сутки после исключения комсостав получает однократное напоминание.
+  // Отдельная задача, а не часть left-check: тот смотрит на пропажу бойца из
+  // состава rs-red.com, а здесь источник — исключение в панели.
+  if (map.get("roles_monitor_enabled") === "true") {
+    const halfHour = Math.floor(Date.now() / (30 * 60 * 1000));
+    if (await claim(`roles-monitor:${halfHour}`)) {
+      const r = await runDismissedRolesCheck("schedule");
+      if (!r.ok || !r.detail.includes("не требуется")) {
+        console.log(`[scheduler] roles-monitor: ${r.ok ? r.detail : r.error}`);
       }
     }
   }

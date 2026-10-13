@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, lt } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, lt } from "drizzle-orm";
 import { db } from "@/db";
 import { cronRuns, logs, members as membersTable, processedRequests, snapshots, weeklyStats } from "@/db/schema";
 import {
@@ -9,7 +9,7 @@ import {
   sendChannelMessage,
   type DiscordEmbed,
 } from "@/lib/discord";
-import { fetchRoster } from "@/lib/rsred";
+import { RS_RED_BASE_URL, fetchRoster } from "@/lib/rsred";
 import {
   getSettings,
   normHours,
@@ -61,14 +61,14 @@ export type PctColor = {
  * hex и css намеренно разные. hex уходит в Embed Discord (tasks.ts) — это
  * фирменные цвета бота, их смена разошлась бы с остальными его сообщениями.
  * css рисует кольцо и график панели, поэтому берёт акценты сайта: изумрудный,
- * янтарный и тактический красный.
+ * янтарный и неоново-бордовый.
  */
 export function pctColor(p: number): PctColor {
   if (p >= 60)
     return { name: "green", hex: 0x3ddc84, css: "#34d399", label: "Норма выполняется" };
   if (p >= 50)
     return { name: "yellow", hex: 0xffb020, css: "#ffb020", label: "Норма на грани" };
-  return { name: "red", hex: 0xff3d3d, css: "#ef4444", label: "Норма провалена" };
+  return { name: "red", hex: 0xff3d3d, css: "#be123c", label: "Норма провалена" };
 }
 
 export function computeStats(
@@ -117,7 +117,8 @@ export async function syncRoster(source = "manual"): Promise<
     return { ...r, membersCount: 0 };
   }
 
-  const base = map.get("rs_base_url") || "https://rs-red.com";
+  // Базовый URL берём из константы: в настройках его больше нет (см. rsred.ts)
+  const base = RS_RED_BASE_URL;
   const subdivId = map.get("rs_subdiv_id") || "5";
 
   try {
@@ -553,7 +554,7 @@ export async function checkSite(): Promise<{ ok: boolean; error?: string }> {
   const cookie = resolveCookie(map);
   if (!cookie) return { ok: false, error: "Cookie не задана" };
   try {
-    await fetchRoster(cookie, map.get("rs_base_url") || "", map.get("rs_subdiv_id") || "5");
+    await fetchRoster(cookie, RS_RED_BASE_URL, map.get("rs_subdiv_id") || "5");
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "Ошибка" };
@@ -577,6 +578,236 @@ export async function runGoogleFormPoll(source = "schedule"): Promise<TaskResult
     const message = e instanceof Error ? e.message : String(e);
     return { ok: false, title: "Опрос Google-формы", detail: message, error: message };
   }
+}
+
+/** ---------- Задача: контроль снятия ролей у исключённых ----------
+ *
+ * Боец переведён в статус `dismissed` (исключён по рапорту, в запас, отклонена
+ * заявка), но роль подразделения на сервере осталась. Пока роль висит,
+ * исключённый читает закрытые каналы. Снимает роли живой человек в канале
+ * запросов ролей, поэтому через 24 часа после исключения комсостав получает
+ * напоминание — однократно на бойца (флаг rolesAlertSentAt).
+ *
+ * Отличие от runLeftMembersCheck: та задача следит за бойцами, пропавшими из
+ * состава ШДС (active = false после синхронизации с rs-red.com), и опирается
+ * на updatedAt. Здесь источник — исключение в панели (status = dismissed) и
+ * точная колонка dismissedAt: updatedAt меняет любая правка карточки, по нему
+ * срок в 24 часа не отсчитать.
+ *
+ * Задача не бросает исключений наружу: цикл вызывается из таймера в том же
+ * процессе, что и веб-сервер, поэтому 404 по одному участнику или 429 от
+ * Discord не должны прерывать проверку остальных.
+ */
+export async function runDismissedRolesCheck(source = "schedule"): Promise<TaskResult> {
+  const map = await getSettings(true);
+  if (map.get("roles_monitor_enabled") !== "true") {
+    return { ok: true, title: "Контроль ролей исключённых", detail: "Проверка выключена" };
+  }
+
+  const channelId = (
+    map.get("roles_monitor_channel_id") ||
+    map.get("left_check_channel_id") ||
+    map.get("discord_channel_id") ||
+    ""
+  ).trim();
+  const commandRoleId = (map.get("command_role_id") || "").trim();
+  if (!channelId) {
+    const r: TaskResult = {
+      ok: false,
+      title: "Контроль ролей исключённых",
+      detail:
+        "Не задан канал уведомлений: укажите roles_monitor_channel_id, left_check_channel_id или discord_channel_id",
+      error: "NO_CONFIG",
+    };
+    await addLog("roles-monitor", r.title, r.detail, false, r.error ?? null);
+    return r;
+  }
+
+  const {
+    buildRolesAlertEmbed,
+    candidateLabel,
+    isAlertDue,
+    leftoverClanRoles,
+    pendingDivisionRoles,
+    resolveAlertDelayMs,
+    rolesAlertLogText,
+  } = await import("@/lib/roles-monitor");
+
+  // Срок ожидания — из настроек панели (по умолчанию 24 часа). Значение
+  // нормализуется resolveAlertDelayMs: мусор в настройке не должен превращать
+  // проверку в пинг сразу после исключения.
+  const delayMs = resolveAlertDelayMs(map.get("roles_monitor_delay_hours"));
+
+  // Кандидаты: исключённые, с Discord ID, без отправленного напоминания.
+  // Отсечка по сроку в SQL — грубая (меньше настраиваемого срока), точное
+  // решение принимает isAlertDue: те же правила, что покрыты юнит-тестами,
+  // а не вторая копия условия в SQL.
+  const cutoff = new Date(Date.now() - delayMs);
+  let candidates: (typeof membersTable.$inferSelect)[];
+  try {
+    candidates = await db
+      .select()
+      .from(membersTable)
+      .where(
+        and(
+          eq(membersTable.status, "dismissed"),
+          isNull(membersTable.rolesAlertSentAt),
+          isNotNull(membersTable.discordId),
+          lt(membersTable.dismissedAt, cutoff)
+        )
+      );
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    await addLog("roles-monitor", "Контроль ролей исключённых", message, false, message);
+    return { ok: false, title: "Контроль ролей исключённых", detail: message, error: message };
+  }
+
+  const now = new Date();
+  const due = candidates.filter((row) =>
+    isAlertDue(
+      {
+        id: row.id,
+        name: row.name,
+        callsign: row.callsign,
+        discordId: row.discordId,
+        status: row.status,
+        dismissedAt: row.dismissedAt,
+        rolesAlertSentAt: row.rolesAlertSentAt,
+      },
+      now,
+      delayMs
+    )
+  );
+
+  // Сервер разрешается ДО раннего выхода: иначе при пустом guild_id задача
+  // молча отчитывалась бы «напоминаний не требуется» на пустой выборке, а с
+  // первой же кандидатурой падала бы настройкой — ошибку конфигурации нужно
+  // видеть сразу, а не ждать, пока в базе появится подходящий боец.
+  let guildId = (map.get("guild_id") || "").trim();
+  if (!guildId) {
+    try {
+      const { getBotGuildIds } = await import("@/lib/discord");
+      const ids = await getBotGuildIds();
+      if (ids.length === 1) guildId = ids[0];
+    } catch {
+      /* оставим пустым — задача отчитается ниже */
+    }
+  }
+  if (!guildId) {
+    return {
+      ok: false,
+      title: "Контроль ролей исключённых",
+      detail:
+        "Не задан guild_id и бот состоит на нескольких серверах — укажите ID сервера в настройках",
+      error: "NO_GUILD",
+    };
+  }
+
+  if (!due.length) {
+    return {
+      ok: true,
+      title: "Контроль ролей исключённых",
+      detail: `Проверено исключённых: ${candidates.length}. Напоминаний не требуется.`,
+    };
+  }
+
+  const { getGuildMemberRoles, sendChannelMessage } = await import("@/lib/discord");
+
+  let checked = 0;
+  let alerted = 0;
+  let errors = 0;
+
+  for (const row of due) {
+    const discordId = String(row.discordId || "").trim();
+    if (!discordId) continue;
+    checked++;
+
+    // Каждый боец обрабатывается в своём try: ошибка одного запроса (404, 429,
+    // сеть) не должна ронять проверку остальных — иначе один ушедший с сервера
+    // боец блокировал бы напоминания всем, кто идёт после него в выборке.
+    try {
+      const memberRoles = await getGuildMemberRoles(guildId, discordId);
+      const leftover = leftoverClanRoles(memberRoles);
+      const hanging = pendingDivisionRoles(memberRoles);
+
+      // Роль АТК висит — предупреждаем комсостав
+      if (hanging.length > 0) {
+        const candidate = {
+          id: row.id,
+          name: row.name,
+          callsign: row.callsign,
+          discordId,
+          status: row.status,
+          dismissedAt: row.dismissedAt,
+          rolesAlertSentAt: row.rolesAlertSentAt,
+        };
+
+        await sendChannelMessage(channelId, {
+          embeds: [buildRolesAlertEmbed(candidate, { leftover })],
+          content: commandRoleId ? mentionRole(commandRoleId) : undefined,
+          // Упоминание бойца в Embed — это только подсветка профиля, пинговать
+          // исключённого нельзя: allowed_mentions выключает уведомления всем,
+          // кроме роли комсостава.
+          allowed_mentions: {
+            parse: [],
+            roles: commandRoleId ? [commandRoleId] : [],
+            users: [],
+          },
+        });
+
+        alerted++;
+        console.log(
+          `[roles-monitor] Напоминание отправлено: ${candidateLabel(candidate)} (${discordId}), ролей клана осталось ${leftover.length}`
+        );
+        await addLog(
+          "roles-monitor",
+          "Не сняты роли подразделения",
+          rolesAlertLogText(candidate, leftover),
+          true
+        );
+      } else if (memberRoles === null) {
+        // Участника нет на сервере: роли ушли вместе с ним — предупреждать не о
+        // чем, но и возвращаться к бойцу незачем.
+        console.log(
+          `[roles-monitor] ${discordId}: участник не найден на сервере — роли неактуальны`
+        );
+      } else {
+        console.log(`[roles-monitor] ${discordId}: роли подразделения уже сняты`);
+      }
+
+      // Флаг ставится и при снятых ролях: иначе задача вечно возвращалась бы к
+      // одному и тому же бойцу на каждом цикле планировщика.
+      await db
+        .update(membersTable)
+        .set({ rolesAlertSentAt: new Date() })
+        .where(eq(membersTable.id, row.id));
+    } catch (e) {
+      errors++;
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(`[roles-monitor] Ошибка проверки ${discordId}:`, message);
+      await addLog(
+        "roles-monitor",
+        "Ошибка проверки ролей исключённого",
+        `Боец: ${row.name} (Discord ${discordId})`,
+        false,
+        message
+      );
+    }
+  }
+
+  const detail =
+    `Проверено: ${checked}, напоминаний отправлено: ${alerted}` +
+    (errors ? `, ошибок: ${errors}` : "");
+  const result: TaskResult = {
+    ok: errors === 0,
+    title: "Контроль ролей исключённых",
+    detail,
+    error: errors ? `ERRORS:${errors}` : undefined,
+  };
+  if (alerted > 0 || errors > 0) {
+    await addLog("roles-monitor", result.title, detail, errors === 0, errors ? detail : null);
+  }
+  return result;
 }
 
 /** ---------- Задача: контроль вышедших из подразделения ----------

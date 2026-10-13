@@ -267,8 +267,8 @@ function LoginForm() {
 
   return (
     <div className="flex min-h-screen items-center justify-center p-4">
-      {/* Фоновые эффекты из вашего дизайна */}
-      <div className="fx-bg fx-grid" />
+      {/* Фоновые слои: бордовый отсвет и шум. Квадратной сетки нет — фон
+          держат арт-обои и радиальная виньетка из BackgroundSlideshow */}
       <div className="fx-bg fx-glow-red" />
       <div className="fx-bg fx-noise" />
 
@@ -276,7 +276,7 @@ function LoginForm() {
         <div className="mb-6 flex flex-col items-center text-center">
           <div
             className="mb-4 flex items-center justify-center"
-            style={{ width: 48, height: 48, borderRadius: 14, background: "linear-gradient(135deg, #ff5148, #b41d1d 70%)" }}
+            style={{ width: 48, height: 48, borderRadius: 14, background: "var(--red-grad)", boxShadow: "var(--red-glow)" }}
           >
             <Radar size={24} color="#fff" />
           </div>
@@ -285,7 +285,7 @@ function LoginForm() {
         </div>
 
         {error && (
-          <div className="mb-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+          <div className="alert-red mb-4 flex items-center gap-2 rounded-xl px-3 py-2 text-sm">
             <ShieldAlert size={16} />
             {error}
           </div>
@@ -357,8 +357,9 @@ function LoginForm() {
         </form>
 
         {/* Режим разработки: быстрый вход под готовыми аккаунтами.
-            Блок появляется только когда сервер подтвердил доступность
-            (/api/auth/dev-login отвечает 404 вне NODE_ENV != production) */}
+            Блок появляется только когда сервер подтвердил доступность:
+            /api/auth/dev-login отвечает 404, если NODE_ENV=production ИЛИ не
+            задан ENABLE_DEV_LOGIN=true (правило «двух ключей» в dev-accounts.ts) */}
         {devAccounts.length > 0 && (
           <div
             className="mt-6 rounded-xl border px-3 py-3"

@@ -1,0 +1,51 @@
+# Конфигурация gitleaks (внешний детектор секретов, запускается в CI).
+#
+# Расширяет набор правил по умолчанию: помимо общих шаблонов добавляет форматы,
+# специфичные для проекта (паспорт Google, токен Discord-бота, cookie rs-red).
+#
+# Дополнительно: allowlist исключает из проверки файлы-примеры и документацию,
+# где секреты стоят в виде заглушек (replace_me, your_…, XXXX). Без этого
+# gitleaks «падал» бы на .env.example при каждой сборке, и проверку отключили бы.
+
+title = "ATK BOT gitleaks config"
+
+[extend]
+# Берём встроенный набор правил gitleaks и дополняем своими ниже
+useDefault = true
+
+# Файлы и пути, которые не проверяем: только заглушки и локальные артефакты
+[allowlist]
+description = "Примеры окружения, документация с плейсхолдерами и артефакты сборки"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)scripts/secret-scan\.mjs$''',
+  '''(^|/)\.gitleaks\.toml$''',
+  '''(^|/)\.githooks/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)\.next/''',
+  '''(^|/)schemas/''',
+]
+# Строки-заглушки: не считаем секретом, даже если шаблон совпал
+regexes = [
+  '''(?i)(replace[_-]?me|your[_-]|example|placeholder|xxxx|changeme|dummy|sample)''',
+]
+
+# --- Собственные правила проекта (помимо встроенных) ---
+
+[[rules]]
+id = "google-service-account-private-key"
+description = "Закрытый ключ сервисного аккаунта Google (доступ к Google Таблице ШДС)"
+regex = '''-----BEGIN (RSA |EC |)PRIVATE KEY-----'''
+tags = ["google", "private-key"]
+
+[[rules]]
+id = "rsred-session-cookie"
+description = "Сессионная cookie Steam-входа rs-red.com"
+regex = '''rs\.sid=s%3A'''
+tags = ["rsred", "cookie"]
+
+[[rules]]
+id = "discord-webhook-url"
+description = "Боевой URL вебхука Discord (канал заявок/рапортов)"
+regex = '''discord(?:app)?\.com/api/webhooks/\d{15,}/[A-Za-z0-9_-]{60,}'''
+tags = ["discord", "webhook"]

@@ -2,14 +2,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { desc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { logs } from "@/db/schema";
-import { requireRole } from "@/lib/api-auth";
+import { requireStaff } from "@/lib/member-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
-  // Журнал содержит имена и действия сотрудников — доступен командирам и админам
-  const auth = await requireRole(req, ["officer"]);
+  // Журнал содержит имена и действия сотрудников — доступен командирам и админам.
+  // requireStaff допускает и сессию кабинета с правами штаба (роль officer/admin
+  // или должность/звание командира подразделения), и сессию панели: командир,
+  // работающий из кабинета, раньше получал 401 от requireRole(["officer"]).
+  const auth = await requireStaff(req);
   if (!auth.ok) return auth.response;
 
   try {

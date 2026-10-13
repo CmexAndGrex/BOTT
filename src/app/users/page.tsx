@@ -157,7 +157,7 @@ export default function UsersPage() {
   };
 
   if (error && error.includes("закрыт")) {
-    return <div className="p-10 text-center text-red-500 font-bold">{error}</div>;
+    return <div className="p-10 text-center font-bold" style={{ color: "var(--red)" }}>{error}</div>;
   }
 
   return (
@@ -165,7 +165,7 @@ export default function UsersPage() {
       <header className="mb-4">
         <div className="eyebrow mb-2">система // top secret</div>
         <h1 className="display text-[34px] font-black leading-tight flex items-center gap-3">
-          <ShieldCheck className="text-red-500" size={36} /> Доступы
+          <ShieldCheck style={{ color: "var(--red)" }} size={36} /> Доступы
         </h1>
         <p className="mt-2 text-sm" style={{ color: "var(--muted)" }}>
           Панель управления аккаунтами. Привяжите администратору и командиру Discord — и он войдёт
@@ -173,7 +173,7 @@ export default function UsersPage() {
         </p>
       </header>
 
-      {error && <div className="p-3 bg-red-500/10 border border-red-500/50 text-red-400 rounded-lg text-sm mb-4">{error}</div>}
+      {error && <div className="alert-red p-3 rounded-lg text-sm mb-4">{error}</div>}
       {flash && (
         <div className="p-3 rounded-lg text-sm mb-4" style={{ background: "var(--amber-soft)", border: "1px solid rgba(255,176,32,.45)", color: "var(--amber)" }}>
           {flash}

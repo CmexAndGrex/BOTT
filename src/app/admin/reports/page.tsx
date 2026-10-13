@@ -116,7 +116,7 @@ export default function AdminReportsPage() {
   const chipStyle = (active: boolean) =>
     active
       ? {
-          borderColor: "rgba(239,68,68,.5)",
+          borderColor: "rgba(190,18,60,.5)",
           background: "var(--red-soft)",
           color: "#fff",
           cursor: "pointer" as const,
@@ -217,7 +217,7 @@ function NoticeRow({ kind, text }: { kind: "ok" | "err"; text: string }) {
   return (
     <div
       className="card flex items-center gap-2.5 px-4 py-3"
-      style={{ borderColor: kind === "ok" ? "rgba(16,185,129,.4)" : "rgba(239,68,68,.45)" }}
+      style={{ borderColor: kind === "ok" ? "rgba(16,185,129,.4)" : "rgba(190,18,60,.45)" }}
     >
       {kind === "ok" ? (
         <CheckCircle2 size={16} style={{ color: "var(--green)" }} />

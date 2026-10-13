@@ -16,12 +16,23 @@ import Link from "next/link";
 import { ClipboardList, ShieldAlert, CheckCircle2, MessageCircle } from "lucide-react";
 import { Spinner } from "@/components/ui";
 import { PASSWORD_POLICY_HINT } from "@/lib/password-policy";
-import { AGE_MAX, AGE_MIN, PENDING_NOTICE, SPECIALIZATIONS } from "@/lib/recruits";
+import { AGE_MAX, AGE_MIN, APPLICATION_KIND_LABELS, DEFAULT_APPLICATION_KIND, PENDING_NOTICE, SPECIALIZATIONS, type RecruitApplicationKind, APPLICATION_KIND_RESERVE_RETURN } from "@/lib/recruits";
 
 type Draft = { discord: { id: string; avatarUrl: string | null } | null };
 
 export default function ApplyPage() {
   const [callsign, setCallsign] = useState("");
+  /**
+   * Вид заявки: «Новобранец» (по умолчанию) или «Возврат из запаса».
+   *
+   * Возвращающийся из запаса подаёт ту же форму, но решение по ней другое:
+   * бойца восстанавливают, а не зачисляют заново — его строка в Google Таблице
+   * переезжает с листа «Запас» в подразделение. Поэтому вид выбирается явно,
+   * а не угадывается по тексту.
+   */
+  const [kind, setKind] = useState<RecruitApplicationKind>(DEFAULT_APPLICATION_KIND);
+  /** ФИО возвращающегося: по нему находят строку на листе «Запас» */
+  const [fullName, setFullName] = useState("");
   const [password, setPassword] = useState("");
   const [age, setAge] = useState("");
   const [armaExperience, setArmaExperience] = useState("");
@@ -34,6 +45,14 @@ export default function ApplyPage() {
   const [sending, setSending] = useState(false);
   const [discordAvatar, setDiscordAvatar] = useState<string | null>(null);
   const [discordLinked, setDiscordLinked] = useState(false);
+  /**
+   * Выбран возврат из запаса.
+   *
+   * От этого зависит и набор полей (ФИО — только для возврата; анкета у
+   * возвращающегося необязательна), и тексты страницы, поэтому признак
+   * считается один раз и используется в разметке.
+   */
+  const isReserveReturn = kind === APPLICATION_KIND_RESERVE_RETURN;
 
   // Контакт Discord: если он есть, поле ID заполнено и менять его не нужно
   useEffect(() => {
@@ -72,6 +91,9 @@ export default function ApplyPage() {
           discordId: discordLinked ? "" : discordId,
           // Логин/глобальное имя Discord: офицер по нему найдёт кандидата
           discordTag,
+          // Вид заявки и ФИО: сервер сам проверит ФИО для возврата из запаса
+          kind,
+          fullName,
         }),
       });
       const data = await res.json();
@@ -108,24 +130,79 @@ export default function ApplyPage() {
 return (
     <div className="mx-auto w-full max-w-2xl">
       <header className="mb-6">
-        <div className="eyebrow mb-2">набор // новобранец</div>
+        <div className="eyebrow mb-2">
+          набор // {kind === APPLICATION_KIND_RESERVE_RETURN ? "возврат из запаса" : "новобранец"}
+        </div>
         <h1 className="display text-[30px] font-black leading-tight flex items-center gap-3">
-          <ClipboardList className="text-red-500" size={32} /> Рапорт на вступление
+          <ClipboardList style={{ color: "var(--red)" }} size={32} />
+          {kind === APPLICATION_KIND_RESERVE_RETURN ? "Рапорт на возврат из запаса" : "Рапорт на вступление"}
         </h1>
         <p className="mt-2 text-sm" style={{ color: "var(--muted)" }}>
-          Заполните анкету — штаб рассмотрит её и зачислит вас в подразделение. Позывной и пароль
-          нужны для входа в личный кабинет.
+          {kind === APPLICATION_KIND_RESERVE_RETURN
+            ? "Укажите ФИО, позывной и пароль: штаб восстановит вашу строку в подразделении, а прежние роли Discord вернутся."
+            : "Заполните анкету — штаб рассмотрит её и зачислит вас в подразделение. Позывной и пароль нужны для входа в личный кабинет."}
         </p>
       </header>
 
       {error && (
-        <div className="mb-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+        <div className="alert-red mb-4 flex items-center gap-2 rounded-xl px-3 py-2 text-sm">
           <ShieldAlert size={16} />
           {error}
         </div>
       )}
 
       <form onSubmit={handleSubmit} className="card flex flex-col gap-5 p-6">
+        {/**
+          * Вид заявки выбирается первым: от него зависит и набор полей (ФИО —
+          * только для возврата), и решение штаба. Переключатель, а не поле
+          * ввода: значения фиксированы доменом (RECRUIT_APPLICATION_KINDS).
+          */}
+        <div>
+          <label className="label mb-1.5 block">Вид заявки</label>
+          <div className="flex flex-wrap gap-2">
+            {(Object.keys(APPLICATION_KIND_LABELS) as RecruitApplicationKind[]).map((option) => (
+              <button
+                key={option}
+                type="button"
+                className="chip"
+                onClick={() => setKind(option)}
+                style={
+                  kind === option
+                    ? { borderColor: "rgba(190,18,60,.5)", background: "var(--red-soft)", color: "#fff" }
+                    : { cursor: "pointer" }
+                }
+              >
+                <span className={`dot ${kind === option ? "dot-err" : "dot-dim"}`} />
+                {APPLICATION_KIND_LABELS[option]}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+            {kind === APPLICATION_KIND_RESERVE_RETURN
+              ? "Возврат из запаса: штаб восстановит вашу строку в подразделении и вернёт прежние роли Discord"
+              : "Новобранец: первичный приём в подразделение"}
+          </p>
+        </div>
+
+        {/* ФИО нужно только возвращающемуся: по нему ищется строка в «Запасе» */}
+        {kind === APPLICATION_KIND_RESERVE_RETURN && (
+          <div>
+            <label className="label mb-1.5 block">ФИО (как в табеле)</label>
+            <input
+              className="input w-full"
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              placeholder="Волков Д. В."
+              minLength={5}
+              maxLength={60}
+              required
+            />
+            <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+              Именно по ФИО бот находит вашу строку на листе «Запас» — укажите её так же, как в таблице
+            </p>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div>
             <label className="label mb-1.5 block">Позывной (он же логин)</label>
@@ -167,18 +244,22 @@ return (
               min={AGE_MIN}
               max={AGE_MAX}
               placeholder="18"
-              required
+              // Возвращающегося возраст уже не спрашивают: он служил, и данные
+              // давно в табеле — обязательность полей зависит от вида заявки
+              required={!isReserveReturn}
             />
           </div>
           <div>
-            <label className="label mb-1.5 block">Специализация</label>
+            <label className="label mb-1.5 block">
+              Специализация{isReserveReturn ? " (необязательно)" : ""}
+            </label>
             <input
               className="input w-full"
               list="specializations"
               value={specialization}
               onChange={(e) => setSpecialization(e.target.value)}
               placeholder="Танкист (наводчик)"
-              required
+              required={!isReserveReturn}
             />
             <datalist id="specializations">
               {SPECIALIZATIONS.map((item) => (
@@ -189,14 +270,16 @@ return (
         </div>
 
         <div>
-          <label className="label mb-1.5 block">Опыт в Arma 3</label>
+          <label className="label mb-1.5 block">
+            Опыт в Arma 3{isReserveReturn ? " (необязательно)" : ""}
+          </label>
           <textarea
             className="input w-full"
             rows={3}
             value={armaExperience}
             onChange={(e) => setArmaExperience(e.target.value)}
             placeholder="600 часов, 3 года, участвовал в операциях на серверах..."
-            required
+            required={!isReserveReturn}
           />
         </div>
 
