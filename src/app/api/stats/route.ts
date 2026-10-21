@@ -8,6 +8,13 @@ import { getSettings, normHours, nowInTz } from "@/lib/settings";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * Минимальное число уникальных бойцов в неделе, чтобы она попала в табы.
+ * В базе остались черновые тестовые срезы за август — в них 2–7 человек;
+ * показывать их рядом с полноценными неделями бессмысленно.
+ */
+const MIN_WEEK_FIGHTERS = 15;
+
 /** Начало текущей недели (Понедельник 00:00) в часовом поясе из настроек */
 async function getMonday() {
   const map = await getSettings();
@@ -96,13 +103,15 @@ export async function GET() {
   const history = historyDesc.reverse();
 
   /**
-   * Прошлые недели: каждая неделя считает налёт строго по своим строкам
-   * weekly_stats. Группируем ВСЕ существующие недели по локальному календарю,
-   * без ограничения по глубине хранения — иначе старые срезы пропадали бы из
-   * переключателя, а сумма подменялась бы общим значением по составу.
+   * Прошлые недели: weekly_stats пишется по строке на бойца при недельном
+   * срезе, но задача могла запускаться несколько раз за неделю. Группируем
+   * строго по member_id и берём только последнюю запись бойца за неделю
+   * (created_at, затем id) — иначе один человек считался бы несколько раз,
+   * раздувая и число бойцов, и суммарный налёт.
    */
   const weeklyRows = await db
     .select({
+      memberId: weeklyStats.memberId,
       hours: weeklyStats.hours,
       vacation: weeklyStats.vacation,
       createdAt: weeklyStats.createdAt,
@@ -110,29 +119,34 @@ export async function GET() {
     .from(weeklyStats)
     .orderBy(asc(weeklyStats.createdAt), asc(weeklyStats.id));
 
-  const byWeek = new Map<string, WeekRow[]>();
+  const byWeek = new Map<string, Map<number, WeekRow>>();
   for (const row of weeklyRows) {
     const key = weekKeyFor(row.createdAt, tz);
     // Текущая неделя считается по актуальным division_members.hours, а не по
     // записи среза: снимок мог быть сделан в начале недели.
     if (key >= currentKey) continue;
-    const week = byWeek.get(key);
-    if (week) {
-      week.push({ hours: row.hours, vacation: row.vacation });
-    } else {
-      byWeek.set(key, [{ hours: row.hours, vacation: row.vacation }]);
+    let week = byWeek.get(key);
+    if (!week) {
+      week = new Map();
+      byWeek.set(key, week);
     }
+    // Порядок сортировки — от старых к новым, поэтому последняя запись
+    // бойца перезаписывает предыдущие.
+    week.set(row.memberId, { hours: row.hours, vacation: row.vacation });
   }
 
   const pastKeys = Array.from(byWeek.keys()).sort();
-  const weeks = pastKeys.map((key) => ({
-    key,
-    label: weekLabel(key),
-    start: key,
-    end: new Date(new Date(`${key}T00:00:00.000Z`).getTime() + 6 * 86_400_000).toISOString().slice(0, 10),
-    isCurrent: false,
-    ...aggregateWeek(byWeek.get(key) ?? [], norm),
-  }));
+  const weeks = pastKeys
+    // Отсекаем старые черновые недели с неполным составом.
+    .filter((key) => (byWeek.get(key)?.size ?? 0) >= MIN_WEEK_FIGHTERS)
+    .map((key) => ({
+      key,
+      label: weekLabel(key),
+      start: key,
+      end: new Date(new Date(`${key}T00:00:00.000Z`).getTime() + 6 * 86_400_000).toISOString().slice(0, 10),
+      isCurrent: false,
+      ...aggregateWeek(Array.from(byWeek.get(key)?.values() ?? []), norm),
+    }));
 
   // Текущая неделя — всегда последняя в списке
   weeks.push({
