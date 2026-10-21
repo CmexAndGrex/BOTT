@@ -4,9 +4,10 @@ import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, CheckCircle2, UserMinus, XCircle } from "lucide-react";
 import { Avatar, Section, Spinner } from "@/components/ui";
+import { isCommanderFighter, isDeputyCommander } from "@/lib/validation";
 
 type Stat = { id: number; hours: number; vacation: boolean; createdAt: string };
-type Fighter = { id: number; name: string; rankName: string | null; hours: number; vacation: boolean; discordId: string | null; warnings: number; active: boolean; stats: Stat[] };
+type Fighter = { id: number; name: string; rankName: string | null; post?: string | null; hours: number; vacation: boolean; discordId: string | null; warnings: number; active: boolean; stats: Stat[] };
 type Notice = { ok: boolean; text: string } | null;
 
 // Функция для получения дат недели (0 = текущая, 1 = прошлая, 2 = позапрошлая и т.д.)
@@ -190,34 +191,55 @@ export default function ControlPage() {
                         {renderCell(f.vacation, f.hours)}
                       </td>
 
-                      {/* ПРЕДУПРЕЖДЕНИЯ */}
+                      {/* ПРЕДУПРЕЖДЕНИЯ / СТАТУС КОМСОСТАВА */}
                       <td style={{ textAlign: "center" }}>
-                        <span className={`badge ${f.warnings === 0 ? "badge-green" : f.warnings === 1 ? "badge-amber" : "badge-red"}`}>
-                          {f.warnings}/2 пред.
-                        </span>
+                        {isCommanderFighter(f) ? (
+                          <span
+                            className="badge font-bold"
+                            style={{
+                              background: "rgba(255,176,32,0.18)",
+                              color: "var(--amber)",
+                              borderColor: "rgba(255,176,32,0.5)",
+                              boxShadow: "0 0 10px rgba(255,176,32,0.2)",
+                              letterSpacing: "0.03em"
+                            }}
+                          >
+                            {isDeputyCommander(f) ? "★ ЗАМ. КОМАНДИРА" : "★ КОМАНДИР"}
+                          </span>
+                        ) : (
+                          <span className={`badge ${f.warnings === 0 ? "badge-green" : f.warnings === 1 ? "badge-amber" : "badge-red"}`}>
+                            {f.warnings}/2 пред.
+                          </span>
+                        )}
                       </td>
 
                       {/* КНОПКИ УПРАВЛЕНИЯ */}
                       <td style={{ textAlign: "right" }}>
-                        <div className="flex justify-end gap-2">
-                          <button 
-                            className="btn" 
-                            style={{ padding: "0.4rem 0.6rem", fontSize: "0.75rem", background: "var(--amber-soft)", color: "#fff", borderColor: "rgba(255,176,32,.5)" }}
-                            disabled={busyIds.has(f.id)}
-                            onClick={() => issueWarning(f.id, 1)}
-                          >
-                            <AlertTriangle size={13} /> 1/2 Пред
-                          </button>
-                          
-                          <button 
-                            className="btn" 
-                            style={{ padding: "0.4rem 0.6rem", fontSize: "0.75rem", background: "var(--red-soft)", color: "#fff", borderColor: "rgba(190,18,60,.5)" }}
-                            disabled={busyIds.has(f.id)}
-                            onClick={() => issueWarning(f.id, 2)}
-                          >
-                            <UserMinus size={13} /> 2/2 Пред
-                          </button>
-                        </div>
+                        {isCommanderFighter(f) ? (
+                          <span className="text-[12px] mono" style={{ color: "var(--dim)" }}>
+                            —
+                          </span>
+                        ) : (
+                          <div className="flex justify-end gap-2">
+                            <button 
+                              className="btn" 
+                              style={{ padding: "0.4rem 0.6rem", fontSize: "0.75rem", background: "var(--amber-soft)", color: "#fff", borderColor: "rgba(255,176,32,.5)" }}
+                              disabled={busyIds.has(f.id)}
+                              onClick={() => issueWarning(f.id, 1)}
+                            >
+                              <AlertTriangle size={13} /> 1/2 Пред
+                            </button>
+                            
+                            <button 
+                              className="btn" 
+                              style={{ padding: "0.4rem 0.6rem", fontSize: "0.75rem", background: "var(--red-soft)", color: "#fff", borderColor: "rgba(190,18,60,.5)" }}
+                              disabled={busyIds.has(f.id)}
+                              onClick={() => issueWarning(f.id, 2)}
+                            >
+                              <UserMinus size={13} /> 2/2 Пред
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );

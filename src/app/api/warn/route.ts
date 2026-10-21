@@ -3,7 +3,7 @@ import { db } from "@/db";
 import { members, settings, logs } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { requireStaff } from "@/lib/member-auth";
-import { CooldownLimiter, nextWarningCount, isDiscordId } from "@/lib/validation";
+import { CooldownLimiter, nextWarningCount, isDiscordId, isCommanderFighter } from "@/lib/validation";
 
 /**
  * Антиспам по ключу «кто выдаёт → кому выдаёт».
@@ -49,6 +49,11 @@ export async function POST(req: NextRequest) {
     if (!fighterRecord || fighterRecord.length === 0) return NextResponse.json({ error: "Боец не найден" }, { status: 404 });
     
     const fighter = fighterRecord[0];
+
+    // Запрет выдачи предупреждений командному составу (командиры и заместители)
+    if (isCommanderFighter(fighter)) {
+      return NextResponse.json({ error: "Запрещено выдавать предупреждения командному составу" }, { status: 403 });
+    }
 
     /**
      * Проверка принадлежности к подразделению (IDOR).

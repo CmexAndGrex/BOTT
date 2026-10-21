@@ -4,18 +4,33 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  Activity, AlarmClock, ArrowRight, CheckCircle2, Hourglass, Palmtree,
+  Activity, AlarmClock, ArrowRight, CalendarDays, CheckCircle2, Hourglass, Palmtree,
   RefreshCw, ShieldAlert, Target, Users, XCircle, Zap,
 } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Avatar, CountUp, PctBadge, Ring, Section, Spinner, fmtDate } from "@/components/ui";
 
+type WeekStats = {
+  key: string;
+  label: string;
+  start: string;
+  end: string;
+  isCurrent: boolean;
+  total: number;
+  totalHours: number;
+  avgHours: number;
+  passed: number;
+  zeroHours: number;
+  onVacation: number;
+  percent: number;
+};
 type Stats = {
   norm: number;
   live: { total: number; zeroHours: number; passed: number; failed: number; onVacation: number; percent: number; };
   color: { name: string; css: string; label: string };
   history: { id: number; createdAt: string; percent: number; passed: number; zeroHours: number; total: number }[];
   latestSnapshot: { id: number; createdAt: string } | null;
+  weeks: WeekStats[];
 };
 type Member = { id: number; name: string; rankName: string | null; post: string | null; hours: number; vacation: boolean; discordId: string | null; active: boolean; };
 type LogRow = { id: number; createdAt: string; kind: string; title: string; detail: string; ok: boolean; error: string | null; };
@@ -44,6 +59,7 @@ function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: 
 
 export default function DashboardPage() {
   const [stats, setStats] = useState<Stats | null>(null);
+  const [weekKey, setWeekKey] = useState<string | null>(null);
   const [members, setMembers] = useState<Member[] | null>(null);
   const [logs, setLogs] = useState<LogRow[]>([]);
   const [status, setStatus] = useState<Status | null>(null);
@@ -123,6 +139,18 @@ export default function DashboardPage() {
   const norm = stats?.norm ?? 10;
   const debtors = (members ?? []).filter((m) => m.active && !m.vacation && Math.floor(m.hours) < norm).sort((a, b) => a.hours - b.hours);
   const colorCss = stats?.color.css ?? "#be123c";
+  const weeks = stats?.weeks ?? [];
+  // По умолчанию — текущая неделя. Выбор хранится по ключу, поэтому обновление
+  // данных каждые 45 секунд не сбрасывает открытую прошлую неделю.
+  const currentWeek = weeks.find((w) => w.isCurrent) ?? weeks[weeks.length - 1] ?? null;
+  const activeWeek = (weekKey ? weeks.find((w) => w.key === weekKey) : null) ?? currentWeek;
+  const weekColorCss = activeWeek
+    ? activeWeek.percent >= 60
+      ? "#34d399"
+      : activeWeek.percent >= 50
+        ? "#ffb020"
+        : "#be123c"
+    : colorCss;
   const chartData = (stats?.history ?? []).map((h) => ({ date: fmtDate(h.createdAt), percent: h.percent }));
 
   return (
@@ -161,20 +189,61 @@ export default function DashboardPage() {
         </Section>
       )}
 
+      {/* Недельный переключатель: прошлые недели из weekly_stats, последняя — текущая */}
+      {weeks.length > 0 && (
+        <div className="card px-3 py-2.5">
+          <div className="flex items-center gap-2 overflow-x-auto" style={{ scrollbarWidth: "thin" }} role="tablist" aria-label="Недели">
+            <CalendarDays size={15} className="ml-1 shrink-0" style={{ color: "var(--dim)" }} />
+            {weeks.map((w) => {
+              const active = activeWeek?.key === w.key;
+              return (
+                <button
+                  key={w.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setWeekKey(w.isCurrent ? null : w.key)}
+                  className={`btn btn-sm ${active ? "btn-primary" : ""}`}
+                  style={{ flex: "none", ...(active ? {} : { background: "rgba(255,255,255,0.025)", color: "var(--muted)" }) }}
+                >
+                  {w.isCurrent ? "Текущая неделя" : <span className="mono">{w.label}</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="grid gap-5 lg:grid-cols-12">
-        <Section className="lg:col-span-5 card-hover" title="Выполнение нормы" eyebrow="Текущая неделя">
+        <Section className="lg:col-span-5 card-hover" title="Выполнение нормы" eyebrow={activeWeek?.isCurrent ? "Текущая неделя" : activeWeek ? `Неделя ${activeWeek.label}` : "Текущая неделя"}>
           <div className="px-5 py-6 flex flex-col items-center justify-center text-center" style={{ overflow: "visible" }}>
-            {stats ? (
+            {stats && activeWeek ? (
               <>
                 <div className="flex justify-center" style={{ overflow: "visible" }}>
-                  <Ring percent={stats.live.percent} color={colorCss}>
-                    <CountUp value={stats.live.percent} decimals={1} className="display text-[34px] font-black" />
+                  <Ring percent={activeWeek.percent} color={weekColorCss}>
+                    <CountUp value={activeWeek.percent} decimals={1} className="display text-[34px] font-black" />
                     <span className="text-[10px] uppercase" style={{ color: "var(--dim)", letterSpacing: "0.2em" }}>нормы</span>
                   </Ring>
                 </div>
                 <div className="mt-4 flex flex-col items-center justify-center gap-2">
-                  <PctBadge percent={stats.live.percent} />
-                  <span className="text-[12px]" style={{ color: "var(--muted)" }}>{stats.live.passed} из {stats.live.total} бойцов · пороги: 50% / 60%</span>
+                  <PctBadge percent={activeWeek.percent} />
+                  <span className="text-[12px]" style={{ color: "var(--muted)" }}>{activeWeek.passed} из {activeWeek.total} бойцов · пороги: 50% / 60%</span>
+                </div>
+                <div className="mt-3 grid w-full grid-cols-2 gap-2" style={{ maxWidth: 360 }}>
+                  <div className="px-3 py-2 text-left" style={{ borderRadius: 13, border: "1px solid var(--stroke-soft)", background: "rgba(255,255,255,0.03)" }}>
+                    <div className="label">Суммарный налёт</div>
+                    <div className="mt-0.5" style={{ color: "var(--text)" }}>
+                      <CountUp value={activeWeek.totalHours} decimals={1} className="text-[18px] font-bold" />
+                      <span className="ml-1 text-[11px]" style={{ color: "var(--dim)" }}>ч</span>
+                    </div>
+                  </div>
+                  <div className="px-3 py-2 text-left" style={{ borderRadius: 13, border: "1px solid var(--stroke-soft)", background: "rgba(255,255,255,0.03)" }}>
+                    <div className="label">Средний онлайн</div>
+                    <div className="mt-0.5" style={{ color: "var(--green)" }}>
+                      <CountUp value={activeWeek.avgHours} decimals={1} className="text-[18px] font-bold" />
+                      <span className="ml-1 text-[11px]" style={{ color: "var(--dim)" }}>ч / боец</span>
+                    </div>
+                  </div>
                 </div>
               </>
             ) : <div className="skeleton mx-auto" style={{ width: 210, height: 210, borderRadius: 999 }} />}
@@ -183,15 +252,15 @@ export default function DashboardPage() {
 
         <div className="grid gap-5 sm:grid-cols-2 lg:col-span-7">
           {[
-            { key: "total", label: "Всего бойцов", value: stats?.live.total, icon: Users, tint: "#7c9aff", hint: "в подразделении" },
-            { key: "zero", label: "С 0 часов", value: stats?.live.zeroHours, icon: Hourglass, tint: "#be123c", hint: "людей в подразделении" },
-            { key: "passed", label: `Норма ≥ ${norm} ч`, value: stats?.live.passed, icon: Target, tint: "#34d399", hint: "выполнили норму" },
-            { key: "vacation", label: "В отпуске", value: stats?.live.onVacation, icon: Palmtree, tint: "#ffb020", hint: "не пингуются" },
+            { key: "total", label: "Всего бойцов", value: activeWeek?.total, icon: Users, tint: "#7c9aff", hint: "в подразделении" },
+            { key: "zero", label: "С 0 часов", value: activeWeek?.zeroHours, icon: Hourglass, tint: "#be123c", hint: "людей в подразделении" },
+            { key: "passed", label: `Норма ≥ ${norm} ч`, value: activeWeek?.passed, icon: Target, tint: "#34d399", hint: "выполнили норму" },
+            { key: "vacation", label: "В отпуске", value: activeWeek?.onVacation, icon: Palmtree, tint: "#ffb020", hint: "не пингуются" },
           ].map((s, i) => (
             <motion.div key={s.key} initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.08 + i * 0.06, duration: 0.5, ease: [0.22, 0.8, 0.24, 1] }}>
               <div className="card card-hover h-full px-5 py-5">
                 <div className="flex items-center justify-between"><span className="label">{s.label}</span><span className="flex items-center justify-center" style={{ width: 34, height: 34, borderRadius: 11, background: `${s.tint}1f`, color: s.tint }}><s.icon size={16} /></span></div>
-                <div className="display mt-3 text-[30px] font-black leading-none">{stats ? <CountUp value={s.value ?? 0} /> : <span style={{ color: "var(--dim)" }}>—</span>}</div>
+                <div className="display mt-3 text-[30px] font-black leading-none">{stats && activeWeek ? <CountUp value={s.value ?? 0} /> : <span style={{ color: "var(--dim)" }}>—</span>}</div>
                 <div className="mt-1.5 text-[11px]" style={{ color: "var(--dim)" }}>{s.hint}</div>
               </div>
             </motion.div>

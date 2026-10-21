@@ -406,3 +406,21 @@ export function normalizeUrl(input: string): string | null {
     return null;
   }
 }
+
+/** ID бойцов, относящихся к командному составу (иммунитет от предупреждений) */
+export const COMMANDER_MEMBER_IDS: readonly number[] = [8, 12, 17, 30];
+
+/** Проверка, относится ли боец к комсоставу (командир / зам. командира) */
+export function isCommanderFighter(fighter: { id?: number | null; post?: string | null }): boolean {
+  if (fighter.id != null && COMMANDER_MEMBER_IDS.includes(fighter.id)) {
+    return true;
+  }
+  const post = (fighter.post || "").toLowerCase();
+  return post.includes("командир") || post.includes("заместитель командира");
+}
+
+/** Проверка, является ли боец именно заместителем командира */
+export function isDeputyCommander(fighter: { post?: string | null }): boolean {
+  const post = (fighter.post || "").toLowerCase();
+  return post.includes("заместитель командира") || post.includes("зам. командира");
+}
