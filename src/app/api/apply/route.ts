@@ -21,20 +21,19 @@ import { MEMBER_OAUTH_PENDING_COOKIE, requestIp, unpackDiscordProfile } from "@/
 import { publishRecruitApplication } from "@/lib/review";
 import {
   APPLICATION_KIND_LABELS,
-  APPLICATION_KIND_RECRUIT,
   APPLICATION_KIND_RESERVE_RETURN,
   DEFAULT_APPLICATION_KIND,
   DEFAULT_RANK,
-  FULL_NAME_MAX_LENGTH,
-  FULL_NAME_MIN_LENGTH,
+  FULL_NAME_FORMAT_HINT,
   isCallsign,
   isDiscordSnowflake,
-  isFullName,
+  isFullNameWithInitials,
   isRecruitApplicationKind,
   LoginThrottle,
   MANUAL_DISCORD_ID,
   normalizeCallsign,
   normalizeFullName,
+  normalizePersonName,
   PENDING_NOTICE,
   readApplication,
   validateApplication,
@@ -105,17 +104,20 @@ export async function POST(req: NextRequest) {
     : DEFAULT_APPLICATION_KIND;
 
   /**
-   * ФИО обязательно только для возврата: по нему модератор и бот находят
-   * строку бойца на листе «Запас». Для новобранца поле не нужно — оно и
-   * раньше не заполнялось.
+   * ФИО обязательно для ЛЮБОЙ заявки.
+   *
+   * Для возврата из запаса по нему ищется строка на листе «Запас», для
+   * новобранца — это второй ключ поиска бойца в division_members при
+   * одобрении. Без ФИО защита от дублей опиралась бы только на Discord ID, и
+   * кандидат без Discord заводил бы вторую карточку в составе.
+   *
+   * Формат строгий — «Фамилия И.О.»: одиночное слово (позывной или фамилия без
+   * инициалов) отклоняется. Правило одно с формой: isFullNameWithInitials.
    */
-  const fullName = kind === APPLICATION_KIND_RESERVE_RETURN ? normalizeFullName(body.fullName) : "";
-  if (kind === APPLICATION_KIND_RESERVE_RETURN && !isFullName(fullName)) {
+  const fullName = normalizeFullName(body.fullName);
+  if (!isFullNameWithInitials(fullName)) {
     return NextResponse.json(
-      {
-        ok: false,
-        error: `Возврат из запаса: укажите ФИО так, как оно записано в табеле (${FULL_NAME_MIN_LENGTH}–${FULL_NAME_MAX_LENGTH} символов)`,
-      },
+      { ok: false, error: FULL_NAME_FORMAT_HINT },
       { status: 400 }
     );
   }
@@ -203,15 +205,24 @@ async function createRecruit(
      * (active = true + перенос строки ШДС с листа «Запас»).
      */
     if (input.kind === APPLICATION_KIND_RESERVE_RETURN) {
+      /**
+       * Сравнение ФИО — через normalizePersonName, а не по сырой строке:
+       * «Розгов А.В.» и «Розгов А. В.» — один человек, как и «ё»/«е» и
+       * латинские двойники в инициалах. Иначе возвращающийся не находил свою
+       * же карточку и подавал заявку на заведение дубля.
+       */
       const all = await db.select().from(members);
-      const wanted = input.fullName.toLowerCase();
-      const callsignWanted = input.callsign.toLowerCase();
-      const found = all.find(
-        (row) =>
-          (row.name || "").trim().toLowerCase() === wanted ||
-          (row.callsign || "").trim().toLowerCase() === wanted ||
-          (row.callsign || "").trim().toLowerCase() === callsignWanted
-      );
+      const wanted = normalizePersonName(input.fullName);
+      const callsignWanted = normalizePersonName(input.callsign);
+      const found = all.find((row) => {
+        const nameKey = normalizePersonName(row.name);
+        const callsignKey = normalizePersonName(row.callsign);
+        return (
+          (wanted !== "" && nameKey === wanted) ||
+          (wanted !== "" && callsignKey === wanted) ||
+          (callsignWanted !== "" && callsignKey === callsignWanted)
+        );
+      });
 
       if (!found) {
         return NextResponse.json(
@@ -273,8 +284,9 @@ async function createRecruit(
     const [created] = await db
       .insert(members)
       .values({
-        // name — имя бойца для табеля ШДС; при одобрении модератор может уточнить
-        name: input.callsign,
+        // name — ФИО бойца для табеля ШДС. Именно по нему при одобрении
+        // ищется дубль в составе (normalizePersonName), если Discord ID нет.
+        name: input.fullName || input.callsign,
         callsign: input.callsign,
         passwordHash,
         rank: DEFAULT_RANK,

@@ -8,7 +8,7 @@
  * сообщения в Discord, поэтому кнопки и веб-интерфейс делают одно и то же.
  */
 import bcrypt from "bcryptjs";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { logs, members, recruitApplications, serviceReports } from "@/db/schema";
 import {
@@ -43,7 +43,12 @@ import {
 // Пароль — серверная часть (node:crypto), вынесена из reports.ts: тот модуль
 // используется и в браузере, где crypto-модуль Node недоступен
 import { generateTempPassword } from "@/lib/temp-password";
-import { DEFAULT_RANK, MEMBER_STATUS, APPLICATION_KIND_RESERVE_RETURN } from "@/lib/recruits";
+import {
+  APPLICATION_KIND_RESERVE_RETURN,
+  DEFAULT_RANK,
+  MEMBER_STATUS,
+  normalizePersonName,
+} from "@/lib/recruits";
 import { COMMON_ROLE_IDS } from "@/lib/roles";
 import { statusTrackingFields } from "@/lib/roles-monitor";
 import { isBeretPassed } from "@/lib/exams";
@@ -169,6 +174,67 @@ async function lookupCallsignForApplication(
   return { kind: "taken" };
 }
 
+/**
+ * Поиск уже существующего бойца для одобряемой заявки.
+ *
+ * Зачем: /apply создаёт карточку в `pending`, а синхронизация rs-red.com и
+ * бот заводят бойцов вообще без заявки. Без этой проверки повторное одобрение
+ * или заявка от уже служащего человека создавала ВТОРУЮ строку в
+ * division_members — дубль в составе и в табеле ШДС.
+ *
+ * Порядок поиска задан требованием: сначала Discord ID (он уникален), затем
+ * нормализованный ФИО (normalizePersonName: «Розгов А.В.» == «Розгов А. В.»,
+ * «ё» → «е», латинские двойники в инициалах). Позывной здесь не участвует:
+ * человек мог его сменить, а ФИО осталось.
+ */
+/**
+ * Свободен ли позывной; при занятости возвращает пустую строку.
+ *
+ * Уникальный индекс members.callsign не пропустит второй такой же логин, и
+ * UPDATE упал бы 500-й уже после решения штаба. Здесь это выясняется заранее:
+ * у строки из синхронизации позывного может не быть вовсе, и ей назначается
+ * позывной из заявки — если он ещё ни за кем не закреплён.
+ */
+async function firstFreeCallsign(callsign: string, forMemberId: number): Promise<string> {
+  const [taken] = await db
+    .select({ id: members.id })
+    .from(members)
+    .where(eq(members.callsign, callsign));
+  return !taken || taken.id === forMemberId ? callsign : "";
+}
+
+async function findExistingMemberForApplication(
+  application: typeof recruitApplications.$inferSelect
+): Promise<MemberRow | null> {
+  /**
+   * Карточка, уже связанная с этой заявкой, дублем не считается: её создал
+   * /apply в статусе pending, и её доводит отдельная ветка «повтор/завершение»
+   * (lookupCallsignForApplication) — с выдачей временного пароля. Если бы мы
+   * вернули её здесь, зачисление пошло бы по пути «боец уже служит» и не
+   * выдало бы доступ.
+   */
+  const skipId = application.memberId;
+
+  const discordId = (application.discordId || "").trim();
+  if (discordId && /^\d{5,25}$/.test(discordId)) {
+    const [byDiscord] = await db
+      .select()
+      .from(members)
+      .where(eq(members.discordId, discordId));
+    if (byDiscord && byDiscord.id !== skipId) return byDiscord;
+  }
+
+  const nameKey = normalizePersonName(application.fullName);
+  if (!nameKey) return null;
+
+  const all = await db.select().from(members);
+  return (
+    all.find(
+      (row) => row.id !== skipId && normalizePersonName(row.name) === nameKey
+    ) ?? null
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Заявка на вступление                                                */
 /* ------------------------------------------------------------------ */
@@ -286,8 +352,17 @@ async function writeMemberToShds(memberId: number, callsign: string): Promise<st
  * первую с его именем. Поэтому сначала ищем бойца на листе подразделения —
  * findNameRow ищет ровно ту же строку по колонке имени, что и сценарий
  * добавления, — и только если его там нет, пишем.
+ *
+ * `extraNames` — дополнительные варианты имени для поиска. Нужны при слиянии
+ * с существующей карточкой: в таблице боец подписан ФИО из заявки, а в
+ * карточке мог остаться прежний позывной. Без них «Добавление в ШДС» заняло бы
+ * вторую строку «Вакант», оставив первую с тем же человеком.
  */
-async function ensureShdsRowForMember(memberId: number, callsign: string): Promise<string> {
+async function ensureShdsRowForMember(
+  memberId: number,
+  callsign: string,
+  extraNames: string[] = []
+): Promise<string> {
   try {
     const [member] = await db.select().from(members).where(eq(members.id, memberId));
     if (!member?.unit) return "подразделение не назначено — строку в ШДС заведёт штаб";
@@ -297,7 +372,7 @@ async function ensureShdsRowForMember(memberId: number, callsign: string): Promi
     const layout = resolveLayout(member.unit);
     await sheet.loadCells();
 
-    const names = [member.callsign, member.name, callsign].filter(
+    const names = [member.callsign, member.name, callsign, ...extraNames].filter(
       (n): n is string => Boolean(n && n.trim())
     );
     for (const name of names) {
@@ -395,13 +470,17 @@ export async function approveReserveReturn(
   }
 
   // Боец в панели ищется по ФИО или позывному: за время запаса его карточка
-  // сохраняется, поэтому нужен именно тот же человек, а не однофамилец
+  // сохраняется, поэтому нужен именно тот же человек, а не однофамилец.
+  // Сравнение — через normalizePersonName: «Розгов А.В.» и «Розгов А. В.»
+  // это одна и та же строка, и точное сравнение строк не находило бы её,
+  // предлагая «восстановить карточку» тому, кто уже есть в составе.
   const candidates = await db.select().from(members);
-  const member = candidates.find(
-    (row) =>
-      (row.name || "").trim().toLowerCase() === fullName.toLowerCase() ||
-      (row.callsign || "").trim().toLowerCase() === fullName.toLowerCase()
-  );
+  const nameKey = normalizePersonName(fullName);
+  const member = candidates.find((row) => {
+    const rowName = normalizePersonName(row.name);
+    const rowCallsign = normalizePersonName(row.callsign);
+    return (nameKey !== "" && rowName === nameKey) || (nameKey !== "" && rowCallsign === nameKey);
+  });
 
   if (!member) {
     return {
@@ -539,8 +618,21 @@ export async function approveRecruitApplication(
     return { ok: false, message: "У заявки нет позывного", error: "EMPTY_CALLSIGN" };
   }
 
-  // Позывной — это логин: занятый позывной создал бы дубль в табеле ШДС
-  const lookup = await lookupCallsignForApplication(application, callsign);
+  /**
+   * Боец уже есть в составе — по Discord ID или по нормализованному ФИО.
+   *
+   * Проверка стоит ДО разбора позывного: иначе заявка человека, который уже
+   * служит (его завела синхронизация rs-red.com или бот) упиралась бы в
+   * CALLSIGN_TAKEN, и модератор правил бы позывной руками, порождая дубль.
+   * Здесь совпадение означает «доводим существующую карточку», а не «создаём».
+   */
+  const existingMember = await findExistingMemberForApplication(application);
+
+  // Позывной — это логин: занятый позывной создал бы дубль в табеле ШДС.
+  // Если боец уже найден по discord_id/ФИО, чужой позывной не помеха.
+  const lookup: CallsignLookup = existingMember
+    ? { kind: "free" }
+    : await lookupCallsignForApplication(application, callsign);
   if (lookup.kind === "taken") {
     return {
       ok: false,
@@ -550,6 +642,13 @@ export async function approveRecruitApplication(
   }
 
   const isRetry = lookup.kind === "retry";
+
+  /**
+   * Логин зачисленного. Для новой карточки это позывной из заявки, но если
+   * боец уже был в составе, его логин — ЕГО позывной: выдав в ЛС чужой/новый,
+   * офицер отправил бы бойца входить не туда.
+   */
+  let loginName = callsign;
 
   /**
    * Временный пароль.
@@ -612,66 +711,209 @@ export async function approveRecruitApplication(
       // потом разбирает вручную
       shdsOutcome = await ensureShdsRowForMember(memberId, callsign);
     } else {
-      tempPassword = generateTempPassword();
-      const passwordHash = await bcrypt.hash(tempPassword, 10);
+      /**
+       * Боец уже есть в составе (Discord ID или ФИО совпали).
+       *
+       * Новую строку НЕ создаём: иначе в division_members и в табеле ШДС
+       * появился бы дубль. Вместо этого доводим существующую карточку до
+       * состояния «служит»: статус active (отпуск сохраняем), discord_id из
+       * заявки, доступ в кабинет. Пароль перевыпускается только если у
+       * карточки его нет вовсе (строки синхронизации rs-red.com) — иначе
+       * одобрение молча сменило бы действующему бойцу рабочий пароль.
+       */
+      const existing = existingMember;
 
-      const [created] = await db
-        .insert(members)
-        .values({
-          name: callsign,
+      if (existing) {
+        memberId = existing.id;
+
+        /**
+         * Логин у существующей карточки. У строк синхронизации rs-red.com
+         * позывного нет — тогда берём его из заявки, но только если он
+         * свободен: уникальный индекс callsign иначе уронил бы одобрение.
+         */
+        const assignCallsign =
+          existing.callsign || (await firstFreeCallsign(callsign, existing.id));
+        loginName = assignCallsign || callsign;
+
+        const needsPassword = !existing.passwordHash;
+        if (needsPassword) {
+          tempPassword = generateTempPassword();
+          passwordNote = ", временный пароль выдан (доступ появился впервые)";
+        }
+
+        const discordFromApplication = realDiscordId(application.discordId);
+        const currentStatus = String(existing.status);
+        // Отпуск — действующий статус: одобрение заявки не выводит из отпуска
+        const keepVacation =
+          currentStatus === MEMBER_STATUS.VACATION || existing.vacation === true;
+
+        /**
+         * Карточка-заявка (pending), созданная формой /apply, при слиянии
+         * становится лишней: настоящий боец — `existing`. Гасим её, иначе она
+         * навсегда останется в очереди модерации и в табеле пустой строкой.
+         * Делаем это ДО UPDATE основной карточки: освобождаем уникальный
+         * позывной, который иначе конфликтует с назначаемым логином.
+         */
+        const pendingCardId = application.memberId;
+        if (pendingCardId && pendingCardId !== existing.id) {
+          const [pendingCard] = await db
+            .select({ applicationData: members.applicationData })
+            .from(members)
+            .where(eq(members.id, pendingCardId));
+
+          await db
+            .update(members)
+            .set({
+              status: MEMBER_STATUS.DISMISSED,
+              active: false,
+              // Логин освобождаем: он переезжает на настоящую карточку
+              callsign: null,
+              applicationData: {
+                ...(pendingCard?.applicationData ?? {}),
+                decisionReason: `Дубль: заявка объединена с карточкой #${existing.id}`,
+                reviewedAt: new Date().toISOString(),
+              },
+              // Версия токена отзывает сессии лишней карточки
+              memberTokenVersion: sql`${members.memberTokenVersion} + 1` as unknown as number,
+              updatedAt: new Date(),
+            })
+            .where(eq(members.id, pendingCardId));
+        }
+
+        await db
+          .update(members)
+          .set({
+            status: keepVacation ? MEMBER_STATUS.VACATION : MEMBER_STATUS.ACTIVE,
+            active: true,
+            /**
+             * Возврат в строй закрывает контроль снятия ролей: момент
+             * исключения и признак отправленного напоминания снимаются, иначе
+             * задача контроля продолжила бы пинговать комсостав по бойцу,
+             * который снова служит.
+             */
+            ...statusTrackingFields(
+              keepVacation ? MEMBER_STATUS.VACATION : MEMBER_STATUS.ACTIVE,
+              existing.status
+            ),
+            // Discord ID из заявки — актуальный: кандидат мог привязать новый
+            discordId: discordFromApplication || existing.discordId,
+            // Логин ставим только когда он свободен (см. assignCallsign)
+            ...(assignCallsign && assignCallsign !== existing.callsign
+              ? { callsign: assignCallsign }
+              : {}),
+            // Имя в табеле: одиночное слово (позывной) заменяем настоящим ФИО,
+            // чтобы следующий поиск дубля сработал по normalizePersonName
+            name:
+              !existing.name.includes(" ") && application.fullName
+                ? application.fullName
+                : existing.name,
+            ...(needsPassword
+              ? { passwordHash: await bcrypt.hash(tempPassword, 10) }
+              : {}),
+            role: existing.role === "recruit" ? "member" : existing.role,
+            applicationData: {
+              ...(existing.applicationData ?? {}),
+              age: application.age ?? existing.applicationData?.age,
+              armaExperience:
+                application.armaExperience || existing.applicationData?.armaExperience || "",
+              comment: application.about || existing.applicationData?.comment || "",
+              reviewedBy: reviewer,
+              reviewedAt: new Date().toISOString(),
+              source: application.discordId ? "discord" : "password",
+            },
+            updatedAt: new Date(),
+          })
+          .where(eq(members.id, existing.id));
+
+        console.warn(
+          `[review] Заявка #${applicationId}: боец «${loginName}» уже в составе (id ${existing.id}) — новая строка не создана`
+        );
+
+        [decided] = await db
+          .update(recruitApplications)
+          .set({ status: "approved", memberId, reviewedBy: reviewer, updatedAt: new Date() })
+          .where(eq(recruitApplications.id, applicationId))
+          .returning();
+
+        // Строка в ШДС: проверяем и прежние имена (позывной / ФИО из заявки),
+        // иначе «Добавление» заняло бы вторую строку «Вакант»
+        shdsOutcome = await ensureShdsRowForMember(memberId, loginName, [
+          application.fullName || "",
           callsign,
-          passwordHash,
-          rank: DEFAULT_RANK,
-          // Подразделение назначает штаб в панели: от него зависит лист ШДС,
-          // и угадывать его по заявке нельзя
-          unit: null,
-          status: MEMBER_STATUS.ACTIVE,
-          role: "recruit",
-          discordId: application.discordId,
-          applicationData: {
-            age: application.age ?? undefined,
-            armaExperience: application.armaExperience ?? "",
-            comment: application.about ?? "",
+          existing.name,
+          existing.callsign || "",
+        ]);
+      } else {
+        tempPassword = generateTempPassword();
+        const passwordHash = await bcrypt.hash(tempPassword, 10);
+
+        const [created] = await db
+          .insert(members)
+          .values({
+            // name — ФИО для табеля ШДС: по нему ищется дубль при следующей
+            // заявке, когда Discord ID нет. Позывной остаётся логином.
+            name: application.fullName || callsign,
+            callsign,
+            passwordHash,
+            rank: DEFAULT_RANK,
+            // Подразделение назначает штаб в панели: от него зависит лист ШДС,
+            // и угадывать его по заявке нельзя
+            unit: null,
+            status: MEMBER_STATUS.ACTIVE,
+            role: "recruit",
+            discordId: application.discordId,
+            applicationData: {
+              age: application.age ?? undefined,
+              armaExperience: application.armaExperience ?? "",
+              comment: application.about ?? "",
+              reviewedBy: reviewer,
+              reviewedAt: new Date().toISOString(),
+              source: application.discordId ? "discord" : "password",
+            },
+          })
+          .returning({ id: members.id });
+
+        if (!created) {
+          return { ok: false, message: "Не удалось создать бойца", error: "INSERT_FAILED" };
+        }
+        memberId = created.id;
+
+        [decided] = await db
+          .update(recruitApplications)
+          .set({
+            status: "approved",
+            memberId: created.id,
             reviewedBy: reviewer,
-            reviewedAt: new Date().toISOString(),
-            source: application.discordId ? "discord" : "password",
-          },
-        })
-        .returning({ id: members.id });
+            updatedAt: new Date(),
+          })
+          .where(eq(recruitApplications.id, applicationId))
+          .returning();
 
-      if (!created) {
-        return { ok: false, message: "Не удалось создать бойца", error: "INSERT_FAILED" };
+        shdsOutcome = await ensureShdsRowForMember(created.id, callsign);
       }
-      memberId = created.id;
-
-      [decided] = await db
-        .update(recruitApplications)
-        .set({
-          status: "approved",
-          memberId: created.id,
-          reviewedBy: reviewer,
-          updatedAt: new Date(),
-        })
-        .where(eq(recruitApplications.id, applicationId))
-        .returning();
-
-      shdsOutcome = await ensureShdsRowForMember(created.id, callsign);
     }
 
     // Уведомление и роль — «мягкие» шаги: их сбой не отменяет зачисление
     let dmDelivered = false;
     const realDiscord = realDiscordId(application.discordId);
     if (realDiscord) {
-      const dm = await safeDiscord<DmResult>(
-        `ЛС рекруту ${realDiscord}`,
-        () => sendDirectMessage(realDiscord, { content: recruitDmText(callsign, tempPassword) }),
-        { ok: false, error: "Discord недоступен" }
-      );
-      dmDelivered = dm.ok;
-      if (!dm.ok) {
-        console.warn(
-          `[review] ЛС рекруту ${realDiscord} не доставлено (закрыты ЛС?): ${dm.error}`
+      /**
+       * ЛС отправляем только когда есть что сообщить. У действующего бойца с
+       * паролем доступ уже есть, и сообщение «Временный пароль: <пусто>»
+       * только запутало бы его — такой итог остаётся в ответе офицеру.
+       */
+      if (tempPassword) {
+        const dm = await safeDiscord<DmResult>(
+          `ЛС рекруту ${realDiscord}`,
+          () => sendDirectMessage(realDiscord, { content: recruitDmText(loginName, tempPassword) }),
+          { ok: false, error: "Discord недоступен" }
         );
+        dmDelivered = dm.ok;
+        if (!dm.ok) {
+          console.warn(
+            `[review] ЛС рекруту ${realDiscord} не доставлено (закрыты ЛС?): ${dm.error}`
+          );
+        }
       }
     } else if (application.discordId) {
       // Значение похоже на плейсхолдер («:id», «undefined») или обрезано —
@@ -686,10 +928,11 @@ export async function approveRecruitApplication(
     await db.insert(logs).values({
       category: "edit",
       author: reviewer || "Штаб",
-      action: `${isRetry ? "завершил зачисление" : "одобрил заявку на вступление"} ${callsign}`,
+      action: `${isRetry ? "завершил зачисление" : "одобрил заявку на вступление"} ${loginName}`,
       details: {
         "Заявка": `#${applicationId}`,
-        "Позывной": callsign,
+        "Позывной": loginName,
+        ...(application.fullName ? { "ФИО": application.fullName } : {}),
         "Discord": application.discordId || "не привязан",
         "ЛС с доступом": dmDelivered ? "доставлено" : "не доставлено",
         "ШДС": shdsOutcome || "не выполнялось",
@@ -697,7 +940,7 @@ export async function approveRecruitApplication(
       },
       kind: "system",
       title: "Заявка одобрена",
-      detail: `${callsign} зачислен, доступ в ЛК выдан`,
+      detail: `${loginName} зачислен, доступ в ЛК выдан`,
       ok: true,
     });
 
@@ -712,15 +955,26 @@ export async function approveRecruitApplication(
       false
     );
 
+    /**
+     * Итог для офицера. Текст про «ЛС не доставлено» уместен только когда
+     * пароль действительно был выдан: у действующего бойца с паролем доступ
+     * уже есть, и «продиктуйте пароль» было бы ложью.
+     */
+    const accessNote = tempPassword
+      ? dmDelivered
+        ? ", доступ выслан в ЛС"
+        : " — ЛС не доставлено, продиктуйте пароль"
+      : ", доступ в кабинет сохранён (пароль не менялся)";
+
     return {
       ok: true,
-      message: `${callsign} зачислен${
-        dmDelivered ? ", доступ выслан в ЛС" : " — ЛС не доставлено, продиктуйте пароль"
-      }${passwordNote}${shdsOutcome ? `. ${shdsOutcome}` : ""}`,
+      message: `${loginName} зачислен${accessNote}${passwordNote}${
+        shdsOutcome ? `. ${shdsOutcome}` : ""
+      }`,
       memberId,
-      callsign,
+      callsign: loginName,
       dmDelivered,
-      tempPassword,
+      tempPassword: tempPassword || undefined,
     };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);

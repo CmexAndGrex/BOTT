@@ -149,6 +149,9 @@ export default function AdminRecruitsPage() {
 
       if (problems.length) {
         setError(problems.join(" "));
+      } else if (data.merged) {
+        // Заявка объединена с существующей карточкой: дубль в составе не создан
+        setFlash(data.message || "Боец уже в составе — карточка обновлена, дубль не создан");
       } else if (action === "approve" && data.dmSent) {
         setFlash(`${recruit.callsign || recruit.name} зачислен, доступ выслан в ЛС`);
       } else if (data.sheets?.message) {

@@ -575,6 +575,9 @@ describe("Повторное одобрение заявки доводит за
     const search = fn.indexOf("findNameRow(");
     const write = fn.indexOf("return writeMemberToShds(");
     assert.ok(search > 0 && write > search, "запись идёт до проверки наличия строки");
+    // Прежние имена тоже проверяются: при слиянии карточек в листе может
+    // стоять ФИО из заявки, а в карточке — позывной
+    assert.match(fn, /extraNames/);
   });
 
   test("ошибка ШДС не отменяет зачисление и видна в итоге", () => {

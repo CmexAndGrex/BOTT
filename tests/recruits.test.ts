@@ -11,9 +11,12 @@ import {
   AGE_MAX,
   AGE_MIN,
   callsignFromHandle,
+  FULL_NAME_FORMAT_HINT,
+  FULL_NAME_PLACEHOLDER,
   hasProfileAccess,
   isCallsign,
   isDiscordSnowflake,
+  isFullNameWithInitials,
   isMemberRole,
   isMemberStatus,
   isStaffRole,
@@ -198,6 +201,45 @@ describe("Статусы из БД: альтернативные написан�
 
   test("normalizeStatusToken убирает неразрывные пробелы и приводит регистр", () => {
     assert.equal(normalizeStatusToken("  В\u00A0 СТРОЮ "), "в строю");
+  });
+});
+
+describe("ФИО в заявке — формат «Фамилия И.О.»", () => {
+  test("корректные формы принимаются", () => {
+    assert.equal(isFullNameWithInitials("Иванов И.И."), true);
+    assert.equal(isFullNameWithInitials("Иванов И. И."), true);
+    assert.equal(isFullNameWithInitials("Королёв П.С."), true);
+    assert.equal(isFullNameWithInitials("Римский-Корсаков Н.А."), true);
+    assert.equal(isFullNameWithInitials("  Волков   Д. В.  "), true);
+  });
+
+  test("латинские двойники в инициалах не отклоняются", () => {
+    // «Розгов A.В.» с латинской A — то же ФИО, что и с кириллической
+    assert.equal(isFullNameWithInitials("Розгов A.В."), true);
+  });
+
+  test("одно слово (позывной или только фамилия) отклоняется", () => {
+    assert.equal(isFullNameWithInitials("Скиф"), false);
+    assert.equal(isFullNameWithInitials("Иванов"), false);
+  });
+
+  test("ФИО без инициалов и с полными именами отклоняется", () => {
+    assert.equal(isFullNameWithInitials("Иванов Иван"), false);
+    assert.equal(isFullNameWithInitials("Иванов Иван Иванович"), false);
+    assert.equal(isFullNameWithInitials("иванов и.и."), false);
+  });
+
+  test("пустые значения и не строки отклоняются", () => {
+    assert.equal(isFullNameWithInitials(""), false);
+    assert.equal(isFullNameWithInitials("   "), false);
+    assert.equal(isFullNameWithInitials(null), false);
+    assert.equal(isFullNameWithInitials(undefined), false);
+    assert.equal(isFullNameWithInitials(42), false);
+  });
+
+  test("подсказка и плейсхолдер заданы и не пусты", () => {
+    assert.ok(FULL_NAME_PLACEHOLDER.includes("Иванов И.И."));
+    assert.equal(FULL_NAME_FORMAT_HINT, "Укажите фамилию и инициалы по форме (например: Иванов И.И.)");
   });
 });
 

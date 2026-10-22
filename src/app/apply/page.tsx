@@ -16,7 +16,21 @@ import Link from "next/link";
 import { ClipboardList, ShieldAlert, CheckCircle2, MessageCircle } from "lucide-react";
 import { Spinner } from "@/components/ui";
 import { PASSWORD_POLICY_HINT } from "@/lib/password-policy";
-import { AGE_MAX, AGE_MIN, APPLICATION_KIND_LABELS, DEFAULT_APPLICATION_KIND, PENDING_NOTICE, SPECIALIZATIONS, type RecruitApplicationKind, APPLICATION_KIND_RESERVE_RETURN } from "@/lib/recruits";
+import {
+  AGE_MAX,
+  AGE_MIN,
+  APPLICATION_KIND_LABELS,
+  DEFAULT_APPLICATION_KIND,
+  FULL_NAME_FORMAT_HINT,
+  FULL_NAME_MAX_LENGTH,
+  FULL_NAME_MIN_LENGTH,
+  FULL_NAME_PLACEHOLDER,
+  isFullNameWithInitials,
+  PENDING_NOTICE,
+  SPECIALIZATIONS,
+  type RecruitApplicationKind,
+  APPLICATION_KIND_RESERVE_RETURN,
+} from "@/lib/recruits";
 
 type Draft = { discord: { id: string; avatarUrl: string | null } | null };
 
@@ -74,6 +88,17 @@ export default function ApplyPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+
+    /**
+     * Клиентская проверка ФИО идёт до сети: сервер отклонит ту же строку, но
+     * здесь кандидат видит подсказку сразу, без круга «отправил — ошибка».
+     * Правило одно на оба места — isFullNameWithInitials из lib/recruits.
+     */
+    if (!isFullNameWithInitials(fullName)) {
+      setError(FULL_NAME_FORMAT_HINT);
+      return;
+    }
+
     setSending(true);
 
     try {
@@ -184,24 +209,32 @@ return (
           </p>
         </div>
 
-        {/* ФИО нужно только возвращающемуся: по нему ищется строка в «Запасе» */}
-        {kind === APPLICATION_KIND_RESERVE_RETURN && (
-          <div>
-            <label className="label mb-1.5 block">ФИО (как в табеле)</label>
-            <input
-              className="input w-full"
-              value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
-              placeholder="Волков Д. В."
-              minLength={5}
-              maxLength={60}
-              required
-            />
-            <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
-              Именно по ФИО бот находит вашу строку на листе «Запас» — укажите её так же, как в таблице
-            </p>
-          </div>
-        )}
+        {/**
+         * ФИО спрашивается всегда.
+         *
+         * Для возврата из запаса оно ищет строку на листе «Запас», а для
+         * новобранца — служит вторым ключом поиска бойца в составе при
+         * одобрении: без него защита от дублей опиралась бы только на Discord ID,
+         * а кандидат без Discord заводил бы вторую карточку.
+         */}
+        <div>
+          <label className="label mb-1.5 block">ФИО (как в табеле)</label>
+          <input
+            className="input w-full"
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+            placeholder={FULL_NAME_PLACEHOLDER}
+            minLength={FULL_NAME_MIN_LENGTH}
+            maxLength={FULL_NAME_MAX_LENGTH}
+            required
+          />
+          <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+            {FULL_NAME_FORMAT_HINT}
+            {kind === APPLICATION_KIND_RESERVE_RETURN
+              ? ". Именно по ФИО бот находит вашу строку на листе «Запас»"
+              : ". По ФИО штаб сверит вас с составом, чтобы не завести вторую карточку"}
+          </p>
+        </div>
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div>

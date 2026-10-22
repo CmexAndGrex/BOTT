@@ -19,9 +19,11 @@ import { sendDirectMessage } from "@/lib/discord";
 import { requireStaff } from "@/lib/member-auth";
 import {
   DEFAULT_RANK,
+  isFullNameWithInitials,
   isMemberRole,
   MANUAL_DISCORD_ID,
   MEMBER_STATUS,
+  normalizePersonName,
   RANKS,
   readApplication,
   UNITS,
@@ -79,6 +81,26 @@ export async function PATCH(req: NextRequest) {
   try {
     const [member] = await db.select().from(members).where(eq(members.id, memberId));
     if (!member) return NextResponse.json({ ok: false, error: "Боец не найден" }, { status: 404 });
+
+    /**
+     * Защита от дубля при зачислении.
+     *
+     * Карточка из /apply приходит со статусом pending, но тот же человек может
+     * уже быть в division_members — его завела синхронизация rs-red.com, бот
+     * или прошлая заявка. Если просто перевести pending в active, в составе и
+     * в табеле ШДС окажутся две строки одного бойца. Поэтому второй строки не
+     * появляется: заявка сливается с существующей карточкой (её статус
+     * доводится до active, пароль не меняется), а карточка-заявка гасится.
+     */
+    if (action === "approve") {
+      const duplicate = await findDuplicateMember(member);
+      if (duplicate) {
+        // Второй действующей строки быть не должно: доводим до строя ту
+        // карточку, что уже есть, а заявку закрываем как одобренную на неё
+        const merged = await mergeIntoExistingMember(duplicate, member, auth);
+        return NextResponse.json(merged);
+      }
+    }
 
     const patch = buildPatch(member, body, action);
     if (!patch.ok) return NextResponse.json({ ok: false, error: patch.error }, { status: 400 });
@@ -228,6 +250,161 @@ export async function PATCH(req: NextRequest) {
 
 type MemberRow = typeof members.$inferSelect;
 
+/**
+ * Ищет другую карточку того же человека: сначала по Discord ID (уникален),
+ * затем по нормализованному ФИО (normalizePersonName — «Розгов А.В.» ==
+ * «Розгов А. В.», «ё» → «е», латинские двойники в инициалах).
+ *
+ * Только по ФИО: позывной меняется, а ФИО в табеле остаётся, поэтому поиск
+ * дубля по нему надёжнее. Односложные имена (старые строки без ФИО) не
+ * сравниваются: «Скиф» — это позывной, и совпадение по нему не доказывает,
+ * что речь об одном человеке.
+ */
+async function findDuplicateMember(member: MemberRow): Promise<MemberRow | null> {
+  const all = await db.select().from(members);
+  const discordId = (member.discordId || "").trim();
+  const nameKey = normalizePersonName(member.name);
+  const nameLooksLikeFullName = nameKey.includes(" ") && nameKey.includes(".");
+
+  return (
+    all.find((row) => {
+      if (row.id === member.id) return false;
+      if (discordId && /^\d{5,25}$/.test(discordId) && row.discordId === discordId) return true;
+      if (!nameLooksLikeFullName) return false;
+      return normalizePersonName(row.name) === nameKey;
+    }) ?? null
+  );
+}
+
+/**
+ * Слияние заявки с уже существующей карточкой бойца.
+ *
+ * Одобрение НЕ создаёт второй строки в division_members: у человека, которого
+ * завела синхронизация rs-red.com или бот, уже есть карточка. Действуем так:
+ *   1. существующую карточку переводим в active (отпуск сохраняем) и
+ *      привязываем к ней Discord ID из заявки;
+ *   2. пароль переносим, только если у существующей карточки его нет —
+ *      иначе одобрение молча сменило бы действующему бойцу рабочий пароль;
+ *   3. карточку-заявку гасим как dismissed: она больше не должна попадать в
+ *      очередь и не должна давать вход (версия токена сбрасывает сессии);
+ *   4. заявку закрываем как approved со ссылкой на настоящую карточку.
+ *
+ * Возвращает готовый ответ роуту: интерфейс модерации увидит, с кем именно
+ * объединена заявка.
+ */
+async function mergeIntoExistingMember(
+  existing: MemberRow,
+  pending: MemberRow,
+  auth: Awaited<ReturnType<typeof requireStaff>> & { ok: true }
+): Promise<Record<string, unknown>> {
+  const author = auth.member.callsign
+    ? `${auth.member.role === "admin" ? "Администратор" : "Командир"} ${auth.member.callsign}`
+    : "Штаб";
+
+  const keepVacation =
+    String(existing.status) === MEMBER_STATUS.VACATION || existing.vacation === true;
+
+  // Признак отпуска в карточке держим согласованным со статусом: иначе
+  // MEMBER_STATUS.VACATION при vacation=false показывал бы «отпуск» в табеле,
+  // но планировщик отпусков бойца не видел.
+  const vacationFlag = keepVacation;
+
+  /**
+   * Позывной карточки-заявки сначала освобождаем.
+   *
+   * members.callsign уникален, и без этого UPDATE существующей карточки
+   * позывным из заявки падал бы на нарушении индекса: строка-заявка ещё
+   * держит занятый логин. Сама карточка-заявка всё равно гасится ниже.
+   */
+  const takenCallsign = (pending.callsign || "").trim();
+  const freeCallsign =
+    !existing.callsign &&
+    takenCallsign !== "" &&
+    takenCallsign !== (existing.callsign || "").trim();
+  if (freeCallsign) {
+    await db.update(members).set({ callsign: null }).where(eq(members.id, pending.id));
+  }
+
+  await db
+    .update(members)
+    .set({
+      status: keepVacation ? MEMBER_STATUS.VACATION : MEMBER_STATUS.ACTIVE,
+      active: true,
+      vacation: vacationFlag,
+      // Discord ID из заявки актуальнее: боец мог привязать новый аккаунт
+      discordId: pending.discordId || existing.discordId,
+      ...(freeCallsign && pending.callsign ? { callsign: pending.callsign } : {}),
+      passwordHash: existing.passwordHash || pending.passwordHash,
+      role: existing.role === "recruit" ? "member" : existing.role,
+      rank: existing.rank || DEFAULT_RANK,
+      ...statusTrackingFields(
+        keepVacation ? MEMBER_STATUS.VACATION : MEMBER_STATUS.ACTIVE,
+        existing.status
+      ),
+      updatedAt: new Date(),
+    })
+    .where(eq(members.id, existing.id));
+
+  // Карточка-заявка: вход закрыт, история остаётся (удалять её нельзя —
+  // это журнал решения штаба, и на неё ссылаются заявки)
+  await db
+    .update(members)
+    .set({
+      status: MEMBER_STATUS.DISMISSED,
+      active: false,
+      applicationData: {
+        ...readApplication(pending.applicationData),
+        decisionReason: `Дубль: объединено с карточкой #${existing.id}`,
+        reviewedAt: new Date().toISOString(),
+      },
+      memberTokenVersion: sql`${members.memberTokenVersion} + 1` as unknown as number,
+      ...statusTrackingFields(MEMBER_STATUS.DISMISSED, pending.status),
+      updatedAt: new Date(),
+    })
+    .where(eq(members.id, pending.id));
+
+  // Заявка закрывается на существующую карточку: иначе она осталась бы
+  // в очереди и её можно было бы «одобрить» повторно
+  await db
+    .update(recruitApplications)
+    .set({ status: "approved", memberId: existing.id, reviewedBy: author, updatedAt: new Date() })
+    .where(and(eq(recruitApplications.memberId, pending.id), eq(recruitApplications.kind, "recruit")));
+
+  await db.insert(logs).values({
+    category: "edit",
+    author,
+    action: `одобрил заявку ${pending.callsign || pending.name} слиянием с карточкой #${existing.id}`,
+    details: {
+      "Заявка": `#${pending.id}`,
+      "Карточка": `#${existing.id} (${existing.callsign || existing.name})`,
+      "Причина": "боец уже в составе — вторая строка не создавалась",
+    },
+    kind: "system",
+    title: "Заявка одобрена",
+    detail: `${pending.callsign || pending.name} уже в составе: обновлена карточка #${existing.id}`,
+    ok: true,
+  });
+
+  return {
+    ok: true,
+    merged: true,
+    status: keepVacation ? MEMBER_STATUS.VACATION : MEMBER_STATUS.ACTIVE,
+    sheets: null,
+    existingMemberId: existing.id,
+    message: `Боец уже в составе (#${existing.id}, ${existing.callsign || existing.name}) — карточка обновлена, дубль не создан`,
+    member: {
+      id: existing.id,
+      callsign: existing.callsign || pending.callsign,
+      rank: existing.rank,
+      unit: existing.unit,
+      status: keepVacation ? MEMBER_STATUS.VACATION : MEMBER_STATUS.ACTIVE,
+      role: existing.role === "recruit" ? "member" : existing.role,
+      discordId: pending.discordId || existing.discordId,
+      application: readApplication(pending.applicationData),
+    },
+  };
+}
+
 type PatchResult = { ok: true; values: Partial<MemberRow> } | { ok: false; error: string };
 
 function descriptionFor(action: Action, who: string): string {
@@ -265,8 +442,17 @@ function buildPatch(member: MemberRow, body: UpdateBody, action: Action): PatchR
         return { ok: false, error: "Позывной: 3–32 символа" };
       }
       values.callsign = callsign;
-      // Позывной — это ещё и имя бойца в табеле и в ШДС, держим их вместе
-      values.name = callsign;
+      /**
+       * Имя в табеле подтягивается к позывному ТОЛЬКО когда оно ещё не ФИО.
+       *
+       * Раньше name перезаписывалось всегда, и правка позывного стирала ФИО,
+       * которое форма /apply теперь требует обязательно. По этому ФИО при
+       * одобрении ищется дубль в составе (normalizePersonName) — без него
+       * защита от повторной строки переставала работать.
+       */
+      if (!isFullNameWithInitials(member.name)) {
+        values.name = callsign;
+      }
     }
   }
 

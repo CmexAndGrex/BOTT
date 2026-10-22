@@ -285,15 +285,27 @@ export function RecruitsQueue({ rows, ...handlers }: QueueHandlers & { rows: Rec
               )}
             </div>
 
-            {/* ФИО возвращающегося: по нему бот ищет строку на листе «Запас» */}
-            {isReserveReturn && (
-              <div>
-                <div className="label mb-1">ФИО в табеле / «Запасе»</div>
-                <p className="text-[12.5px]" style={{ color: row.fullName ? "var(--text)" : "var(--red)" }}>
-                  {row.fullName || "не указано — строку в «Запасе» найти нечем"}
-                </p>
+            {/**
+             * ФИО из заявки показывается всегда.
+             *
+             * Для возврата из запаса по нему ищется строка на листе «Запас»,
+             * а для новобранца это второй ключ поиска дубля в составе: если
+             * ФИО нет, проверка при одобрении опирается только на Discord ID.
+             */}
+            <div>
+              <div className="label mb-1">
+                {isReserveReturn ? "ФИО в табеле / «Запасе»" : "ФИО кандидата"}
               </div>
-            )}
+              <p
+                className="text-[12.5px]"
+                style={{ color: row.fullName ? "var(--text)" : "var(--red)" }}
+              >
+                {row.fullName ||
+                  (isReserveReturn
+                    ? "не указано — строку в «Запасе» найти нечем"
+                    : "не указано — дубль в составе проверить нечем")}
+              </p>
+            </div>
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <div>
