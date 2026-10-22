@@ -82,6 +82,12 @@ export type SessionMember = {
   hasPassword: boolean;
   hasDiscord: boolean;
   createdAt: Date;
+  /**
+   * Как подтверждён текущий вход. Нужен смене пароля: Discord-сессию выдал
+   * OAuth2, поэтому текущий пароль у неё спрашивать не за что; `panel` —
+   * вход по cookie панели (auth_token), а не по cookie бойца.
+   */
+  sessionKind?: MemberLoginKind | "panel";
 };
 
 type MemberTokenPayload = {
@@ -271,11 +277,12 @@ export async function getPanelSessionMember(req: NextRequest): Promise<SessionMe
     .where(eq(users.username, user.username ?? ""));
   if (!account) return null;
 
-  return findMemberForPanelAccount({
+  const member = await findMemberForPanelAccount({
     username: user.username ?? "",
     memberId: account.memberId,
     discordId: account.discordId,
   });
+  return member ? { ...member, sessionKind: "panel" } : null;
 }
 
 /**
@@ -348,7 +355,12 @@ export async function getSessionMember(req: NextRequest): Promise<SessionMember 
       const loaded = await loadSessionMember(payload.memberId);
       if (loaded) {
         const tokenVersion = typeof payload.tokenVersion === "number" ? payload.tokenVersion : 0;
-        if (tokenVersion === loaded.tokenVersion) return loaded.member;
+        if (tokenVersion === loaded.tokenVersion) {
+          return {
+            ...loaded.member,
+            sessionKind: payload.kind === "discord" ? "discord" : "password",
+          };
+        }
       }
       // Токен отозван или боец потерял доступ — сессия панели всё ещё может
       // быть действующей, поэтому не выходим сразу, а идём в общую ветку.

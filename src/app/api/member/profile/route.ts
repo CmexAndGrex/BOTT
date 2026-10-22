@@ -2,9 +2,13 @@
  * Смена пароля и обновление своих данных бойцом (личный кабинет).
  *
  * Смена пароля требует текущий пароль: иначе утёкшая cookie позволяла бы
- * перехватить аккаунт. После смены увеличивается memberTokenVersion — все
- * ранее выданные сессии (в том числе на других устройствах) отзываются, а
- * текущий браузер получает новую cookie, чтобы бойца не выбросило из системы.
+ * перехватить аккаунт. Исключения: пароля ещё нет (вход только по Discord)
+ * или текущий вход подтверждён Discord OAuth2 — тогда владение аккаунтом уже
+ * доказано, и требовать пароль не за что.
+ *
+ * После смены увеличивается memberTokenVersion — все ранее выданные сессии
+ * (в том числе на других устройствах) отзываются, а текущий браузер получает
+ * новую cookie, чтобы бойца не выбросило из системы.
  */
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
@@ -29,6 +33,8 @@ type Body = {
 
 /** PATCH — смена пароля */
 export async function PATCH(req: NextRequest) {
+  // requireActiveMember принимает обе cookie: member_token и auth_token
+  // (сессию панели; связка с бойцом проверяется в member-auth.ts).
   const auth = await requireActiveMember(req);
   if (!auth.ok) return auth.response;
 
@@ -40,30 +46,53 @@ export async function PATCH(req: NextRequest) {
   }
 
   const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
-  if (!currentPassword) {
-    return NextResponse.json({ ok: false, error: "Укажите текущий пароль" }, { status: 400 });
-  }
-
-  const policy = checkPasswordPolicy(body.newPassword);
-  if (!policy.ok) return NextResponse.json({ ok: false, error: policy.error }, { status: 400 });
 
   try {
     const [member] = await db.select().from(members).where(eq(members.id, auth.member.id));
     if (!member) return NextResponse.json({ ok: false, error: "Боец не найден" }, { status: 404 });
 
-    // Если пароля не было (вход только по Discord), текущий не требуется:
-    // владение аккаунтом уже подтверждено действующей сессией
-    if (member.passwordHash) {
-      const valid = await bcrypt.compare(currentPassword, member.passwordHash);
-      if (!valid) {
-        return NextResponse.json({ ok: false, error: "Текущий пароль указан неверно" }, { status: 403 });
-      }
-    }
-    if (member.passwordHash && currentPassword === body.newPassword) {
-      return NextResponse.json({ ok: false, error: "Новый пароль совпадает с текущим" }, { status: 400 });
+    // Discord-сессия подтверждена OAuth2: пароль уже не нужен. Если же боец
+    // вошёл по паролю и он у него есть, пустое поле — это забывчивость, а не
+    // «пароля нет»: говорим об этом прямо, под полем текущего пароля.
+    const discordVerified = auth.member.sessionKind === "discord";
+    const hasPassword = !!member.passwordHash;
+    if (hasPassword && !currentPassword && !discordVerified) {
+      return NextResponse.json(
+        {
+          ok: false,
+          field: "current",
+          error: "Введите текущий пароль (или временный пароль, выданный при регистрации)",
+        },
+        { status: 400 }
+      );
     }
 
-    const passwordHash = await bcrypt.hash(String(body.newPassword), 10);
+    if (member.passwordHash && currentPassword) {
+      const valid = await bcrypt.compare(currentPassword, member.passwordHash);
+      if (!valid) {
+        return NextResponse.json(
+          { ok: false, field: "current", error: "Текущий пароль указан неверно" },
+          { status: 403 }
+        );
+      }
+    }
+
+    // Конкретный текст политики возвращаем с полем «new»: фронтенд выводит
+    // ошибку под новым паролем, а не общей плашкой.
+    const policy = checkPasswordPolicy(body.newPassword);
+    if (!policy.ok) {
+      return NextResponse.json({ ok: false, field: "new", error: policy.error }, { status: 400 });
+    }
+    const newPassword = body.newPassword as string;
+
+    if (member.passwordHash && (await bcrypt.compare(newPassword, member.passwordHash))) {
+      return NextResponse.json(
+        { ok: false, field: "new", error: "Новый пароль совпадает с текущим" },
+        { status: 400 }
+      );
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
     const [updated] = await db
       .update(members)
       .set({
@@ -100,10 +129,12 @@ export async function PATCH(req: NextRequest) {
         role: updated.role,
         memberTokenVersion: updated.memberTokenVersion,
       },
-      "password",
+      // Discord-сессия остаётся Discord-сессией: иначе после смены пароля
+      // кабинет считал бы вход парольным.
+      auth.member.sessionKind === "discord" ? "discord" : "password",
       { ip: requestIp(req) }
     );
-    const response = NextResponse.json({ ok: true, message: "Пароль изменён" });
+    const response = NextResponse.json({ ok: true, message: "Пароль успешно обновлён" });
     return setMemberCookie(response, session, req);
   } catch (e) {
     console.error("[profile] Не удалось сменить пароль:", e);

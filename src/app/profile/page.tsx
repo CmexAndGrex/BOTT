@@ -25,7 +25,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
-  CheckCircle2, GraduationCap, KeyRound, Link2Off, MessageCircle, ShieldAlert,
+  CheckCircle2, Eye, EyeOff, GraduationCap, KeyRound, Link2Off, MessageCircle, ShieldAlert,
 } from "lucide-react";
 import { Section, Spinner } from "@/components/ui";
 import {
@@ -38,7 +38,7 @@ import {
   type DossierService,
 } from "@/components/dossier-panel";
 import { useReportLauncher } from "@/components/report-launcher";
-import { PASSWORD_POLICY_HINT } from "@/lib/password-policy";
+import { PASSWORD_MIN_LENGTH, PASSWORD_POLICY_HINT } from "@/lib/password-policy";
 import type { VehicleAccessReport } from "@/lib/vehicles";
 
 /** Ответ /api/member/dossier — то, что нужно интерфейсу */
@@ -107,7 +107,17 @@ function DossierPageInner() {
   // Смена пароля
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordBusy, setPasswordBusy] = useState(false);
+  const [passwordIssue, setPasswordIssue] = useState<{
+    field?: "current" | "new" | "confirm";
+    text: string;
+  } | null>(null);
+  const [passwordDone, setPasswordDone] = useState("");
+  const [showCurrent, setShowCurrent] = useState(false);
+  const [showNew, setShowNew] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const passwordsMismatch = !!confirmPassword && newPassword !== confirmPassword;
 
   const params = useSearchParams();
   /**
@@ -220,8 +230,18 @@ function DossierPageInner() {
 
   const handlePassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError("");
-    setFlash("");
+    setPasswordIssue(null);
+    setPasswordDone("");
+
+    if (!newPassword) {
+      setPasswordIssue({ field: "new", text: "Введите новый пароль" });
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordIssue({ field: "confirm", text: "Пароли не совпадают" });
+      return;
+    }
+
     setPasswordBusy(true);
     try {
       const res = await fetch("/api/member/profile", {
@@ -231,14 +251,22 @@ function DossierPageInner() {
       });
       const data = await res.json();
       if (data.ok) {
-        setFlash("Пароль изменён. Остальные сессии отозваны");
+        setPasswordDone("Пароль успешно обновлён");
         setCurrentPassword("");
         setNewPassword("");
+        setConfirmPassword("");
       } else {
-        setError(data.error || "Не удалось сменить пароль");
+        const field =
+          data.field === "current" || data.field === "new" || data.field === "confirm"
+            ? data.field
+            : undefined;
+        setPasswordIssue({
+          field,
+          text: data.error || "Не удалось сменить пароль",
+        });
       }
     } catch {
-      setError("Сбой сети");
+      setPasswordIssue({ text: "Сбой сети" });
     } finally {
       setPasswordBusy(false);
     }
@@ -430,42 +458,163 @@ function DossierPageInner() {
       </Section>
 
       <Section title="Безопасность" eyebrow="пароль кабинета">
-        <form onSubmit={handlePassword} className="grid grid-cols-1 gap-4 p-5 md:grid-cols-3">
-          <div>
-            <label className="label mb-1.5 block">
-              Текущий пароль (пусто, если вход только по Discord)
-            </label>
-            <input
-              type="password"
-              className="input input-mono w-full"
+        <form onSubmit={handlePassword} className="p-5 md:p-6">
+          <div className="grid gap-4 md:grid-cols-3">
+            <PasswordField
+              label="Текущий пароль"
+              hint="Не требуется, если пароль ещё не задавался"
               value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
+              onChange={(value) => {
+                setCurrentPassword(value);
+                if (passwordIssue?.field === "current") setPasswordIssue(null);
+                setPasswordDone("");
+              }}
               autoComplete="current-password"
               placeholder="••••••••"
+              visible={showCurrent}
+              onToggle={() => setShowCurrent((value) => !value)}
+              error={passwordIssue?.field === "current" ? passwordIssue.text : ""}
             />
-          </div>
-          <div>
-            <label className="label mb-1.5 block">Новый пароль</label>
-            <input
-              type="password"
-              className="input input-mono w-full"
+            <PasswordField
+              label="Новый пароль"
+              hint={`Минимум ${PASSWORD_MIN_LENGTH} символов`}
               value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
+              onChange={(value) => {
+                setNewPassword(value);
+                if (passwordIssue?.field === "new") setPasswordIssue(null);
+                setPasswordDone("");
+              }}
               autoComplete="new-password"
               placeholder="НадёжныйПароль123"
-              required
+              visible={showNew}
+              onToggle={() => setShowNew((value) => !value)}
+              error={passwordIssue?.field === "new" ? passwordIssue.text : ""}
+            />
+            <PasswordField
+              label="Повторите новый пароль"
+              hint="Введите пароль ещё раз"
+              value={confirmPassword}
+              onChange={(value) => {
+                setConfirmPassword(value);
+                if (passwordIssue?.field === "confirm") setPasswordIssue(null);
+                setPasswordDone("");
+              }}
+              autoComplete="new-password"
+              placeholder="НадёжныйПароль123"
+              visible={showConfirm}
+              onToggle={() => setShowConfirm((value) => !value)}
+              error={
+                passwordIssue?.field === "confirm"
+                  ? passwordIssue.text
+                  : passwordsMismatch
+                    ? "Пароли не совпадают"
+                    : ""
+              }
             />
           </div>
-          <div className="flex items-end">
-            <button type="submit" className="btn btn-primary w-full" disabled={passwordBusy}>
-              {passwordBusy ? <Spinner /> : <KeyRound size={15} />} Сменить
+
+          {passwordIssue && !passwordIssue.field && (
+            <p className="mt-4 text-[12px]" style={{ color: "var(--red)" }} role="alert">
+              {passwordIssue.text}
+            </p>
+          )}
+
+          {passwordDone && (
+            <div
+              className="mt-4 flex items-center gap-2 rounded-xl border px-3 py-2 text-[12.5px]"
+              style={{
+                borderColor: "var(--green-edge)",
+                background: "var(--green-soft)",
+                color: "var(--green-text)",
+              }}
+              role="status"
+            >
+              <CheckCircle2 size={15} /> {passwordDone}
+            </div>
+          )}
+
+          <div
+            className="mt-5 flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between"
+            style={{ borderColor: "var(--stroke-soft)" }}
+          >
+            <p className="max-w-2xl text-[11.5px]" style={{ color: "var(--dim)" }}>
+              {PASSWORD_POLICY_HINT} После смены пароля остальные устройства выходят автоматически.
+            </p>
+            <button
+              type="submit"
+              className="btn btn-primary h-11 w-full shrink-0 px-5 sm:w-auto"
+              disabled={passwordBusy}
+            >
+              {passwordBusy ? <Spinner /> : <KeyRound size={15} />}
+              Сохранить пароль
             </button>
           </div>
-          <p className="text-[11.5px] md:col-span-3" style={{ color: "var(--dim)" }}>
-            {PASSWORD_POLICY_HINT} После смены пароля остальные устройства выходят автоматически.
-          </p>
         </form>
       </Section>
+    </div>
+  );
+}
+
+/** Поле пароля с кнопкой «показать/скрыть» и текстом ошибки под ним */
+function PasswordField({
+  label,
+  hint,
+  value,
+  onChange,
+  autoComplete,
+  placeholder,
+  visible,
+  onToggle,
+  error,
+}: {
+  label: string;
+  hint: string;
+  value: string;
+  onChange: (value: string) => void;
+  autoComplete: string;
+  placeholder?: string;
+  visible: boolean;
+  onToggle: () => void;
+  error?: string;
+}) {
+  const id = React.useId();
+  return (
+    <div className="min-w-0">
+      <label htmlFor={id} className="label mb-1.5 block">
+        {label}
+      </label>
+      <div className="relative">
+        <input
+          id={id}
+          type={visible ? "text" : "password"}
+          className="input input-mono h-11 w-full"
+          style={{ paddingRight: "2.5rem" }}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          autoComplete={autoComplete}
+          placeholder={placeholder}
+          aria-invalid={!!error}
+          aria-describedby={`${id}-hint`}
+        />
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label={visible ? "Скрыть пароль" : "Показать пароль"}
+          title={visible ? "Скрыть пароль" : "Показать пароль"}
+          className="absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg transition-colors hover:bg-white/10"
+          style={{ color: "var(--dim)" }}
+        >
+          {visible ? <EyeOff size={16} /> : <Eye size={16} />}
+        </button>
+      </div>
+      <p
+        id={`${id}-hint`}
+        className="mt-1.5 min-h-[16px] text-[11px] leading-4"
+        style={{ color: error ? "var(--red)" : "var(--dim)" }}
+        role={error ? "alert" : undefined}
+      >
+        {error || hint}
+      </p>
     </div>
   );
 }

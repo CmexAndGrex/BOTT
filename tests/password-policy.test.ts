@@ -142,3 +142,27 @@ describe("L9 — паритет политики с scripts/seed-admin.mjs", () 
     assert.match(seedSource, /ADMIN_PASSWORD_RESET/, "не найдена ветка сброса пароля");
   });
 });
+
+describe("L9 — смена пароля в кабинете: правила запроса", () => {
+  const route = readFileSync(
+    path.join(process.cwd(), "src", "app", "api", "member", "profile", "route.ts"),
+    "utf8"
+  );
+
+  test("текущий пароль не спрашивают без хеша и для Discord-сессии", () => {
+    assert.match(route, /const discordVerified = auth\.member\.sessionKind === "discord"/);
+    assert.match(route, /hasPassword && !currentPassword && !discordVerified/);
+  });
+
+  test("пустое поле при заданном пароле получает понятный текст и поле current", () => {
+    assert.match(
+      route,
+      /Введите текущий пароль \(или временный пароль, выданный при регистрации\)/
+    );
+    assert.match(route, /field: "current"/);
+  });
+
+  test("ошибка политики адресуется полю нового пароля", () => {
+    assert.match(route, /field: "new", error: policy\.error/);
+  });
+});
