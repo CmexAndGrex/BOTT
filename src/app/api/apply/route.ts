@@ -18,8 +18,7 @@ import { db } from "@/db";
 import { logs, members, recruitApplications } from "@/db/schema";
 import { checkPasswordPolicy } from "@/lib/password-policy";
 import { MEMBER_OAUTH_PENDING_COOKIE, requestIp, unpackDiscordProfile } from "@/lib/member-auth";
-import { buildRecruitEmbed } from "@/lib/reports";
-import { publishReviewMessage, recruitsChannelId } from "@/lib/review";
+import { publishRecruitApplication } from "@/lib/review";
 import {
   APPLICATION_KIND_LABELS,
   APPLICATION_KIND_RECRUIT,
@@ -362,34 +361,8 @@ async function finalizeApplication(
     // Публикация в штабном канале: ошибка Discord не отменяет заявку —
     // она уже в БД и доступна в панели модерации
     if (applicationRow) {
-      const channelId = await recruitsChannelId();
-      const published = await publishReviewMessage(
-        channelId,
-        "recruit",
-        applicationRow.id,
-        buildRecruitEmbed({
-          id: applicationRow.id,
-          callsign: applicationRow.callsign,
-          discordTag: applicationRow.discordTag || "",
-          discordId: applicationRow.discordId,
-          age: applicationRow.age,
-          armaExperience: applicationRow.armaExperience || "",
-          about: applicationRow.about || "",
-          createdAt: applicationRow.createdAt,
-          status: "pending",
-          // Модератор сразу видит, что это возврат из запаса, а не зачисление:
-          // заголовок Embed меняется вместе с видом заявки
-          kind: applicationRow.kind,
-          fullName: applicationRow.fullName,
-        })
-      );
-
-      if (published.ok) {
-        await db
-          .update(recruitApplications)
-          .set({ discordMessageId: published.messageId, discordChannelId: published.channelId })
-          .where(eq(recruitApplications.id, applicationRow.id));
-      } else {
+      const published = await publishRecruitApplication(applicationRow);
+      if (!published.ok) {
         console.warn(`[apply] Заявка #${applicationRow.id} не опубликована: ${published.error}`);
       }
     }

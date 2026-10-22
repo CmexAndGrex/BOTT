@@ -36,8 +36,9 @@ export async function POST(req: NextRequest) {
     const { memberId, type, norm } = body;
 
     if (typeof memberId !== "number" || !Number.isInteger(memberId)) return NextResponse.json({ error: "Неверный ID" }, { status: 400 });
-    if (type !== 1 && type !== 2) return NextResponse.json({ error: "Тип 1 или 2" }, { status: 400 });
-    if (typeof norm !== "number" || norm < 1 || norm > 168) return NextResponse.json({ error: "Некорректная норма" }, { status: 400 });
+    // type 0 — снятие всех предупреждений: норма и пинг в Discord не нужны
+    if (type !== 0 && type !== 1 && type !== 2) return NextResponse.json({ error: "Тип 0, 1 или 2" }, { status: 400 });
+    if (type !== 0 && (typeof norm !== "number" || norm < 1 || norm > 168)) return NextResponse.json({ error: "Некорректная норма" }, { status: 400 });
 
     const now = Date.now();
     const rateKey = `${operator.id || operator.callsign || "unknown"}:${memberId}`;
@@ -73,39 +74,42 @@ export async function POST(req: NextRequest) {
     }
 
     // Счётчик только растёт: повторная выдача «1/2» не сбрасывает уже
-    // накопленные предупреждения (см. nextWarningCount).
-    const newWarnings = nextWarningCount(fighter.warnings, type as WarnType);
+    // накопленные предупреждения (см. nextWarningCount). Тип 0 обнуляет его.
+    const clearing = type === 0;
+    const newWarnings = clearing ? 0 : nextWarningCount(fighter.warnings, type as WarnType);
 
-    const settingsData = await db.select().from(settings);
-    const config = Object.fromEntries(settingsData.map((s) => [s.key, s.value]));
+    if (!clearing) {
+      const settingsData = await db.select().from(settings);
+      const config = Object.fromEntries(settingsData.map((s) => [s.key, s.value]));
 
-    const botToken = config["discord_token"] || process.env.DISCORD_BOT_TOKEN;
-    // Строгая валидация ID канала: только цифры. Иначе значение из настроек
-    // подставлялось в URL Discord API как есть и могло изменить путь запроса.
-    const channelId = (config["discord_channel_id"] || process.env.DISCORD_CHANNEL_ID || "").trim();
-    if (!isDiscordId(channelId)) {
-      return NextResponse.json({ error: "Некорректный ID канала Discord" }, { status: 400 });
+      const botToken = config["discord_token"] || process.env.DISCORD_BOT_TOKEN;
+      // Строгая валидация ID канала: только цифры. Иначе значение из настроек
+      // подставлялось в URL Discord API как есть и могло изменить путь запроса.
+      const channelId = (config["discord_channel_id"] || process.env.DISCORD_CHANNEL_ID || "").trim();
+      if (!isDiscordId(channelId)) {
+        return NextResponse.json({ error: "Некорректный ID канала Discord" }, { status: 400 });
+      }
+      if (!botToken) return NextResponse.json({ error: "Настройте Discord" }, { status: 400 });
+
+      const ping = fighter.discordId ? `<@${fighter.discordId}>` : fighter.name;
+      // Текст сообщения строим по фактическому счётчику, чтобы он не расходился
+      // с состоянием в базе (например, не писал «1/2», когда уже 2/2).
+      const messageContent = newWarnings >= 2
+        ? `⛔ ${ping} 2/2 предупреждение, онлайн ${fighter.hours.toFixed(1)}ч, повторно ниже нормы. Исключён! ⛔`
+        : `⚠️ ${ping} 1/2 предупреждение, онлайн ${fighter.hours.toFixed(1)}ч, ниже нормы ${norm}ч. Добить онлайн, иначе исключение ⚠️`;
+
+      // Сначала доставляем сообщение в Discord и только при успешной доставке
+      // меняем счётчик в базе. Иначе при отказе Discord (400/404/сеть) счётчик
+      // рос бы «в никуда», и боец получал исключение 2/2, не получив самого
+      // предупреждения ни в канале, ни в личных сообщениях.
+      const discordRes = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+        method: "POST",
+        headers: { "Authorization": `Bot ${botToken.trim()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ content: messageContent }),
+      });
+
+      if (!discordRes.ok) return NextResponse.json({ error: `Ошибка Discord` }, { status: 400 });
     }
-    if (!botToken) return NextResponse.json({ error: "Настройте Discord" }, { status: 400 });
-
-    const ping = fighter.discordId ? `<@${fighter.discordId}>` : fighter.name;
-    // Текст сообщения строим по фактическому счётчику, чтобы он не расходился
-    // с состоянием в базе (например, не писал «1/2», когда уже 2/2).
-    const messageContent = newWarnings >= 2
-      ? `⛔ ${ping} 2/2 предупреждение, онлайн ${fighter.hours.toFixed(1)}ч, повторно ниже нормы. Исключён! ⛔`
-      : `⚠️ ${ping} 1/2 предупреждение, онлайн ${fighter.hours.toFixed(1)}ч, ниже нормы ${norm}ч. Добить онлайн, иначе исключение ⚠️`;
-
-    // Сначала доставляем сообщение в Discord и только при успешной доставке
-    // меняем счётчик в базе. Иначе при отказе Discord (400/404/сеть) счётчик
-    // рос бы «в никуда», и боец получал исключение 2/2, не получив самого
-    // предупреждения ни в канале, ни в личных сообщениях.
-    const discordRes = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
-      method: "POST",
-      headers: { "Authorization": `Bot ${botToken.trim()}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ content: messageContent }),
-    });
-
-    if (!discordRes.ok) return NextResponse.json({ error: `Ошибка Discord` }, { status: 400 });
 
     await db.update(members).set({ warnings: newWarnings }).where(eq(members.id, memberId));
 
@@ -116,17 +120,23 @@ export async function POST(req: NextRequest) {
       await db.insert(logs).values({
         category: "edit",
         author: authorFormatted,
-        action: `выдал предупреждение ${newWarnings}/2 бойцу ${fighter.name}`,
-        details: {
-          "Боец": fighter.name,
-          "Онлайн": `${fighter.hours.toFixed(1)} ч`,
-          "Норма": `${norm} ч`,
-          "Запрошено": `${type}/2`,
-          "Стало": `${newWarnings}/2`,
-        },
+        action: clearing
+          ? `снял все предупреждения с бойца ${fighter.name}`
+          : `выдал предупреждение ${newWarnings}/2 бойцу ${fighter.name}`,
+        details: clearing
+          ? { "Боец": fighter.name, "Было": `${fighter.warnings}/2`, "Стало": "0/2" }
+          : {
+              "Боец": fighter.name,
+              "Онлайн": `${fighter.hours.toFixed(1)} ч`,
+              "Норма": `${norm} ч`,
+              "Запрошено": `${type}/2`,
+              "Стало": `${newWarnings}/2`,
+            },
         kind: "system",
-        title: "Предупреждение выдано",
-        detail: `Бойцу ${fighter.name} выдано предупреждение ${newWarnings}/2 (запрошено ${type}/2)`,
+        title: clearing ? "Предупреждения сняты" : "Предупреждение выдано",
+        detail: clearing
+          ? `С бойца ${fighter.name} сняты все предупреждения (было ${fighter.warnings}/2)`
+          : `Бойцу ${fighter.name} выдано предупреждение ${newWarnings}/2 (запрошено ${type}/2)`,
         ok: true,
       });
     } catch {

@@ -9,9 +9,10 @@ export const maxDuration = 60;
 export async function POST(req: NextRequest) {
   // Синхронизация состава: командиры и админы.
   //
-  // requireStaff вместо requireRole(["officer"]): допускается и сессия
-  // кабинета с правами штаба (командир подразделения по должности), а не
-  // только cookie панели — иначе командир роты получал 401 на ручном синке.
+  // requireStaff считает права единым правилом resolvePanelRights: роль обеих
+  // сессий, должность и звание. Поэтому синк доступен и администратору, и
+  // командиру подразделения — в том числе вошедшему только в кабинет
+  // (member_token), а не в панель.
   const auth = await requireStaff(req);
   if (!auth.ok) return auth.response;
 

@@ -263,7 +263,7 @@ describe("Вход: формулировки ошибок", () => {
     const source = read("src/app/login/page.tsx");
     assert.match(
       source,
-      /discord_not_linked: "Ваш Discord аккаунт не привязан к бойцу в ШДС\. Обратитесь к штабу"/
+      /discord_not_linked:\s*"Ваш Discord аккаунт не привязан ни к одному бойцу подразделения\. Обратитесь к комсоставу"/
     );
   });
 

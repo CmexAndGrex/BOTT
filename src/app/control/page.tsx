@@ -65,9 +65,13 @@ export default function ControlPage() {
     return () => clearTimeout(t);
   }, [notice]);
 
-  // Функция для выдачи предупреждения и пинга в Discord
-  const issueWarning = async (id: number, type: 1 | 2) => {
-    if (!confirm(`Вы уверены, что хотите выдать ${type}/2 предупреждение? Боец будет пинганут в Discord.`)) return;
+  // Функция для выдачи предупреждения и пинга в Discord (type 0 — снятие всех)
+  const issueWarning = async (id: number, type: 0 | 1 | 2) => {
+    const question =
+      type === 0
+        ? "Снять все предупреждения с бойца?"
+        : `Вы уверены, что хотите выдать ${type}/2 предупреждение? Боец будет пинганут в Discord.`;
+    if (!confirm(question)) return;
     
     setBusyIds((prev) => new Set(prev).add(id));
     try {
@@ -78,7 +82,10 @@ export default function ControlPage() {
       });
       const data = await res.json();
       if (data.ok) {
-        setNotice({ ok: true, text: `Предупреждение ${type}/2 успешно выдано!` });
+        setNotice({
+          ok: true,
+          text: type === 0 ? "Все предупреждения сняты." : `Предупреждение ${type}/2 успешно выдано!`,
+        });
         await reload();
       } else {
         setNotice({ ok: false, text: data.error || "Ошибка выдачи" });
@@ -238,6 +245,17 @@ export default function ControlPage() {
                             >
                               <UserMinus size={13} /> 2/2 Пред
                             </button>
+
+                            {f.warnings > 0 && (
+                              <button
+                                className="btn"
+                                style={{ padding: "0.4rem 0.6rem", fontSize: "0.75rem", background: "var(--green-soft)", color: "#fff", borderColor: "rgba(16,185,129,.5)" }}
+                                disabled={busyIds.has(f.id)}
+                                onClick={() => issueWarning(f.id, 0)}
+                              >
+                                <CheckCircle2 size={13} /> Снять пред
+                              </button>
+                            )}
                           </div>
                         )}
                       </td>

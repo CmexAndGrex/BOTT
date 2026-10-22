@@ -12,7 +12,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { parseVacationUntil, formatDate } from "@/lib/bot.ts";
-import { buildRequestMessage, type FormResponse } from "@/lib/forms.ts";
+import { buildRequestMessage, isEnlistmentRequest, type FormResponse } from "@/lib/forms.ts";
 
 /** Дата в московском представлении — так её видит боец и панель */
 const asMskDate = (iso: string) =>
@@ -218,5 +218,20 @@ describe("buildRequestMessage — маршрутизация заявок по �
       settings()
     );
     assert.equal(built, null);
+  });
+});
+
+describe("isEnlistmentRequest — заявки на вступление из внешней формы", () => {
+  test("распознаёт заявку на вступление и новобранца", () => {
+    assert.equal(isEnlistmentRequest("Заявка на вступление"), true);
+    assert.equal(isEnlistmentRequest("Вступить в состав"), true);
+    assert.equal(isEnlistmentRequest("Новобранец"), true);
+    assert.equal(isEnlistmentRequest("Приём в состав"), true);
+  });
+
+  test("служебные заявки не считаются вступлением", () => {
+    assert.equal(isEnlistmentRequest("Добавить в ШДС"), false);
+    assert.equal(isEnlistmentRequest("Отпуск"), false);
+    assert.equal(isEnlistmentRequest("Уйти в запас"), false);
   });
 });

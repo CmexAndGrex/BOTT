@@ -132,11 +132,25 @@ export default function AdminRecruitsPage() {
         return;
       }
 
-      // Синхронизация с таблицей могла не пройти — это не отменяет зачисления
+      /**
+       * Синхронизация с таблицей и ЛС — «мягкие» шаги: зачисление уже
+       * состоялось. Если ЛС не доставлено, пароль показываем здесь — иначе
+       * боец останется без входа, а модератор об этом не узнает.
+       */
+      const problems: string[] = [];
       if (data.sheets && !data.sheets.ok) {
-        setError(
-          `Боец зачислен, но запись в Google Таблицу не удалась: ${data.sheets.error}`
+        problems.push(`Боец зачислен, но запись в Google Таблицу не удалась: ${data.sheets.error}`);
+      }
+      if (action === "approve" && data.tempPassword && !data.dmSent) {
+        problems.push(
+          `ЛС не доставлено (закрыты личные сообщения). Логин: ${data.login}, временный пароль: ${data.tempPassword}`
         );
+      }
+
+      if (problems.length) {
+        setError(problems.join(" "));
+      } else if (action === "approve" && data.dmSent) {
+        setFlash(`${recruit.callsign || recruit.name} зачислен, доступ выслан в ЛС`);
       } else if (data.sheets?.message) {
         setFlash(data.sheets.message);
       } else {

@@ -24,6 +24,10 @@ import {
   validateApplication,
 } from "../src/lib/recruits.ts";
 import { checkPasswordPolicy } from "../src/lib/password-policy.ts";
+import {
+  isPendingReviewStatus,
+  normalizeReviewStatus,
+} from "../src/lib/reports.ts";
 
 describe("Позывной — нормализация и проверка формата", () => {
   test("пробелы по краям и внутри схлопываются", () => {
@@ -205,5 +209,19 @@ describe("Связка политики пароля с формой рапор�
     assert.equal(checkPasswordPolicy("12345").ok, false);
     assert.equal(checkPasswordPolicy("пароль12345").ok, false);
     assert.equal(checkPasswordPolicy("НадёжныйПароль123").ok, true);
+  });
+});
+
+describe("Статусы заявок: pending и legacy new", () => {
+  test("new считается ожидающим решением, как и pending", () => {
+    assert.equal(isPendingReviewStatus("pending"), true);
+    assert.equal(isPendingReviewStatus("new"), true);
+    assert.equal(isPendingReviewStatus("approved"), false);
+    assert.equal(isPendingReviewStatus("rejected"), false);
+  });
+
+  test("new нормализуется в pending для интерфейса", () => {
+    assert.equal(normalizeReviewStatus("new"), "pending");
+    assert.equal(normalizeReviewStatus("approved"), "approved");
   });
 });

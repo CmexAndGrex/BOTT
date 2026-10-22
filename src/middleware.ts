@@ -289,6 +289,42 @@ export async function middleware(req: NextRequest) {
   }
 
   /**
+   * Ручные задачи и синхронизация (/api/sync, /api/actions): командир или
+   * администратор по ЛЮБОЙ из сессий.
+   *
+   * Ветка стоит до protectedPaths намеренно: та требует cookie панели
+   * (auth_token), поэтому администратор и командир, работающие из кабинета
+   * (member_token), получали «Нет прав» на кнопках главной ещё до роута.
+   * Здесь допускается любая действующая сессия, а полную проверку прав (роль,
+   * должность, звание — resolvePanelRights) выполняет роут через requireStaff.
+   */
+  if (
+    pathname === "/api/sync" ||
+    pathname.startsWith("/api/sync/") ||
+    pathname === "/api/actions" ||
+    pathname.startsWith("/api/actions/")
+  ) {
+    const panelToken = req.cookies.get("auth_token")?.value;
+    const role = panelToken ? await panelRole(panelToken) : null;
+    if (role === "admin" || role === "officer" || role === "commander") {
+      return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
+    }
+
+    const memberToken = req.cookies.get("member_token")?.value;
+    if (memberToken && (await memberClaims(memberToken))) {
+      return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
+    }
+
+    if (isApi) {
+      return NextResponse.json(
+        { error: "Только для командиров и администраторов" },
+        { status: panelToken || memberToken ? 403 : 401 }
+      );
+    }
+    return NextResponse.redirect(new URL("/login", req.url));
+  }
+
+  /**
    * Правка Discord ID из табеля «Состав»: командир или администратор.
    *
    * Проверка стоит ДО общей ветки protectedPaths намеренно: роут внесён в

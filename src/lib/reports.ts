@@ -139,6 +139,25 @@ export function isReviewStatus(value: unknown): value is ReviewStatus {
   return typeof value === "string" && REVIEW_STATUSES.includes(value);
 }
 
+/**
+ * Статусы «ждёт решения». `new` — наследие внешних форм/старых записей:
+ * в типе ReviewStatus его нет, но такая строка в БД не должна выпадать из
+ * очереди модерации и блокировать решение как «уже принятое».
+ */
+export const PENDING_REVIEW_STATUSES = ["pending", "new"] as const;
+
+export function isPendingReviewStatus(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    (PENDING_REVIEW_STATUSES as readonly string[]).includes(value)
+  );
+}
+
+/** Приведение статуса из БД к известному: legacy `new` показываем как pending */
+export function normalizeReviewStatus(value: unknown): ReviewStatus {
+  return value === "new" ? "pending" : isReviewStatus(value) ? value : "pending";
+}
+
 /** Человекочитаемые названия статусов */
 export const REVIEW_STATUS_LABELS: Record<ReviewStatus, string> = {
   pending: "На рассмотрении",

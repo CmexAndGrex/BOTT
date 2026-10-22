@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { isCommanderFighter, isDeputyCommander, COMMANDER_MEMBER_IDS } from "../src/lib/validation";
+import { isCommanderFighter, isDeputyCommander, COMMANDER_MEMBER_IDS } from "../src/lib/validation.ts";
 
 describe("Защита командирского состава", () => {
   test("COMMANDER_MEMBER_IDS содержит 8, 12, 17, 30", () => {

@@ -6,7 +6,7 @@
  * как и у раздела рапортов новобранцев: здесь видны персональные данные.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { members, recruitApplications, serviceReports } from "@/db/schema";
 import { requireStaff } from "@/lib/member-auth";
@@ -15,10 +15,12 @@ import {
   approveServiceReport,
   rejectRecruitApplication,
   rejectServiceReport,
+  type ApproveRecruitResult,
 } from "@/lib/review";
 import {
   isReviewStatus,
   isServiceReportType,
+  normalizeReviewStatus,
   readReportPayload,
   reportTypeMeta,
   summarizeReport,
@@ -78,7 +80,9 @@ export async function GET(req: NextRequest) {
     const recruitRows =
       status === "all"
         ? await recruitsQuery
-        : await recruitsQuery.where(eq(recruitApplications.status, status));
+        : status === "pending"
+          ? await recruitsQuery.where(sql`${recruitApplications.status} IN ('pending', 'new')`)
+          : await recruitsQuery.where(eq(recruitApplications.status, status));
 
     return NextResponse.json({
       ok: true,
@@ -114,7 +118,7 @@ export async function GET(req: NextRequest) {
         age: row.age,
         armaExperience: row.armaExperience,
         about: row.about,
-        status: row.status,
+        status: normalizeReviewStatus(row.status),
         reviewedBy: row.reviewedBy,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
@@ -195,7 +199,25 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    return NextResponse.json({ ok: true, message: result.message, scope, action, id });
+    // Данные доступа возвращаются только по заявке на вступление: если ЛС
+    // закрыто, модератор видит временный пароль и передаёт его сам
+    const credentials =
+      "dmDelivered" in result
+        ? {
+            dmSent: (result as ApproveRecruitResult).dmDelivered === true,
+            tempPassword: (result as ApproveRecruitResult).tempPassword,
+            login: (result as ApproveRecruitResult).callsign,
+          }
+        : {};
+
+    return NextResponse.json({
+      ok: true,
+      message: result.message,
+      scope,
+      action,
+      id,
+      ...credentials,
+    });
   } catch (e) {
     console.error("[admin/reports] Ошибка решения:", e);
     return NextResponse.json({ ok: false, error: "Ошибка сервера" }, { status: 500 });

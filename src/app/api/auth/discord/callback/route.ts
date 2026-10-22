@@ -29,7 +29,9 @@ import {
   setPanelCookie,
   type PanelAccount,
 } from "@/lib/api-auth";
-import { isPanelStaffRole, browserOrigin } from "@/lib/validation";
+import { isPanelStaffRole, browserOrigin, normalizeDiscordSnowflake } from "@/lib/validation";
+import { hasProfileAccess, type MemberRole } from "@/lib/recruits";
+import { resolvePanelRights } from "@/lib/panel-rights";
 import {
   discordRedirectUri,
   exchangeDiscordCode,
@@ -43,7 +45,6 @@ import {
   verifyOAuthState,
   type DiscordProfile,
 } from "@/lib/member-auth";
-import { hasProfileAccess } from "@/lib/recruits";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,6 +62,50 @@ const PENDING_TTL_SECONDS = 30 * 60;
  */
 function redirectTo(req: NextRequest, path: string): NextResponse {
   return NextResponse.redirect(new URL(path, browserOrigin(req.headers)));
+}
+
+/**
+ * Боец по Discord ID.
+ *
+ * Сравниваем не через eq, а по цифрам: в division_members значение могло
+ * сохраниться с пробелами или как упоминание («<@123…>») из ручной правки или
+ * синхронизации. Точное совпадение тогда не находило уже привязанного бойца —
+ * вход через Discord отвечал «не привязан».
+ *
+ * shortcut: сравнение по regexp_replace не использует индекс discord_id;
+ * при росте состава перейти на нормализованную колонку или выражение-индекс.
+ */
+async function findMemberByDiscordId(discordId: string) {
+  const [row] = await db
+    .select()
+    .from(members)
+    .where(
+      sql`regexp_replace(coalesce(${members.discordId}, ''), '[^0-9]', '', 'g') = ${discordId}`
+    )
+    .orderBy(members.id)
+    .limit(1);
+  return row;
+}
+
+/**
+ * Роль в токене сессии бойца.
+ *
+ * Командир подразделения может не иметь роли штаба в колонке role — права ему
+ * дают должность или звание (resolvePanelRights, то же правило, что /api/me).
+ * Токен получает effective-роль, иначе middleware не пустил бы его в разделы
+ * штаба, хотя интерфейс уже показывает флаги командира.
+ */
+function memberSessionRole(member: {
+  role: MemberRole;
+  post: string | null;
+  rank: string;
+}): MemberRole {
+  const rights = resolvePanelRights({
+    memberRole: member.role,
+    memberPost: member.post,
+    memberRank: member.rank,
+  });
+  return rights.isAdmin ? "admin" : rights.isCommander ? "officer" : member.role;
 }
 
 export async function GET(req: NextRequest) {
@@ -85,9 +130,18 @@ export async function GET(req: NextRequest) {
     return redirectTo(req, `/login?error=${encodeURIComponent("oauth_failed")}`);
   }
 
+  // Discord отдаёт ID строкой: очищаем от пробелов и приводим к цифрам до
+  // любых запросов к БД — по этому значению ищется боец в division_members.
+  const discordId = normalizeDiscordSnowflake(exchanged.profile.id);
+  if (!discordId) {
+    console.error("[discord-callback] Discord вернул некорректный ID профиля");
+    return redirectTo(req, `/login?error=${encodeURIComponent("oauth_failed")}`);
+  }
+  const profile: DiscordProfile = { ...exchanged.profile, id: discordId };
+
   return stateCheck.intent === "link"
-    ? handleLink(req, exchanged.profile)
-    : handleLogin(req, exchanged.profile);
+    ? handleLink(req, profile)
+    : handleLogin(req, profile);
 }
 
 /**
@@ -130,10 +184,7 @@ async function handleLink(req: NextRequest, profile: DiscordProfile): Promise<Ne
   if (!Number.isFinite(memberId)) return finish("error=oauth_session");
 
   // discord_id уникален: тот же Discord не должен уехать второму аккаунту
-  const [taken] = await db
-    .select({ id: members.id })
-    .from(members)
-    .where(eq(members.discordId, profile.id));
+  const taken = await findMemberByDiscordId(profile.id);
   if (taken && taken.id !== memberId) return finish("error=discord_taken");
 
   const [updated] = await db
@@ -150,6 +201,8 @@ async function handleLink(req: NextRequest, profile: DiscordProfile): Promise<Ne
       id: members.id,
       callsign: members.callsign,
       role: members.role,
+      post: members.post,
+      rank: members.rank,
       memberTokenVersion: members.memberTokenVersion,
     });
 
@@ -159,7 +212,7 @@ async function handleLink(req: NextRequest, profile: DiscordProfile): Promise<Ne
     {
       id: updated.id,
       callsign: updated.callsign || "",
-      role: updated.role,
+      role: memberSessionRole(updated),
       memberTokenVersion: updated.memberTokenVersion,
     },
     "discord",
@@ -188,7 +241,7 @@ async function handleLogin(req: NextRequest, profile: DiscordProfile): Promise<N
   // Администратор или командир панели: Discord уже привязан к учётной записи —
   // выдаём сессию панели без локального логина и пароля.
   const panel = await issuePanelSessionForDiscord(profile);
-  const [member] = await db.select().from(members).where(eq(members.discordId, profile.id));
+  const member = await findMemberByDiscordId(profile.id);
 
   if (panel) {
     // Панч прямо в панель: там модерация, /users и быстрые действия.
@@ -203,7 +256,7 @@ async function handleLogin(req: NextRequest, profile: DiscordProfile): Promise<N
         {
           id: member.id,
           callsign: member.callsign || "",
-          role: member.role,
+          role: memberSessionRole(member),
           memberTokenVersion: member.memberTokenVersion,
         },
         "discord",
@@ -229,17 +282,22 @@ async function handleLogin(req: NextRequest, profile: DiscordProfile): Promise<N
         .where(eq(members.id, member.id));
     }
 
+    const sessionRole = memberSessionRole(member);
     const session = await issueMemberSession(
       {
         id: member.id,
         callsign: member.callsign || "",
-        role: member.role,
+        role: sessionRole,
         memberTokenVersion: member.memberTokenVersion,
       },
       "discord",
       { ip: requestIp(req) }
     );
-    const response = redirectTo(req, "/profile");
+    // Командир подразделения по должности/званию сразу попадает в панель:
+    // права сессии у него уже есть (resolvePanelRights), и кабинет для него —
+    // не единственный раздел. Остальные бойцы — в личное дело.
+    const isStaffSession = sessionRole === "admin" || sessionRole === "officer";
+    const response = redirectTo(req, isStaffSession ? "/" : "/profile");
     response.cookies.delete(MEMBER_OAUTH_STATE_COOKIE);
     return setMemberCookie(response, session, req);
   }

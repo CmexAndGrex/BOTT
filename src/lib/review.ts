@@ -28,6 +28,8 @@ import {
   formatIsoDate,
   missingSectionExams,
   readReportPayload,
+  isPendingReviewStatus,
+  normalizeReviewStatus,
   reviewCustomId,
   type ExamItem,
   type ExamPayload,
@@ -174,15 +176,17 @@ async function lookupCallsignForApplication(
 /** Ссылка на вход в панель для ЛС рекруту */
 function panelLoginUrl(): string {
   const explicit = (process.env.PANEL_URL || "").trim().replace(/\/+$/, "");
-  return explicit ? `${explicit}/login` : "/login";
+  return explicit ? `${explicit}/login` : "https://atk-red.site/login";
 }
 
 /** Текст ЛС рекруту: логин, временный пароль и ссылка на вход */
 export function recruitDmText(callsign: string, password: string): string {
   return [
-    "🎖️ **Заявка на вступление одобрена!**",
+    "🎖️ **Поздравляем с принятием в ATK RED!**",
     "",
-    `Позывной (логин): \`${callsign}\``,
+    "Ваша заявка на вступление одобрена.",
+    "",
+    `Логин: \`${callsign}\``,
     `Временный пароль: \`${password}\``,
     "",
     `Вход в личный кабинет: ${panelLoginUrl()}`,
@@ -312,6 +316,8 @@ async function ensureShdsRowForMember(memberId: number, callsign: string): Promi
 
 export type ApproveRecruitResult = ReviewOutcome & {
   memberId?: number;
+  /** Позывной (он же логин) зачисленного: показывается модератору вместе с паролем */
+  callsign?: string;
   /** true — рекрут получил ЛС с доступом (false: закрыты ЛС либо нет Discord ID) */
   dmDelivered?: boolean;
   /** Временный пароль: возвращается офицеру, если ЛС не доставлено */
@@ -372,7 +378,7 @@ export async function approveReserveReturn(
     .where(eq(recruitApplications.id, applicationId));
 
   if (!application) return { ok: false, message: NOT_FOUND, error: NOT_FOUND };
-  if (application.status !== "pending") {
+  if (!isPendingReviewStatus(application.status)) {
     return { ok: false, message: ALREADY_DECIDED, error: ALREADY_DECIDED };
   }
 
@@ -491,6 +497,7 @@ export async function approveReserveReturn(
       ok: true,
       message: `${fullName} возвращён из запаса. ${outcome}`,
       memberId: updated?.id ?? member.id,
+      callsign: member.callsign || member.name,
       dmDelivered: false,
     };
   } catch (e) {
@@ -523,7 +530,7 @@ export async function approveRecruitApplication(
     .where(eq(recruitApplications.id, applicationId));
 
   if (!application) return { ok: false, message: NOT_FOUND, error: NOT_FOUND };
-  if (application.status !== "pending") {
+  if (!isPendingReviewStatus(application.status)) {
     return { ok: false, message: ALREADY_DECIDED, error: ALREADY_DECIDED };
   }
 
@@ -567,9 +574,25 @@ export async function approveRecruitApplication(
     if (isRetry) {
       memberId = lookup.member.id;
       tempPassword = generateTempPassword();
+      /**
+       * Карточка из /apply уже существует, но стоит в `pending`: без перевода
+       * в active выданный пароль бесполезен — вход в кабинет закрыт до
+       * одобрения. Повторная попытка после сбоя просто подтвердит active.
+       */
       await db
         .update(members)
-        .set({ passwordHash: await bcrypt.hash(tempPassword, 10), updatedAt: new Date() })
+        .set({
+          passwordHash: await bcrypt.hash(tempPassword, 10),
+          status: MEMBER_STATUS.ACTIVE,
+          active: true,
+          role: lookup.member.role === "recruit" ? "member" : lookup.member.role,
+          applicationData: {
+            ...(lookup.member.applicationData ?? {}),
+            reviewedBy: reviewer,
+            reviewedAt: new Date().toISOString(),
+          },
+          updatedAt: new Date(),
+        })
         .where(eq(members.id, memberId));
       passwordNote = ", временный пароль перевыпущен";
       console.warn(
@@ -695,6 +718,7 @@ export async function approveRecruitApplication(
         dmDelivered ? ", доступ выслан в ЛС" : " — ЛС не доставлено, продиктуйте пароль"
       }${passwordNote}${shdsOutcome ? `. ${shdsOutcome}` : ""}`,
       memberId,
+      callsign,
       dmDelivered,
       tempPassword,
     };
@@ -717,7 +741,7 @@ export async function rejectRecruitApplication(
     .where(eq(recruitApplications.id, applicationId));
 
   if (!application) return { ok: false, message: NOT_FOUND, error: NOT_FOUND };
-  if (application.status !== "pending") {
+  if (!isPendingReviewStatus(application.status)) {
     return { ok: false, message: ALREADY_DECIDED, error: ALREADY_DECIDED };
   }
 
@@ -1275,6 +1299,46 @@ export async function publishReviewMessage(
     console.warn(DISCORD_WARNING, `публикация ${scope} #${id}`, e);
     return { ok: false, error };
   }
+}
+
+/**
+ * Публикация заявки на вступление в штабном канале.
+ *
+ * Один путь для /apply и опроса Google-формы: обе заявки обязаны попадать в
+ * один канал с одинаковым Embed и кнопками. ID сообщения сохраняется в заявке,
+ * чтобы решение потом перекрасило именно его.
+ */
+export async function publishRecruitApplication(
+  application: typeof recruitApplications.$inferSelect
+): Promise<PublishResult> {
+  const published = await publishReviewMessage(
+    await recruitsChannelId(),
+    "recruit",
+    application.id,
+    buildRecruitEmbed({
+      id: application.id,
+      callsign: application.callsign,
+      discordTag: application.discordTag || "",
+      discordId: application.discordId,
+      age: application.age,
+      armaExperience: application.armaExperience || "",
+      about: application.about || "",
+      createdAt: application.createdAt,
+      status: normalizeReviewStatus(application.status),
+      // Модератор сразу видит, что это возврат из запаса, а не зачисление
+      kind: application.kind,
+      fullName: application.fullName,
+    })
+  );
+
+  if (published.ok) {
+    await db
+      .update(recruitApplications)
+      .set({ discordMessageId: published.messageId, discordChannelId: published.channelId })
+      .where(eq(recruitApplications.id, application.id));
+  }
+
+  return published;
 }
 
 /**

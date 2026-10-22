@@ -11,9 +11,11 @@
  * ответе (ok: false у sheets) и попадает в журнал — модератор повторит.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { eq, sql } from "drizzle-orm";
+import bcrypt from "bcryptjs";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { logs, members } from "@/db/schema";
+import { logs, members, recruitApplications } from "@/db/schema";
+import { sendDirectMessage } from "@/lib/discord";
 import { requireStaff } from "@/lib/member-auth";
 import {
   DEFAULT_RANK,
@@ -25,7 +27,9 @@ import {
   UNITS,
   type MemberStatus,
 } from "@/lib/recruits";
+import { recruitDmText, refreshRecruitMessage } from "@/lib/review";
 import { statusTrackingFields } from "@/lib/roles-monitor";
+import { generateTempPassword } from "@/lib/temp-password";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -79,6 +83,23 @@ export async function PATCH(req: NextRequest) {
     const patch = buildPatch(member, body, action);
     if (!patch.ok) return NextResponse.json({ ok: false, error: patch.error }, { status: 400 });
 
+    /**
+     * Одобрение ожидающей карточки выдаёт доступ: пароль из открытого текста
+     * нигде не хранится, поэтому генерируем временный и сохраняем только хеш.
+     * Для уже действующего бойца пароль не трогаем — иначе «одобрить» повторно
+     * означало бы сменить ему пароль без запроса.
+     */
+    const issueCredentials =
+      action === "approve" &&
+      (member.status === MEMBER_STATUS.PENDING || String(member.status) === "new");
+    let tempPassword = "";
+    if (issueCredentials) {
+      tempPassword = generateTempPassword();
+      patch.values.passwordHash = await bcrypt.hash(tempPassword, 10);
+      // Смена пароля отзывает ранее выданные сессии
+      patch.values.memberTokenVersion = sql`${members.memberTokenVersion} + 1` as unknown as number;
+    }
+
     const [updated] = await db
       .update(members)
       .set(patch.values)
@@ -91,6 +112,62 @@ export async function PATCH(req: NextRequest) {
       ? `${auth.member.role === "admin" ? "Администратор" : "Командир"} ${auth.member.callsign}`
       : "Штаб";
 
+    /**
+     * ЛС — «мягкий» шаг: закрытые личные сообщения Discord не должны отменять
+     * уже принятое решение. Пароль в этом случае вернётся модератору в ответе.
+     */
+    let dmSent = false;
+    if (tempPassword) {
+      const discordId = (updated.discordId || "").trim();
+      if (/^\d{5,25}$/.test(discordId)) {
+        try {
+          const dm = await sendDirectMessage(discordId, {
+            content: recruitDmText(updated.callsign || updated.name, tempPassword),
+          });
+          dmSent = dm.ok;
+          if (!dm.ok) {
+            console.warn(`[recruits] ЛС бойцу ${discordId} не доставлено: ${dm.error}`);
+          }
+        } catch (e) {
+          console.warn("[recruits] Ошибка отправки ЛС с доступом:", e);
+        }
+      }
+    }
+
+    /**
+     * Связанная заявка закрывается тем же решением: иначе она осталась бы
+     * висеть в очереди /admin/reports и её можно было бы одобрить повторно.
+     * Возврат из запаса не трогаем — у него своя процедура переноса строки ШДС.
+     */
+    let linked: (typeof recruitApplications.$inferSelect)[] = [];
+    if (action === "approve" || action === "reject") {
+      linked = await db
+        .update(recruitApplications)
+        .set({
+          status: action === "approve" ? "approved" : "rejected",
+          memberId: updated.id,
+          reviewedBy: author,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(recruitApplications.memberId, updated.id),
+            eq(recruitApplications.kind, "recruit"),
+            sql`${recruitApplications.status} IN ('pending', 'new')`
+          )
+        )
+        .returning();
+
+      for (const application of linked) {
+        await refreshRecruitMessage(
+          application,
+          action === "approve" && tempPassword && !dmSent
+            ? "ЛС не доставлено — доступ передаст штаб"
+            : null
+        );
+      }
+    }
+
     await db.insert(logs).values({
       category: "edit",
       author,
@@ -100,6 +177,9 @@ export async function PATCH(req: NextRequest) {
         "Статус": updated.status,
         "Звание": updated.rank,
         "Подразделение": updated.unit || "не назначено",
+        ...(tempPassword
+          ? { "ЛС с доступом": dmSent ? "доставлено" : "не доставлено" }
+          : {}),
       },
       kind: "system",
       title: action === "approve" ? "Рапорт одобрен" : "Решение по рапорту",
@@ -122,6 +202,10 @@ export async function PATCH(req: NextRequest) {
       ok: true,
       status: updated.status,
       sheets,
+      // Если ЛС закрыто, модератор видит логин и временный пароль и передаёт их сам
+      dmSent: tempPassword ? dmSent : undefined,
+      tempPassword: tempPassword || undefined,
+      login: tempPassword ? updated.callsign || updated.name : undefined,
       member: {
         id: updated.id,
         callsign: updated.callsign,
@@ -248,9 +332,6 @@ function buildPatch(member: MemberRow, body: UpdateBody, action: Action): PatchR
     const unit = values.unit ?? member.unit;
     if (!unit) {
       return { ok: false, error: "Выберите подразделение — от него зависит лист Google Таблицы" };
-    }
-    if (!member.passwordHash && !member.discordId) {
-      return { ok: false, error: "У бойца нет ни пароля, ни Discord — вход будет невозможен" };
     }
     values.rank = values.rank ?? (member.rank || DEFAULT_RANK);
     values.role = values.role ?? (member.role === "recruit" ? "member" : member.role);

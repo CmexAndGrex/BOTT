@@ -9,11 +9,12 @@
  * через настройку _form_last_row.
  */
 import { GoogleSpreadsheetWorksheet } from "google-spreadsheet";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { members } from "@/db/schema";
+import { members, recruitApplications } from "@/db/schema";
 import { getSettings, setSettingQuiet } from "@/lib/settings";
 import { columnIndexOf, getDoc, resolveLayout } from "@/lib/gsheets";
+import { normalizeCallsign } from "@/lib/recruits";
 import { sendChannelMessage } from "@/lib/discord";
 
 export type FormResponse = {
@@ -304,6 +305,76 @@ export function buildRequestMessage(
   return null;
 }
 
+/**
+ * Заявка на вступление из внешней Google-формы.
+ *
+ * В штатной форме такого типа нет (там «Добавить в ШДС» и служебные заявки),
+ * но заявки на вступление приходят отдельной формой. Без этой ветки они
+ * существовали бы только сообщением в Discord и не попадали в очередь панели.
+ */
+const ENLISTMENT_TYPE_RE =
+  /вступ|новобран|при[её]м\s+в\s+(состав|отряд|атк)|принять\s+в\s+(состав|отряд|атк)/i;
+
+export function isEnlistmentRequest(requestType: string): boolean {
+  return ENLISTMENT_TYPE_RE.test(requestType);
+}
+
+/**
+ * Сохранение заявки на вступление в ту же таблицу, что и /apply.
+ *
+ * Карточка бойца здесь не создаётся: логин и пароль выдаются только после
+ * одобрения штабом (approveRecruitApplication). Повторный опрос той же строки
+ * не должен плодить дубли — ищем уже ожидающую заявку по позывному.
+ */
+async function persistEnlistmentApplication(resp: FormResponse): Promise<boolean> {
+  const callsign = normalizeCallsign(resp.userName).slice(0, 32);
+  if (!callsign) return false;
+
+  const [existing] = await db
+    .select({ id: recruitApplications.id })
+    .from(recruitApplications)
+    .where(
+      and(
+        sql`${recruitApplications.status} IN ('pending', 'new')`,
+        eq(recruitApplications.callsign, callsign)
+      )
+    );
+  if (existing) return false;
+
+  const about = [
+    resp.unit ? `Подразделение: ${resp.unit}` : "",
+    resp.rank ? `Звание: ${resp.rank}` : "",
+    resp.reason,
+  ]
+    .filter(Boolean)
+    .join(" · ")
+    .slice(0, 1000);
+
+  const [created] = await db
+    .insert(recruitApplications)
+    .values({
+      callsign,
+      kind: "recruit",
+      discordId: /^\d{5,25}$/.test(resp.discordId) ? resp.discordId : null,
+      about: about || null,
+      status: "pending",
+    })
+    .returning();
+
+  if (!created) return false;
+
+  // Импорт динамический: review.ts тянет Discord и таблицу, а опрос формы
+  // должен оставаться лёгким до первой реальной заявки
+  const { publishRecruitApplication } = await import("@/lib/review");
+  const published = await publishRecruitApplication(created);
+  if (!published.ok) {
+    console.warn(
+      `[forms] Заявка #${created.id} сохранена, но не опубликована: ${published.error}`
+    );
+  }
+  return true;
+}
+
 export type PollResult = {
   ok: boolean;
   posted: number;
@@ -348,6 +419,21 @@ export async function pollGoogleForm(): Promise<PollResult> {
       }
       // Боец мог не указать Discord ID (выбрал себя из списка) — ищем сами
       await enrichDiscordId(resp);
+
+      // Заявка на вступление: кладём в очередь панели, а не только в Discord
+      if (isEnlistmentRequest(resp.requestType)) {
+        try {
+          if (await persistEnlistmentApplication(resp)) result.posted++;
+          else result.skipped++;
+        } catch (e) {
+          result.errors++;
+          console.error(`[forms] Ошибка сохранения заявки из строки ${r + 1}:`, e);
+          break;
+        }
+        await setSettingQuiet("_form_last_row", String(r + 1));
+        continue;
+      }
+
       const built = buildRequestMessage(resp, map);
       if (!built) {
         result.skipped++;

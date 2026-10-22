@@ -5,9 +5,9 @@
  * только безопасные поля: ни хеш пароля, ни токен-версия наружу не уходят.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { desc, eq, isNotNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { members } from "@/db/schema";
+import { members, recruitApplications } from "@/db/schema";
 import { requireStaff } from "@/lib/member-auth";
 import { isMemberStatus, readApplication, type MemberStatus } from "@/lib/recruits";
 
@@ -45,22 +45,30 @@ export async function GET(req: NextRequest) {
      * Статус pending ставится по умолчанию и строкам, которые создаёт
      * синхронизация состава с rs-red.com: это уже служащие бойцы, а не рапорты.
      * Чтобы очередь модерации не тонула в них, показываем только тех, у кого
-     * есть аккаунт (задан пароль). Остальные доступны во вкладке «Все».
+     * есть аккаунт (задан пароль), и тех, на кого есть ожидающая заявка —
+     * даже если пароля у карточки ещё нет. Остальные доступны во вкладке «Все».
      */
+    const pendingMemberIds = db
+      .select({ id: recruitApplications.memberId })
+      .from(recruitApplications)
+      .where(sql`${recruitApplications.status} IN ('pending', 'new')`);
+
     const rows =
       status === "pending"
-        ? await query.where(isNotNull(members.passwordHash))
+        ? await query.where(
+            and(
+              eq(members.status, "pending"),
+              or(isNotNull(members.passwordHash), inArray(members.id, pendingMemberIds))
+            )
+          )
         : status === "all"
           ? await query
           : await query.where(eq(members.status, status));
 
-    const recruits =
-      status === "pending" ? rows.filter((row) => row.status === "pending") : rows;
-
     return NextResponse.json({
       ok: true,
       status,
-      recruits: recruits.map((row) => ({
+      recruits: rows.map((row) => ({
         ...row,
         application: readApplication(row.applicationData),
         applicationData: undefined,

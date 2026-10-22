@@ -28,6 +28,7 @@ import {
 } from "@/lib/recruits";
 import { pickMemberForPanelAccount, CABINET_STATE_MESSAGES, type CabinetState, type PanelMemberCandidate } from "@/lib/panel-link";
 import { normalizeCommanderRole, resolvePanelRights } from "@/lib/panel-rights";
+import { browserOrigin } from "@/lib/validation";
 
 /* ------------------------------------------------------------------ */
 /* Константы                                                           */
@@ -448,20 +449,23 @@ export async function requireCabinetMember(req: NextRequest): Promise<CabinetAcc
  * расширяется: обе ветки означают «командир или администратор».
  */
 export async function requireStaff(req: NextRequest): Promise<MemberAuthResult> {
+  const user = await getAuthUser(req);
   const member = await getSessionMember(req);
-  if (
-    member &&
-    hasStaffRights(member) &&
-    member.status !== "dismissed" &&
-    member.status !== "pending"
-  ) {
-    return { ok: true, member };
-  }
 
-  const admin = await getAuthUser(req);
-  if (admin && isPanelStaffValue(admin.role)) {
+  // Права считает то же правило, что и /api/me: обе сессии, роль, должность и
+  // звание. Раньше здесь были две ветки (карточка бойца, затем панель), и
+  // роут /api/sync отказывал администратору с сессией кабинета — теперь
+  // результат один и тот же независимо от того, откуда вошли.
+  const rights = resolvePanelRights({
+    panelRole: user?.role,
+    memberRole: member?.role,
+    memberPost: member?.post,
+    memberRank: member?.rank,
+  });
+
+  if (rights.canControl) {
     /**
-     * Роль берётся из ПАНЕЛЬНОЙ сессии, а не из карточки бойца.
+     * Роль берётся из ПАНЕЛЬНОЙ сессии, когда она есть, а не из карточки бойца.
      *
      * Администратор может быть связан с бойцом, у которого роль «member»
      * (привязка не понижает панельные права). Верни мы карточку бойца как есть
@@ -470,12 +474,13 @@ export async function requireStaff(req: NextRequest): Promise<MemberAuthResult> 
      *
      * Позывной бойца при этом сохраняем: он понятнее логина панели.
      */
+    const panelRole = normalizeCommanderRole(user?.role);
     return {
       ok: true,
       member: {
         ...(member ?? EMPTY_SESSION_MEMBER),
-        role: normalizeCommanderRole(admin.role) ?? "officer",
-        callsign: member?.callsign || admin.username || "",
+        role: panelRole === "admin" || panelRole === "officer" ? panelRole : (member?.role ?? "officer"),
+        callsign: member?.callsign || user?.username || "",
       },
     };
   }
@@ -504,12 +509,6 @@ export function hasStaffRights(member: { role: unknown; post?: unknown; rank?: u
     memberPost: member.post,
     memberRank: member.rank,
   }).canControl;
-}
-
-/** Роль панели относится к штабу (admin/officer/commander) */
-function isPanelStaffValue(role: unknown): boolean {
-  const normalized = normalizeCommanderRole(role);
-  return normalized === "admin" || normalized === "officer";
 }
 
 /**
@@ -774,24 +773,25 @@ export function clearMemberCookie(response: NextResponse): NextResponse {
 /**
  * Адрес возврата после согласия в Discord.
  *
- * Считается от фактического адреса запроса, поэтому работает и локально, и за
- * прокси, без отдельной переменной. DISCORD_REDIRECT_URI нужен только когда
- * внешний адрес отличается от того, что видит приложение (например, прокси не
- * пробрасывает X-Forwarded-Host) — этот адрес должен быть зарегистрирован в
- * Discord Developer Portal → OAuth2 → Redirects.
+ * Порядок: явный DISCORD_REDIRECT_URI → публичный адрес приложения (APP_URL
+ * или NEXT_PUBLIC_APP_URL) → заголовки запроса. Заголовки разбирает
+ * browserOrigin: он учитывает x-forwarded-proto/x-forwarded-host и отсекает
+ * адрес прослушивания (0.0.0.0), поэтому за Nginx редирект не ломается на
+ * http://localhost. DISCORD_REDIRECT_URI нужен только когда внешний адрес
+ * отличается от того, что видит приложение (например, прокси не пробрасывает
+ * X-Forwarded-*), — этот адрес должен быть зарегистрирован в Discord Developer
+ * Portal → OAuth2 → Redirects.
  */
 export function discordRedirectUri(req: NextRequest): string {
   const explicit = (process.env.DISCORD_REDIRECT_URI || "").trim();
   if (explicit) return explicit;
 
-  const proto =
-    (req.headers.get("x-forwarded-proto") || "").split(",")[0].trim() ||
-    req.nextUrl.protocol.replace(":", "");
-  const host =
-    (req.headers.get("x-forwarded-host") || "").split(",")[0].trim() ||
-    req.headers.get("host") ||
-    req.nextUrl.host;
-  return `${proto}://${host}/api/auth/discord/callback`;
+  const appUrl = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "").trim();
+  if (appUrl) {
+    return `${appUrl.replace(/\/+$/, "")}/api/auth/discord/callback`;
+  }
+
+  return `${browserOrigin(req.headers)}/api/auth/discord/callback`;
 }
 /* ------------------------------------------------------------------ */
 /* Контакт Discord для формы рапорта                                   */

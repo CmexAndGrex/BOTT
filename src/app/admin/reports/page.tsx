@@ -101,7 +101,15 @@ export default function AdminReportsPage() {
         setError(data.error || "Не удалось применить решение");
         return;
       }
-      setFlash(data.message || "Решение применено");
+      // Если ЛС закрыто, временный пароль показывается модератору: иначе
+      // боец останется без входа после успешного одобрения
+      const credentials =
+        typeof data.tempPassword === "string" && data.tempPassword
+          ? data.dmSent
+            ? `Логин: ${data.login} — доступ выслан в ЛС`
+            : `⚠️ ЛС не доставлено (закрыты личные сообщения). Логин: ${data.login}, временный пароль: ${data.tempPassword}`
+          : "";
+      setFlash([data.message || "Решение применено", credentials].filter(Boolean).join(" · "));
       await load(status, type);
     } catch {
       setError("Сбой сети");

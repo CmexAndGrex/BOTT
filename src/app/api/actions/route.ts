@@ -9,9 +9,9 @@ export const maxDuration = 60;
 export async function POST(req: NextRequest) {
   // Ручной запуск задач: командиры и админы.
   //
-  // requireStaff вместо requireRole(["officer"]): действия доступны и
-  // командиру с сессией кабинета (member_token), а не только владельцу
-  // cookie панели — иначе командир роты получал 401 на ручном запуске.
+  // requireStaff считает права единым правилом resolvePanelRights: роль обеих
+  // сессий, должность и звание. Иначе администратор или командир роты с
+  // сессией кабинета (member_token) получал отказ на ручном запуске.
   const auth = await requireStaff(req);
   if (!auth.ok) return auth.response;
 
