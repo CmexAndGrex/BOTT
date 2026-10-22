@@ -212,6 +212,16 @@ function LoginForm() {
         return;
       }
 
+      /**
+       * Боец найден, но пароля у него нет. Это не «неверные данные»: идти в
+       * проверку аккаунта панели бессмысленно, а текст должен объяснить, что
+       * делать (войти через Discord или попросить штаб задать пароль).
+       */
+      if (memberData.code === "no_password") {
+        setNotice(memberData.error || "Пароль ещё не установлен");
+        return;
+      }
+
       // Рапорт на рассмотрении/отклонён — это состояние, а не ошибка ввода
       if (memberData.status === "pending" || memberData.status === "dismissed") {
         setNotice(memberData.error || "Доступ закрыт до решения штаба");
@@ -324,16 +334,21 @@ function LoginForm() {
         {/* Резервный способ входа */}
         <form onSubmit={handleLogin} className="flex flex-col gap-4">
           <div>
-            <label className="label mb-1.5 block">Позывной (логин)</label>
+            {/* Логин — позывной, ФИО из табеля или ник Discord: бойцы помнят
+                себя по-разному, а у части состава позывного нет вовсе */}
+            <label className="label mb-1.5 block">Позывной, ФИО или логин</label>
             <input
               type="text"
               className="input input-mono"
-              placeholder="Скиф"
+              placeholder="Скиф / Вамилов И.В."
               autoComplete="username"
               value={callsign}
               onChange={(e) => setCallsign(e.target.value)}
               required
             />
+            <p className="mt-1.5 text-[11px]" style={{ color: "var(--dim)" }}>
+              Можно ввести позывной, ФИО из табеля или логин панели
+            </p>
           </div>
           <div>
             <label className="label mb-1.5 block">Пароль</label>

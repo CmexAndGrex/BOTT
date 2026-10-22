@@ -20,7 +20,11 @@ import {
   LoginThrottle,
   MANUAL_DISCORD_ID,
   normalizeCallsign,
+  normalizeMemberStatus,
+  normalizePersonName,
+  normalizeStatusToken,
   readApplication,
+  toCyrillicHomoglyphs,
   validateApplication,
 } from "../src/lib/recruits.ts";
 import { checkPasswordPolicy } from "../src/lib/password-policy.ts";
@@ -76,6 +80,9 @@ describe("callsignFromHandle — имя бойца с rs-red.com", () => {
     assert.equal(callsignFromHandle("x"), "");
     assert.equal(callsignFromHandle(""), "");
     assert.equal(callsignFromHandle(null), "");
+  });
+});
+
 describe("Анкета рапорта — validateApplication", () => {
   const base = { armaExperience: "600 часов, 3 года", specialization: "Механик-водитель" };
 
@@ -154,6 +161,74 @@ describe("Статусы, роли и доступ", () => {
   });
 });
 
+/**
+ * Регрессия критического бага авторизации: боец со статусом «В СТРОЮ» и
+ * привязанным Discord ID видел экран «Ваш рапорт находится на рассмотрении».
+ * Причина — точное сравнение статуса со строкой "active".
+ */
+describe("Статусы из БД: альтернативные написания = действующий боец", () => {
+  test("in_service / service / «в строю» дают доступ к кабинету", () => {
+    assert.equal(hasProfileAccess("active"), true);
+    assert.equal(hasProfileAccess("in_service"), true);
+    assert.equal(hasProfileAccess("service"), true);
+    assert.equal(hasProfileAccess("В СТРОЮ"), true);
+    assert.equal(hasProfileAccess("в\u00A0строю"), true);
+  });
+
+  test("отпуск в любом написании даёт доступ", () => {
+    assert.equal(hasProfileAccess("vacation"), true);
+    assert.equal(hasProfileAccess("on_vacation"), true);
+    assert.equal(hasProfileAccess("В отпуске"), true);
+  });
+
+  test("pending и dismissed доступа не дают", () => {
+    assert.equal(hasProfileAccess("pending"), false);
+    assert.equal(hasProfileAccess("dismissed"), false);
+    assert.equal(hasProfileAccess(""), false);
+    assert.equal(hasProfileAccess(null), false);
+  });
+
+  test("статус нормализуется к каноническим значениям", () => {
+    assert.equal(normalizeMemberStatus("in_service"), "active");
+    assert.equal(normalizeMemberStatus("В строю"), "active");
+    assert.equal(normalizeMemberStatus("в\u00A0отпуске"), "vacation");
+    assert.equal(normalizeMemberStatus("dismissed"), "dismissed");
+    assert.equal(normalizeMemberStatus("нечто"), "pending");
+  });
+
+  test("normalizeStatusToken убирает неразрывные пробелы и приводит регистр", () => {
+    assert.equal(normalizeStatusToken("  В\u00A0 СТРОЮ "), "в строю");
+  });
+});
+
+/** Регрессия: «Боец Розгов А.В. не найден» при существующей строке в ШДС */
+describe("Нормализация ФИО для поиска в ШДС", () => {
+  test("точки в инициалах и неразрывный пробел не мешают сравнению", () => {
+    assert.equal(normalizePersonName("Розгов А.В."), normalizePersonName("Розгов А. В."));
+    assert.equal(
+      normalizePersonName("Розгов\u00A0А.В."),
+      normalizePersonName("  розгов   а. в.  ")
+    );
+  });
+
+  test("латинские двойники в инициалах приводятся к кириллице", () => {
+    // «Розгов A.В.» с латинской A
+    assert.equal(
+      normalizePersonName("Розгов A.В."),
+      normalizePersonName("Розгов А.В.")
+    );
+    assert.equal(toCyrillicHomoglyphs("A B C E O P T X"), "А В С Е О Р Т Х");
+  });
+
+  test("«ё» и регистр не влияют", () => {
+    assert.equal(normalizePersonName("Королёв П.С."), normalizePersonName("королев п.с."));
+  });
+
+  test("разные люди остаются разными", () => {
+    assert.notEqual(normalizePersonName("Розгов А.В."), normalizePersonName("Розгов И.В."));
+  });
+});
+
 describe("Discord ID", () => {
   test("снежинка принимается", () => {
     assert.equal(isDiscordSnowflake("123456789012345678"), true);
@@ -165,8 +240,7 @@ describe("Discord ID", () => {
     assert.equal(isDiscordSnowflake("user#1234"), false);
   });
 });
-  });
-});
+
 describe("LoginThrottle — защита от перебора пароля", () => {
   test("после 5 неудач вход блокируется на 15 минут", () => {
     const throttle = new LoginThrottle();

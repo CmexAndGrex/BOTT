@@ -21,6 +21,16 @@ export type ReportRow = {
   id: number;
   memberId: number | null;
   callsign: string;
+  /**
+   * ФИО подающего бойца из division_members.
+   *
+   * Требование модерации: в карточке рапорта должно читаться, КТО подал.
+   * Отдельным полем, а не через callsign: у бойцов из синхронизации rs-red.com
+   * позывного нет, и карточка без ФИО выглядела обезличенной.
+   */
+  memberName?: string | null;
+  /** Должность бойца: помогает модератору понять, чей это рапорт */
+  post?: string | null;
   type: ServiceReportType;
   status: ReviewStatus;
   summary: string;
@@ -36,10 +46,15 @@ export type RecruitRow = {
   id: number;
   memberId: number | null;
   callsign: string;
+  /** ФИО из карточки бойца (если заявка уже связана с ним) */
+  memberName?: string | null;
   /** Вид заявки: recruit — новобранец, reserve_return — возврат из запаса */
   kind?: RecruitApplicationKind | null;
-  /** ФИО возвращающегося из запаса: по нему ищется строка на листе «Запас» */
+  /** ФИО из самой заявки: у возврата из запаса заполняется обязательно */
   fullName?: string | null;
+  /** Подразделение и звание из карточки бойца: видны, если он уже заведён */
+  unit?: string | null;
+  rank?: string | null;
   discordTag: string | null;
   discordId: string | null;
   age: number | null;
@@ -85,26 +100,44 @@ export function ReportsQueue({ rows, ...handlers }: QueueHandlers & { rows: Repo
     <div className="flex flex-col gap-4">
       {rows.map((row) => {
         const meta = reportTypeMeta(row.type);
+        /**
+         * Кто подал рапорт: ФИО из табеля — крупно, позывной — рядом.
+         *
+         * Порядок именно такой: в очереди модерации штаб опознаёт человека по
+         * ФИО, а позывной может отсутствовать у бойцов из синхронизации.
+         */
+        const personName = row.memberName || row.callsign || "боец не указан";
+        const callsign = row.memberName && row.callsign ? row.callsign : "";
         return (
           <Section
             key={row.id}
-            title={`#${row.id} · ${meta.label}`}
-            eyebrow="рапорт состава"
+            title={personName}
+            eyebrow={`рапорт состава · #${row.id}`}
             action={<span className={`badge ${STATUS_BADGE[row.status]}`}>{STATUS_LABEL[row.status]}</span>}
           >
             <div className="flex flex-col gap-3 p-5">
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1.5">
+                <span className="display text-[17px] font-bold">{personName}</span>
+                {callsign && (
+                  <span className="text-[13px]" style={{ color: "var(--muted)" }}>
+                    позывной: {callsign}
+                  </span>
+                )}
+                <span className="chip">{meta.label}</span>
+                <span className="ml-auto text-[11.5px] mono" style={{ color: "var(--dim)" }}>
+                  {fmtDate(row.createdAt)}
+                </span>
+              </div>
+
               <div className="flex flex-wrap items-center gap-3 text-[12.5px]">
-                <span className="font-semibold">{row.callsign}</span>
                 <span className="chip">{row.rank || "звание не указано"}</span>
                 <span className="chip">{row.unit || "подразделение не назначено"}</span>
+                {row.post && <span className="chip">должность: {row.post}</span>}
                 {row.discordId && (
                   <span className="chip mono" style={{ fontSize: "0.68rem" }}>
                     Discord: {row.discordId}
                   </span>
                 )}
-                <span className="ml-auto text-[11.5px] mono" style={{ color: "var(--dim)" }}>
-                  {fmtDate(row.createdAt)}
-                </span>
               </div>
 
               <p className="text-[13px]" style={{ color: "var(--muted)" }}>
@@ -206,22 +239,43 @@ export function RecruitsQueue({ rows, ...handlers }: QueueHandlers & { rows: Rec
          * а не зачисляет нового бойца.
          */
         const isReserveReturn = row.kind === APPLICATION_KIND_RESERVE_RETURN;
+        /**
+         * ФИО кандидата — на видном месте карточки.
+         *
+         * Источники по приоритету: карточка бойца (заявка уже связана) →
+         * поле full_name самой заявки (возврат из запаса) → позывной.
+         */
+        const personName = row.memberName || row.fullName || row.callsign || "кандидат";
         return (
         <Section
           key={row.id}
-          title={`#${row.id} · ${row.callsign}`}
+          title={personName}
           eyebrow={
             isReserveReturn
-              ? APPLICATION_KIND_TITLES.reserve_return
-              : "заявка на вступление"
+              ? `${APPLICATION_KIND_TITLES.reserve_return} · #${row.id}`
+              : `заявка на вступление · #${row.id}`
           }
           action={<span className={`badge ${STATUS_BADGE[row.status]}`}>{STATUS_LABEL[row.status]}</span>}
         >
           <div className="flex flex-col gap-3 p-5">
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1.5">
+              <span className="display text-[17px] font-bold">{personName}</span>
+              {row.callsign && row.callsign !== personName && (
+                <span className="text-[13px]" style={{ color: "var(--muted)" }}>
+                  позывной: {row.callsign}
+                </span>
+              )}
+              <span className="ml-auto text-[11.5px] mono" style={{ color: "var(--dim)" }}>
+                {fmtDate(row.createdAt)}
+              </span>
+            </div>
+
             <div className="flex flex-wrap items-center gap-3 text-[12.5px]">
               {isReserveReturn && (
                 <span className="badge badge-amber">{APPLICATION_KIND_TITLES.reserve_return}</span>
               )}
+              {row.rank && <span className="chip">{row.rank}</span>}
+              {row.unit && <span className="chip">{row.unit}</span>}
               <span className="chip">{row.age ? `${row.age} лет` : "возраст не указан"}</span>
               {row.discordTag && <span className="chip">Discord: {row.discordTag}</span>}
               {row.discordId && (
@@ -229,9 +283,6 @@ export function RecruitsQueue({ rows, ...handlers }: QueueHandlers & { rows: Rec
                   ID: {row.discordId}
                 </span>
               )}
-              <span className="ml-auto text-[11.5px] mono" style={{ color: "var(--dim)" }}>
-                {fmtDate(row.createdAt)}
-              </span>
             </div>
 
             {/* ФИО возвращающегося: по нему бот ищет строку на листе «Запас» */}

@@ -63,6 +63,16 @@ export async function GET(req: NextRequest) {
         unit: members.unit,
         rank: members.rank,
         discordId: members.discordId,
+        /**
+         * ФИО подающего бойца.
+         *
+         * Требование модерации: в карточке рапорта должно быть видно, КТО подал,
+         * а не только тип рапорта и ID записи. Раньше в очереди стоял позывной —
+         * у бойцов из синхронизации rs-red.com он пуст, и карточка выглядела
+         * обезличенной.
+         */
+        memberName: members.name,
+        post: members.post,
       })
       .from(serviceReports)
       .leftJoin(members, eq(members.id, serviceReports.memberId))
@@ -71,9 +81,36 @@ export async function GET(req: NextRequest) {
 
     const reportRows = reportFilters.length ? await reportsQuery.where(and(...reportFilters)) : await reportsQuery;
 
+    /**
+     * Заявки дополняются ФИО из карточки бойца (если он уже заведён).
+     *
+     * Требование модерации: в очереди заявок ФИО кандидата должно читаться
+     * сразу, а не выводиться из позывного. У заявки без карточки (member_id
+     * null) остаётся колонка full_name — она есть в самой заявке.
+     */
     const recruitsQuery = db
-      .select()
+      .select({
+        id: recruitApplications.id,
+        memberId: recruitApplications.memberId,
+        callsign: recruitApplications.callsign,
+        kind: recruitApplications.kind,
+        fullName: recruitApplications.fullName,
+        discordTag: recruitApplications.discordTag,
+        discordId: recruitApplications.discordId,
+        age: recruitApplications.age,
+        armaExperience: recruitApplications.armaExperience,
+        about: recruitApplications.about,
+        status: recruitApplications.status,
+        reviewedBy: recruitApplications.reviewedBy,
+        createdAt: recruitApplications.createdAt,
+        updatedAt: recruitApplications.updatedAt,
+        // ФИО и подразделение из карточки бойца — если он уже заведён
+        memberName: members.name,
+        memberUnit: members.unit,
+        memberRank: members.rank,
+      })
       .from(recruitApplications)
+      .leftJoin(members, eq(members.id, recruitApplications.memberId))
       .orderBy(desc(recruitApplications.createdAt))
       .limit(200);
 
@@ -92,6 +129,9 @@ export async function GET(req: NextRequest) {
         id: row.id,
         memberId: row.memberId,
         callsign: row.callsign,
+        // ФИО и должность — главное, что видит модератор в карточке
+        memberName: row.memberName ?? null,
+        post: row.post ?? null,
         type: row.type,
         typeLabel: reportTypeMeta(row.type).label,
         typeIcon: reportTypeMeta(row.type).icon,
@@ -109,10 +149,20 @@ export async function GET(req: NextRequest) {
         id: row.id,
         memberId: row.memberId,
         callsign: row.callsign,
-        // Вид заявки и ФИО: панель помечает возврат из запаса отдельной
+        /**
+         * ФИО кандидата для карточки модерации.
+         *
+         * Берётся из карточки бойца, если заявка уже связана с ним, иначе — из
+         * колонки full_name самой заявки (возврат из запаса заполняет её
+         * обязательно). Позывной остаётся рядом: по нему кандидата зовут в игре.
+         */
+        memberName: row.memberName ?? null,
+        fullName: row.fullName,
+        unit: row.memberUnit ?? null,
+        rank: row.memberRank ?? null,
+        // Вид заявки: панель помечает возврат из запаса отдельной
         // формулировкой, а не показывает его как обычное зачисление
         kind: row.kind,
-        fullName: row.fullName,
         discordTag: row.discordTag,
         discordId: row.discordId,
         age: row.age,

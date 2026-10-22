@@ -239,8 +239,10 @@ return (
         recruits.map((recruit) => (
           <Section
             key={recruit.id}
-            title={recruit.callsign || recruit.name}
-            eyebrow={`подан ${new Date(recruit.createdAt).toLocaleDateString("ru-RU")}`}
+            // ФИО кандидата — на видном месте карточки (требование модерации):
+            // позывной может отсутствовать, и тогда заголовок был пустым
+            title={recruit.name || recruit.callsign || "кандидат"}
+            eyebrow={`рапорт #${recruit.id} · подан ${new Date(recruit.createdAt).toLocaleDateString("ru-RU")}`}
             action={
               <span
                 className={`badge ${

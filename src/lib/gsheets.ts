@@ -18,6 +18,7 @@ import {
   POSITION_SECTIONS,
   examCatalog,
 } from "@/lib/reports";
+import { normalizePersonName } from "@/lib/recruits";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -273,7 +274,12 @@ const LAYOUTS: Record<"TR" | "AD", UnitLayout> = {
   TR: {
     key: "TR",
     nameCol: "C",
-    overall: { top: 10, bottom: 56 },
+    /**
+     * Поиск идёт до 100-й строки: строки ниже учебного отделения тоже относятся
+     * к листу, и обрезка по 56-й теряла бойца, добавленного вручную ниже блока
+     * (ошибка «Боец … не найден» при существующей строке).
+     */
+    overall: { top: 10, bottom: 100 },
     addRange: { top:  42, bottom: 56 },
     postRanges: [
       { match: /логист|снабжен/i, top: 42, bottom: 56 },
@@ -299,7 +305,16 @@ const LAYOUTS: Record<"TR" | "AD", UnitLayout> = {
   AD: {
     key: "AD",
     nameCol: "C",
-    overall: { top: 12, bottom: 41 },
+    /**
+     * Общий диапазон поиска — до 100-й строки, а не до 41-й.
+     *
+     * Раньше здесь стоял bottom: 41 (блок снабжения), и всё, что ниже, лист
+     * просто не читал: боец, чья строка оказалась дальше (ручная правка,
+     * добавленные отделения), не находился — «Боец Розгов А.В. не найден».
+     * Блоки для зачисления по-прежнему ограничены postRanges/defaultPosts,
+     * поэтому расширение поиска не даёт зачислять в чужие секции.
+     */
+    overall: { top: 12, bottom: 100 },
     addRange: { top: 32, bottom: 41 },
     postRanges: [
       { match: /снабжен/i, top: 32, bottom: 41 },
@@ -537,20 +552,38 @@ export function findVacantRow(
   return null;
 }
 
-/** Строка бойца по имени в общем диапазоне подразделения */
+/**
+ * Строка бойца по имени в общем диапазоне подразделения.
+ *
+ * Сравнение идёт по ключу normalizePersonName (recruits.ts), а не по сырой
+ * строке: в листе ФИО записано как угодно — «Розгов А.В.», «Розгов А. В.»,
+ * с неразрывным пробелом из Google Таблиц или с латинской «A» в инициалах.
+ * Точное совпадение из-за этого отвечало «Боец не найден», хотя строка есть.
+ *
+ * Сначала ищется точное совпадение ключа, затем — вхождение (на случай
+ * «Розгов А.В. (отпуск)» в ячейке): так поиск не теряет бойца из-за пометки,
+ * но и не склеивает двух разных людей с похожими ФИО.
+ */
 export function findNameRow(
   sheet: GoogleSpreadsheetWorksheet,
   layout: UnitLayout,
   name: string,
   excludeRow?: number
 ): number | null {
-  const target = name.trim().toLowerCase();
+  const target = normalizePersonName(name);
+  if (!target) return null;
+
+  let partial: number | null = null;
   for (let row = layout.overall.top; row <= layout.overall.bottom; row++) {
     if (excludeRow && row === excludeRow) continue;
-    const v = String(cellAt(sheet, row, layout.nameCol).value ?? "").trim().toLowerCase();
-    if (v && v === target) return row;
+    const raw = String(cellAt(sheet, row, layout.nameCol).value ?? "");
+    const normalized = normalizePersonName(raw);
+    if (!normalized) continue;
+    if (normalized === target) return row;
+    // Пометка в скобках или приписка не должны ломать поиск
+    if (partial === null && normalized.includes(target)) partial = row;
   }
-  return null;
+  return partial;
 }
 
 /* ------------------------------------------------------------------ */

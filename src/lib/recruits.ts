@@ -143,9 +143,104 @@ export function isStaffRole(role: MemberRole): boolean {
   return role === "officer" || role === "admin";
 }
 
-/** Статусы, при которых личный кабинет доступен */
-export function hasProfileAccess(status: MemberStatus): boolean {
-  return status === MEMBER_STATUS.ACTIVE || status === MEMBER_STATUS.VACATION;
+/**
+ * Приведение значения статуса к сравнимому виду.
+ *
+ * Зачем: в division_members.status попадают значения из разных источников —
+ * синхронизации rs-red.com, бота и ручных правок. Кроме канонических
+ * `active`/`vacation` встречаются `in_service`, `service` и русские подписи
+ * «В строю» / «В отпуске». Точное сравнение со строкой "active" из-за этого
+ * отвечало «нет доступа» действующему бойцу, и вход через Discord показывал
+ * экран «рапорт на рассмотрении» человеку, который давно в строю.
+ *
+ * Нормализация: неразрывные пробелы → обычные, регистр вниз, «ё» → «е».
+ */
+export function normalizeStatusToken(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/[\u00A0\u2007\u202F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/ё/g, "е");
+}
+
+/**
+ * Значения статуса (включая алиасы), при которых личный кабинет доступен.
+ * Элементы уже приведены к виду normalizeStatusToken.
+ */
+const PROFILE_ACCESS_STATUSES: ReadonlySet<string> = new Set([
+  // Канонические
+  "active",
+  "vacation",
+  // Альтернативные написания из синхронизации и ручных правок
+  "in_service",
+  "in-service",
+  "in service",
+  "service",
+  "on_vacation",
+  "on-vacation",
+  // Русские подписи статуса
+  "в строю",
+  "встрой",
+  "в отпуске",
+  "отпуск",
+]);
+
+/** Канонические статусы «служба идёт»: в строю и в отпуске */
+const ACTIVE_LIKE_STATUSES: ReadonlySet<string> = new Set([
+  "active",
+  "in_service",
+  "in-service",
+  "in service",
+  "service",
+  "в строю",
+  "встрой",
+]);
+
+/** Канонические статусы отпуска */
+const VACATION_LIKE_STATUSES: ReadonlySet<string> = new Set([
+  "vacation",
+  "on_vacation",
+  "on-vacation",
+  "в отпуске",
+  "отпуск",
+]);
+
+/** Канонические статусы исключения */
+const DISMISSED_LIKE_STATUSES: ReadonlySet<string> = new Set([
+  "dismissed",
+  "excluded",
+  "исключен",
+  "отклонен",
+]);
+
+/**
+ * Канонический статус бойца по произвольному значению из БД.
+ *
+ * Возвращает одно из значений MemberStatus: алиасы «в строю» / in_service /
+ * service сводятся к `active`, «в отпуске» — к `vacation`. Неизвестное значение
+ * считается `pending` (доступа нет), чтобы опечатка в статусе не выдавала
+ * кабинет постороннему.
+ */
+export function normalizeMemberStatus(value: unknown): MemberStatus {
+  const token = normalizeStatusToken(value);
+  if (!token) return MEMBER_STATUS.PENDING;
+  if (ACTIVE_LIKE_STATUSES.has(token)) return MEMBER_STATUS.ACTIVE;
+  if (VACATION_LIKE_STATUSES.has(token)) return MEMBER_STATUS.VACATION;
+  if (DISMISSED_LIKE_STATUSES.has(token)) return MEMBER_STATUS.DISMISSED;
+  return MEMBER_STATUS.PENDING;
+}
+
+/**
+ * Статусы, при которых личный кабинет доступен.
+ *
+ * Принимает не только MemberStatus, но и строковые аналоги из БД: вход через
+ * Discord передаёт сюда статус прямо из division_members, и требование «в строю
+ * = доступ» не должно зависеть от того, каким синонимом записан статус.
+ */
+export function hasProfileAccess(status: unknown): boolean {
+  return PROFILE_ACCESS_STATUSES.has(normalizeStatusToken(status));
 }
 
 /* ------------------------------------------------------------------ */
@@ -365,6 +460,64 @@ export function isFullName(value: unknown): boolean {
   const name = normalizeFullName(value);
   if (name.length < FULL_NAME_MIN_LENGTH || name.length > FULL_NAME_MAX_LENGTH) return false;
   return /^[\wА-Яа-яЁё.\- ]+$/u.test(name);
+}
+
+/**
+ * Латинские двойники, которые визуально совпадают с кириллицей.
+ *
+ * В таблицу ФИО попадают копированием из Discord и из других систем, где
+ * инициалы набраны латиницей: «Розгов A.В.» латинская «A» не равна кириллической
+ * «А», и поиск бойца на листе отвечал «не найден», хотя строка есть. Сводятся
+ * только буквы, которые в кириллице выглядят так же — остальные буквы латиницы
+ * не трогаем, иначе «Ivanov» превратился бы в «Иван».
+ */
+const CYRILLIC_HOMOGLYPHS: Record<string, string> = {
+  A: "А",
+  B: "В",
+  C: "С",
+  E: "Е",
+  H: "Н",
+  K: "К",
+  M: "М",
+  O: "О",
+  P: "Р",
+  T: "Т",
+  X: "Х",
+  Y: "У",
+};
+
+/** Замена латинских двойников кириллицей (регистр сохраняется) */
+export function toCyrillicHomoglyphs(value: string): string {
+  return String(value ?? "").replace(/[A-Za-z]/g, (ch) => {
+    const upper = ch.toUpperCase();
+    const cyrillic = CYRILLIC_HOMOGLYPHS[upper];
+    if (!cyrillic) return ch;
+    return ch === upper ? cyrillic : cyrillic.toLowerCase();
+  });
+}
+
+/**
+ * Ключ сравнения ФИО из таблицы ШДС и из базы.
+ *
+ * Правила (нужны, потому что одно и то же ФИО записано по-разному):
+ *   1. неразрывные пробелы из Google Таблиц → обычные, trim и схлопывание;
+ *   2. латинские двойники → кириллица;
+ *   3. точки в инициалах: «Розгов А.В.» == «Розгов А. В.»
+ *      (пробел после точки убирается, точки остаются значимыми);
+ *   4. «ё» → «е», регистр вниз.
+ *
+ * Возвращает уже сравнимую строку: её используют и поиск по листу, и тесты.
+ */
+export function normalizePersonName(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return toCyrillicHomoglyphs(value)
+    .replace(/[\u00A0\u2007\u202F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\.\s+/g, ".") // «А. В.» → «А.В.»
+    .replace(/\s*\.\s*/g, ".") // «А . В .» → «А.В.»
+    .toLowerCase()
+    .replace(/ё/g, "е");
 }
 
 /** Подпись для отклонённого рапорта */

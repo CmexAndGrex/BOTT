@@ -19,6 +19,7 @@
  */
 import { GoogleSpreadsheetWorksheet } from "google-spreadsheet";
 import { getSettings } from "@/lib/settings";
+import { normalizePersonName } from "@/lib/recruits";
 import {
   getDoc,
   getSheet,
@@ -231,7 +232,15 @@ function findReserveRow(
   sheet: GoogleSpreadsheetWorksheet,
   name: string
 ): { row: number; unit: string; layout: UnitLayout } | null {
-  const target = name.trim().toLowerCase();
+  /**
+   * Сравнение по ключу normalizePersonName, а не по сырой строке: на листе
+   * «Запас» ФИО лежит ровно так, как было в снапшоте — с неразрывными пробелами,
+   * другим регистром или с латинской буквой в инициалах. Точное совпадение
+   * из-за этого не находило строку, и возврат из запаса отвечал «боец не найден».
+   */
+  const target = normalizePersonName(name);
+  if (!target) return null;
+
   for (let r = 2; r <= sheet.rowCount; r++) {
     const meta = metaColumnsFor(sheet, r);
     const unit = String(sheet.getCell(r - 1, meta.unit).value ?? "").trim();
@@ -243,7 +252,7 @@ function findReserveRow(
       continue;
     }
     const nameColIdx = layout.nameCol.charCodeAt(0) - 65;
-    const v = String(sheet.getCell(r - 1, nameColIdx).value ?? "").trim().toLowerCase();
+    const v = normalizePersonName(sheet.getCell(r - 1, nameColIdx).value);
     if (v && v === target) return { row: r, unit, layout };
   }
   return null;

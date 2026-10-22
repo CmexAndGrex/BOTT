@@ -23,6 +23,7 @@ import { getAuthUser, isSecureRequest } from "@/lib/api-auth";
 import {
   hasProfileAccess,
   MANUAL_DISCORD_ID,
+  normalizeMemberStatus,
   type MemberRole,
   type MemberStatus,
 } from "@/lib/recruits";
@@ -186,8 +187,15 @@ async function loadSessionMember(memberId: number): Promise<LoadedMember | null>
     .where(eq(members.id, memberId));
 
   if (!row) return null;
+  /**
+   * Статус читается через normalizeMemberStatus: в БД встречаются `in_service`,
+   * `service` и русские подписи «В строю». Точное сравнение со строкой
+   * "pending" отсекало бы действующего бойца с альтернативным написанием, и
+   * сессия кабинета «исчезала» сразу после успешного входа через Discord.
+   */
+  const status = normalizeMemberStatus(row.status);
   // Сессии непринятого рапорта и исключённого бойца недействительны
-  if (row.status === "dismissed" || row.status === "pending") return null;
+  if (status === "dismissed" || status === "pending") return null;
 
   return {
     member: {
@@ -197,7 +205,7 @@ async function loadSessionMember(memberId: number): Promise<LoadedMember | null>
       rank: row.rank,
       unit: row.unit,
       post: row.post,
-      status: row.status,
+      status,
       role: row.role,
       avatarUrl: row.avatarUrl,
       hasPassword: !!row.passwordHash,

@@ -276,7 +276,13 @@ describe("resolveLayout — раскладка ШДС по подразделе�
     assert.equal(layout.key, "TR");
     assert.equal(layout.nameCol, "C");
     assert.deepEqual(layout.addRange, { top: 42, bottom: 56 });
-    assert.deepEqual(layout.overall, { top: 10, bottom: 56 });
+    /**
+     * Общий диапазон ПОИСКА шире блока добавления: строки, которых нет в
+     * раскладке (ручная правка листа), тоже должны находиться, иначе боец с
+     * существующей строкой получал «не найден». Границы зачисления при этом
+     * остаются блоками — это проверяют defaultPosts/addRange выше.
+     */
+    assert.deepEqual(layout.overall, { top: 10, bottom: 100 });
   });
 
   test("Артиллерийский дивизион: та же раскладка строки, добавление в строки 32–41", () => {
