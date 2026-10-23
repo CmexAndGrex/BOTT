@@ -527,14 +527,36 @@ function isVacant(value: unknown): boolean {
   return String(value ?? "").trim().toLowerCase() === "вакант";
 }
 
-/** Загрузить область строк целиком (по границы блока экзаменов этого листа) */
+/**
+ * Первая строка листа: там начинаются объединённые заголовки ШДС.
+ *
+ * Область поиска расширена до неё намеренно — и заголовки («Фамилия»), и
+ * командование листа стоят выше `overall.top`, и обрезка по `overall.top`
+ * делала бойца из командования ненаходимым.
+ */
+const SEARCH_TOP_ROW = 1;
+
+/** Последняя строка шапки — строка перед таблицей участников */
+function headerScanBottom(layout: UnitLayout): number {
+  return Math.max(SEARCH_TOP_ROW, layout.overall.top - 1);
+}
+
+/**
+ * Загрузить область строк целиком (по границы блока экзаменов этого листа).
+ *
+ * Читается не только запрошенный диапазон, но и всё, что ВЫШЕ него, до первой
+ * строки листа: там лежит шапка (по её заголовкам поиск уточняет колонку ФИО)
+ * и командование (у дивизиона строки 1–11 при таблице с 12-й). Один и тот же
+ * запрос — отдельного обращения к API это не стоит.
+ */
 async function loadArea(
   sheet: GoogleSpreadsheetWorksheet,
   layout: UnitLayout,
   top: number,
   bottom: number
 ) {
-  await sheet.loadCells(`${ROW_START_COL}${top}:${layout.examEndCol}${bottom}`);
+  const from = Math.min(top, SEARCH_TOP_ROW);
+  await sheet.loadCells(`${ROW_START_COL}${from}:${layout.examEndCol}${bottom}`);
 }
 
 /** Первая строка со значением «Вакант» в диапазоне колонки имени */
@@ -552,6 +574,136 @@ export function findVacantRow(
   return null;
 }
 
+/** Текст ячейки строки (1-based) по индексу колонки; "" — пусто или не загружено */
+function readRowText(sheet: GoogleSpreadsheetWorksheet, row: number, col: number): string {
+  try {
+    return String(sheet.getCell(row - 1, col).value ?? "")
+      .replace(/\u00A0/g, " ")
+      .trim();
+  } catch {
+    // Ячейка вне загруженного диапазона — для поиска это «нет значения»,
+    // а не повод падать с «This cell has not been loaded yet»
+    return "";
+  }
+}
+
+/**
+ * «Грубый» ключ ФИО: только буквы и цифры, без точек, дефисов и пробелов.
+ *
+ * normalizePersonName сводит «А. В.» к «А.В.», но точку в ячейке могли и не
+ * поставить — «Розгов А.В» или «Розгов А В». Для поиска это одно и то же ФИО,
+ * поэтому дополнительно сравнивается ключ без разделителей.
+ * Принимает уже нормализованную строку (normalizePersonName).
+ */
+function looseNameKey(normalized: string): string {
+  return normalized.replace(/[^a-zа-я0-9]+/g, "");
+}
+
+/** Заголовок колонки с ФИО в шапке листа */
+const NAME_HEADER_RE = /фамили|фио|ф\.?\s*и\.?\s*о/i;
+
+/**
+ * Похожа ли колонка на колонку ФИО по её содержимому.
+ *
+ * Одного слова «Фамилия» в шапке мало: лист начинается с объединённых
+ * заголовков («Штатно-должностной список…»), и такое слово может оказаться в
+ * колонке A, где данных нет вовсе. Колонка принимается только если в ней
+ * реально стоят имена — есть хотя бы одна непустая строка, кроме «Вакант».
+ */
+function columnLooksLikeNames(
+  sheet: GoogleSpreadsheetWorksheet,
+  layout: UnitLayout,
+  col: number
+): boolean {
+  for (let row = layout.overall.top; row <= layout.overall.bottom; row++) {
+    const text = readRowText(sheet, row, col);
+    if (text && !isVacant(text)) return true;
+  }
+  return false;
+}
+
+/** Колонка ФИО по заголовку шапки (0-based) или null, если шапка её не называет */
+function headerNameColumn(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayout): number | null {
+  const lastCol = Math.min(colIndex(layout.nameCol) + 1, 5);
+  for (let row = SEARCH_TOP_ROW; row <= headerScanBottom(layout); row++) {
+    // Колонка A служебная (там же объединённые заголовки листа): слово
+    // «Фамилия» в них ещё не значит, что имена лежат в A
+    for (let col = 1; col <= lastCol; col++) {
+      const text = readRowText(sheet, row, col);
+      if (!text || !NAME_HEADER_RE.test(text)) continue;
+      if (columnLooksLikeNames(sheet, layout, col)) return col;
+    }
+  }
+  return null;
+}
+
+/**
+ * Колонки, в которых ищется ФИО.
+ *
+ * Первой идёт колонка, найденная по заголовку шапки (если шапка прочитана),
+ * затем C — колонка ФИО по ТЗ, затем B: строку могли сдвинуть вручную, и имя
+ * оказывается там, где по раскладке стоит звание. Проверять только C нельзя —
+ * именно из-за этого рапорт отвечал «Боец Розгов А.В. не найден», хотя строка
+ * на листе есть.
+ */
+function nameColumnsFor(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayout): number[] {
+  const base = colIndex(layout.nameCol);
+  const columns: number[] = [];
+  const byHeader = headerNameColumn(sheet, layout);
+  if (byHeader != null) columns.push(byHeader);
+  for (const col of [base, base - 1]) {
+    if (col >= 0 && !columns.includes(col)) columns.push(col);
+  }
+  return columns;
+}
+
+/**
+ * Проход по строкам: сначала точное совпадение ключа ФИО, затем вхождение.
+ *
+ * Поиск идёт с ПЕРВОЙ строки листа, а не с `overall.top`: командование стоит
+ * выше таблицы участников (у дивизиона строки 1–11 при overall.top = 12), и
+ * обрезка по overall.top делала такого бойца ненаходимым — рапорт на смену
+ * должности отвечал «не найден», хотя строка на листе есть. В строках выше
+ * overall.top принимается только СТРОГОЕ совпадение: там лежит шапка, и поиск
+ * по вхождению мог бы зацепиться за заголовок.
+ *
+ * Точное совпадение важнее частичного и в самой таблице: пометка «(отпуск)» в
+ * одной строке не должна перебивать чистую запись того же ФИО в другой.
+ */
+function scanNameRows(
+  sheet: GoogleSpreadsheetWorksheet,
+  layout: UnitLayout,
+  target: string,
+  targetLoose: string,
+  columns: readonly number[],
+  excludeRow?: number
+): number | null {
+  let partial: number | null = null;
+  for (let row = SEARCH_TOP_ROW; row <= layout.overall.bottom; row++) {
+    if (excludeRow && row === excludeRow) continue;
+    // Строки шапки/командования выше overall.top: только точное совпадение
+    const isAboveTable = row < layout.overall.top;
+    for (const col of columns) {
+      const raw = readRowText(sheet, row, col);
+      // Свободная строка — не боец: «Вакант» не должен совпасть с искомым именем
+      if (!raw || isVacant(raw)) continue;
+      const key = normalizePersonName(raw);
+      if (!key) continue;
+      const loose = looseNameKey(key);
+      // Пометка в скобках или приписка не должны ломать поиск
+      if (key === target || (targetLoose && loose === targetLoose)) return row;
+      if (
+        !isAboveTable &&
+        partial === null &&
+        (key.includes(target) || (targetLoose && loose.includes(targetLoose)))
+      ) {
+        partial = row;
+      }
+    }
+  }
+  return partial;
+}
+
 /**
  * Строка бойца по имени в общем диапазоне подразделения.
  *
@@ -559,6 +711,13 @@ export function findVacantRow(
  * строке: в листе ФИО записано как угодно — «Розгов А.В.», «Розгов А. В.»,
  * с неразрывным пробелом из Google Таблиц или с латинской «A» в инициалах.
  * Точное совпадение из-за этого отвечало «Боец не найден», хотя строка есть.
+ *
+ * Дополнительно:
+ *   * ячейки с ФИО проверяются не только в колонке C, но и в B и в колонке,
+ *     названной «Фамилия» в шапке — раскладку листа правят руками, и имя
+ *     оказывается не там, где стоит по ТЗ;
+ *   * сравнивается ещё и «грубый» ключ без точек и пробелов, поэтому
+ *     «Розгов А.В» и «Розгов А. В.» находят одну и ту же строку.
  *
  * Сначала ищется точное совпадение ключа, затем — вхождение (на случай
  * «Розгов А.В. (отпуск)» в ячейке): так поиск не теряет бойца из-за пометки,
@@ -572,18 +731,43 @@ export function findNameRow(
 ): number | null {
   const target = normalizePersonName(name);
   if (!target) return null;
+  const targetLoose = looseNameKey(target);
+  if (!targetLoose) return null;
+  return scanNameRows(sheet, layout, target, targetLoose, nameColumnsFor(sheet, layout), excludeRow);
+}
 
-  let partial: number | null = null;
-  for (let row = layout.overall.top; row <= layout.overall.bottom; row++) {
-    if (excludeRow && row === excludeRow) continue;
-    const raw = String(cellAt(sheet, row, layout.nameCol).value ?? "");
-    const normalized = normalizePersonName(raw);
-    if (!normalized) continue;
-    if (normalized === target) return row;
-    // Пометка в скобках или приписка не должны ломать поиск
-    if (partial === null && normalized.includes(target)) partial = row;
+/**
+ * Диагностика неудачного поиска бойца.
+ *
+ * В лог попадают первые 10–15 прочитанных ячеек ФИО вместе с их
+ * нормализованным ключом: сразу видно, чем запись в листе отличается от
+ * искомого имени (опечатка, латиница в инициалах, сдвинутая колонка), и не
+ * нужно открывать таблицу, чтобы это выяснить.
+ */
+function warnMissingSoldier(
+  sheet: GoogleSpreadsheetWorksheet,
+  layout: UnitLayout,
+  names: readonly string[]
+): void {
+  const columns = nameColumnsFor(sheet, layout);
+  const sample: string[] = [];
+  for (let row = SEARCH_TOP_ROW; row <= layout.overall.bottom && sample.length < 15; row++) {
+    for (const col of columns) {
+      const raw = readRowText(sheet, row, col);
+      if (!raw) continue;
+      sample.push(`${colLetter(col)}${row}="${raw}"→"${normalizePersonName(raw)}"`);
+      break; // одна колонка ФИО на строку
+    }
   }
-  return partial;
+  const byHeader = columns.length > 0 && columns[0] !== colIndex(layout.nameCol);
+  const where = columns.map((c) => colLetter(c)).join("/");
+  const tail = sample.length ? `: ${sample.join("; ")}` : " — колонки не прочитаны";
+  console.warn(
+    `[gsheets] Боец не найден на листе «${sheet.title}»` +
+      (byHeader ? ` (ФИО по шапке в колонке ${colLetter(columns[0])})` : "") +
+      `; ищем ${names.map((n) => `«${n}»→«${normalizePersonName(n)}»`).join(", ")}` +
+      `; колонки ${where}, прочитано ${sample.length} ячеек${tail}`
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -1112,7 +1296,10 @@ async function scenarioAdd(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayout
 async function scenarioRank(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayout, req: ParsedRequest) {
   await loadArea(sheet, layout, layout.overall.top, layout.overall.bottom);
   const row = findNameRow(sheet, layout, req.userName);
-  if (!row) throw new Error(`Боец ${req.userName} не найден на листе «${sheet.title}»`);
+  if (!row) {
+    warnMissingSoldier(sheet, layout, [req.userName]);
+    throw new Error(`Боец ${req.userName} не найден на листе «${sheet.title}»`);
+  }
 
   const rankCell = cellAt(sheet, row, colLetter(colIndex(layout.nameCol) - 1));
   rankCell.value = req.rank;
@@ -1137,7 +1324,10 @@ function pickPostRange(layout: UnitLayout, req: ParsedRequest) {
 async function scenarioPost(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayout, req: ParsedRequest) {
   await loadArea(sheet, layout, layout.overall.top, layout.overall.bottom);
   const srcRow = findNameRow(sheet, layout, req.userName);
-  if (!srcRow) throw new Error(`Боец ${req.userName} не найден на листе «${sheet.title}»`);
+  if (!srcRow) {
+    warnMissingSoldier(sheet, layout, [req.userName]);
+    throw new Error(`Боец ${req.userName} не найден на листе «${sheet.title}»`);
+  }
 
   // 1. Обновляем должность в соседней правой ячейке
   const postCell = cellAt(sheet, srcRow, colLetter(colIndex(layout.nameCol) + 1));
@@ -1264,6 +1454,7 @@ export async function transferShdsPosition(params: {
       if (srcRow) break;
     }
     if (!srcRow) {
+      warnMissingSoldier(sheet, layout, names);
       throw new Error(`Боец «${names.join("» / «")}» не найден на листе «${sheet.title}»`);
     }
 
@@ -1597,7 +1788,10 @@ async function scenarioExam(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayou
   }
 
   const row = findNameRow(sheet, layout, req.userName);
-  if (!row) throw new Error(`Боец ${req.userName} не найден на листе «${sheet.title}»`);
+  if (!row) {
+    warnMissingSoldier(sheet, layout, [req.userName]);
+    throw new Error(`Боец ${req.userName} не найден на листе «${sheet.title}»`);
+  }
 
   /**
    * Оценки по столбцам: индекс колонки → оценка рапорта.
@@ -1724,7 +1918,10 @@ async function checkAndGrantBeret(
 async function scenarioRemove(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayout, req: ParsedRequest) {
   await loadArea(sheet, layout, layout.overall.top, layout.overall.bottom);
   const srcRow = findNameRow(sheet, layout, req.userName);
-  if (!srcRow) throw new Error(`Боец ${req.userName} не найден на листе «${sheet.title}»`);
+  if (!srcRow) {
+    warnMissingSoldier(sheet, layout, [req.userName]);
+    throw new Error(`Боец ${req.userName} не найден на листе «${sheet.title}»`);
+  }
 
   const range =
     layout.postRanges.find((r) => srcRow >= r.top && srcRow <= r.bottom) || layout.overall;
@@ -1886,6 +2083,7 @@ export async function syncDiscordIdToSheet(params: {
       if (row) break;
     }
     if (!row) {
+      warnMissingSoldier(sheet, layout, names);
       throw new Error(`Боец «${names.join("» / «")}» не найден на листе «${sheet.title}»`);
     }
 
