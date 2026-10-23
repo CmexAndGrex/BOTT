@@ -1374,9 +1374,16 @@ export type ReviewAction = "approve" | "reject";
 
 export type ReviewCustomId = { scope: ReviewScope; action: ReviewAction; id: number };
 
-/** customId кнопки, например «recruit_approve_12» */
+/**
+ * customId кнопки.
+ *
+ * Формат заявок — `approve_recruit_12` / `reject_recruit_12` (как в ТЗ на
+ * модерацию заявок), рапортов — `report_approve_12`. Прежний формат
+ * `recruit_approve_12` по-прежнему разбирается (см. parseReviewCustomId):
+ * сообщения, отправленные до обновления, продолжают работать.
+ */
 export function reviewCustomId(scope: ReviewScope, action: ReviewAction, id: number): string {
-  return `${scope}_${action}_${id}`;
+  return scope === "recruit" ? `${action}_recruit_${id}` : `${scope}_${action}_${id}`;
 }
 
 /**
@@ -1385,11 +1392,19 @@ export function reviewCustomId(scope: ReviewScope, action: ReviewAction, id: num
  */
 export function parseReviewCustomId(value: unknown): ReviewCustomId | null {
   const raw = String(value ?? "").trim();
-  const match = raw.match(/^(recruit|report)_(approve|reject)_(\d{1,12})$/);
+  // Два формата: старый «recruit_approve_12» и новый «approve_recruit_12».
+  // Старые сообщения с кнопками нельзя «осиротить» — иначе решение по ним
+  // перестало бы работать после обновления.
+  const legacy = raw.match(/^(recruit|report)_(approve|reject)_(\d{1,12})$/);
+  const current = raw.match(/^(approve|reject)_(recruit|report)_(\d{1,12})$/);
+  const match = legacy ?? current;
   if (!match) return null;
-  const id = Number(match[3]);
+
+  const scope = (legacy ? match[1] : match[2]) as ReviewScope;
+  const action = (legacy ? match[2] : match[1]) as ReviewAction;
+  const id = Number(legacy ? match[3] : match[3]);
   if (!Number.isInteger(id) || id <= 0) return null;
-  return { scope: match[1] as ReviewScope, action: match[2] as ReviewAction, id };
+  return { scope, action, id };
 }
 
 /** Тексты кнопок из ТЗ */
@@ -1527,6 +1542,68 @@ export function buildRecruitEmbed(input: RecruitEmbedInput): ReviewEmbed {
     footer: { text: `Заявка #${input.id} · ATK RED` },
     timestamp: new Date().toISOString(),
   };
+}
+
+/**
+ * Направление кандидата по свободному тексту анкеты.
+ *
+ * Форма /apply не спрашивает направление отдельным полем (в требованиях его
+ * тоже нет), а штаб выбирает подразделение уже при зачислении. Здесь строка
+ * только подсказывает: если кандидат сам написал «танк» или «арт»/«дивизион»,
+ * модератор увидит направление сразу, иначе — честную пометку «определяет
+ * штаб». Угадывать по молчанию нельзя: ошибка увела бы бойца не в тот лист.
+ */
+export function recruitDirectionHint(about: string | null | undefined): string {
+  const text = String(about ?? "");
+  if (/танк/i.test(text)) return "Танковая рота (ТР)";
+  if (/арт|дивизион|оруди/i.test(text)) return "Артиллерийский дивизион (АД)";
+  return "определяет штаб";
+}
+
+export type RecruitApplicationMessageInput = {
+  fullName: string | null;
+  callsign: string;
+  about: string | null;
+  age: number | null;
+  armaExperience: string;
+  discordId: string | null;
+  discordTag: string | null;
+  /**
+   * Упоминание командиров подразделения (готовая строка вида `<@&123>`).
+   * Пусто — строки пинга нет: упоминать несуществующую роль нельзя, Discord
+   * покажет «@unknown-role».
+   */
+  commanderMention?: string | null;
+};
+
+/**
+ * Текст заявки на вступление для канала запросов.
+ *
+ * Отправляется вместе с Embed и кнопками: Embed удобен для чтения карточки, а
+ * строгий список ниже — требование ТЗ и единственное место, где видно
+ * упоминание командиров (Discord не подсвечивает упоминания внутри Embed).
+ * Формат намеренно текстовый: он копируется в отчёты и ищется поиском.
+ */
+export function buildRecruitApplicationMessage(
+  input: RecruitApplicationMessageInput
+): string {
+  const lines = [
+    "**Заявка на вступление:**",
+    `1. ФИО: ${input.fullName?.trim() || "не указано"}`,
+    `2. Направление: ${recruitDirectionHint(input.about)}`,
+    `3. Возраст: ${input.age ?? "—"}`,
+    `4. Опыт в Arma 3: ${input.armaExperience.trim() || "—"}`,
+    `5. Discord: ${
+      input.discordId
+        ? `<@${input.discordId}>${input.discordTag ? ` (${input.discordTag})` : ""}`
+        : input.discordTag
+          ? input.discordTag
+          : "не указан — впишет командир"
+    }`,
+    `6. Пинг: ${input.commanderMention?.trim() || "командиры подразделения не заданы в настройках"}`,
+    `Позывной: ${input.callsign}`,
+  ];
+  return lines.join("\n").slice(0, 1900);
 }
 
 export type ReportEmbedInput = {

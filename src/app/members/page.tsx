@@ -171,12 +171,35 @@ export default function MembersPage() {
     }
   };
 
+  /**
+   * Правка карточки (отпуск, Discord ID).
+   *
+   * Ответ содержит итог по роли Discord «Отпуск». Молчать о нём нельзя: если
+   * бот не смог выдать или снять роль (нет прав, роль выше роли бота, не
+   * привязан Discord), база уже обновлена, и штаб должен знать, что на сервере
+   * роль осталась прежней — иначе отпуск считается оформленным только наполовину.
+   */
   const patch = async (id: number, body: Record<string, unknown>) => {
     setBusyIds((prev) => new Set(prev).add(id));
     try {
       const res = await fetch(`/api/members/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const data = await res.json();
-      if (data.ok) { setMembers((prev) => (prev ?? []).map((m) => (m.id === id ? data.member : m))); }
+      if (data.ok) {
+        setMembers((prev) => (prev ?? []).map((m) => (m.id === id ? data.member : m)));
+        const role = data.vacationRole as
+          | { ok: boolean; message: string; error: string | null }
+          | null
+          | undefined;
+        if (role && !role.ok) {
+          // Предупреждение, а не ошибка: сохранение в базе прошло успешно
+          setNotice({
+            ok: false,
+            text: `Отпуск сохранён, но роль Discord не изменена: ${role.error || role.message}`,
+          });
+        } else if (role?.ok) {
+          setNotice({ ok: true, text: `Сохранено. ${role.message}` });
+        }
+      }
       else { setNotice({ ok: false, text: data.error || "Не удалось сохранить" }); }
     } catch { setNotice({ ok: false, text: "Сбой сети при сохранении" }); }
     finally { setBusyIds((prev) => { const next = new Set(prev); next.delete(id); return next; }); }

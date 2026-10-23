@@ -174,7 +174,10 @@ export default function IntegrationsTab({
                 onChange={(e) => digits("shds_channel_id")(e.target.value)}
               />
             </Field>
-            <Field label="ID канала заявок на отпуск (VACATION_CHANNEL_ID)">
+            <Field
+              label="ID канала заявок на отпуск (VACATION_CHANNEL_ID)"
+              hint="Сюда уходят рапорты на отпуск с сайта (/reports/new) и заявки бота. Пусто — DISCORD_VACATION_CHANNEL_ID из окружения."
+            >
               <input
                 className="input input-mono"
                 placeholder="например 1085141850966458519"
@@ -281,6 +284,8 @@ export default function IntegrationsTab({
                 В этом канале бот принимает команды вида <b>«Выдать Капитан ТР, снять Друг АТК»</b>.
                 Формат сообщения: <span className="kbd">@получатель</span>,{" "}
                 <span className="kbd">@экзаменатор</span>, затем команда со списком ролей.
+                Сюда же уходят рапорты на смену роли/специальности с сайта. Пусто —
+                переменная <span className="kbd">DISCORD_ROLE_REQUESTS_CHANNEL_ID</span>.
               </>
             }
           >

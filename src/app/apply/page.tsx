@@ -13,7 +13,15 @@
  */
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
-import { ClipboardList, ShieldAlert, CheckCircle2, MessageCircle } from "lucide-react";
+import {
+  ClipboardList,
+  ShieldAlert,
+  CheckCircle2,
+  MessageCircle,
+  ChevronDown,
+  PlayCircle,
+  HelpCircle,
+} from "lucide-react";
 import { Spinner } from "@/components/ui";
 import { PASSWORD_POLICY_HINT } from "@/lib/password-policy";
 import {
@@ -59,6 +67,14 @@ export default function ApplyPage() {
   const [sending, setSending] = useState(false);
   const [discordAvatar, setDiscordAvatar] = useState<string | null>(null);
   const [discordLinked, setDiscordLinked] = useState(false);
+  /**
+   * Раскрыта ли видео-инструкция «Как узнать свой Discord ID».
+   *
+   * По умолчанию блок свёрнут: видео занимает много места и отодвигает форму,
+   * а нужно оно только тем, кто не знает, где взять ID. Кому Discord ID
+   * подставился из OAuth2, инструкция не нужна вовсе.
+   */
+  const [showIdHelp, setShowIdHelp] = useState(false);
   /**
    * Выбран возврат из запаса.
    *
@@ -366,6 +382,80 @@ return (
               ? "Аккаунт Discord привязан: ID и аватар подставлены из вашего профиля"
               : "Нет Discord? Оставьте поле пустым — командир впишет ID вручную после проверки"}
           </p>
+
+          {/**
+           * Шпаргалка с видео: раскрывающийся блок, а не модальное окно.
+           * Причина: модальное окно перекрывает форму и на телефоне его легко
+           * закрыть случайно, потеряв уже введённые данные. Аккордеон живёт
+           * внутри формы и ничего не блокирует.
+           */}
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={() => setShowIdHelp((open) => !open)}
+              aria-expanded={showIdHelp}
+              className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-[12.5px]"
+              style={{
+                border: "1px solid var(--stroke-soft)",
+                background: "rgba(255,255,255,.02)",
+                color: "var(--muted)",
+                cursor: "pointer",
+              }}
+            >
+              <span className="flex items-center gap-2">
+                <HelpCircle size={14} style={{ color: "var(--red)" }} />
+                Как узнать свой Discord ID (видео-инструкция)
+              </span>
+              <ChevronDown
+                size={15}
+                style={{
+                  transform: showIdHelp ? "rotate(180deg)" : "none",
+                  transition: "transform .15s ease",
+                }}
+              />
+            </button>
+
+            {showIdHelp && (
+              <div
+                className="mt-2 rounded-lg p-3"
+                style={{ border: "1px solid var(--stroke-soft)" }}
+              >
+                {/**
+                 * Файл лежит в public/video/Instr.mov (фактическое расширение
+                 * проверено в репозитории). Chrome/Edge играют .mov с H.264,
+                 * Safari — тоже; ссылка на скачивание оставлена на случай
+                 * экзотического кодека, где плеер покажет пустой кадр.
+                 */}
+                <video
+                  src="/video/Instr.mov"
+                  controls
+                  preload="metadata"
+                  playsInline
+                  className="w-full rounded-lg border border-neutral-700"
+                >
+                  Ваш браузер не поддерживает встроенное видео.
+                  <a href="/video/Instr.mov">Скачать инструкцию</a>
+                </video>
+                <div
+                  className="mt-3 flex items-start gap-2 text-[12px] leading-relaxed"
+                  style={{ color: "var(--muted)" }}
+                >
+                  <PlayCircle size={14} className="mt-0.5 flex-none" style={{ color: "var(--red)" }} />
+                  <span>
+                    Настройки Discord → Расширенные → Включить режим разработчика → Правый клик
+                    по своему профилю → Скопировать ID пользователя.
+                  </span>
+                </div>
+                <p className="mt-2 text-[11.5px]" style={{ color: "var(--dim)" }}>
+                  Не открывается видео?{" "}
+                  <a href="/video/Instr.mov" download className="underline">
+                    Скачайте файл
+                  </a>{" "}
+                  — он откроется любым плеером.
+                </p>
+              </div>
+            )}
+          </div>
         </div>
 
         <div>

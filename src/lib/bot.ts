@@ -28,11 +28,13 @@ import type {
   PartialUser,
   ButtonInteraction,
   Interaction,
+  PermissionResolvable,
 } from "discord.js";
 import { eq, and, isNotNull } from "drizzle-orm";
 import { db } from "@/db";
 import { members, processedRequests } from "@/db/schema";
 import { getSettings } from "@/lib/settings";
+import { MEMBER_STATUS, normalizeMemberStatus } from "@/lib/recruits";
 import { applyShdsRequest, parseRequestText, SHDS_ACTIONS, type ParsedRequest } from "@/lib/gsheets";
 import { applyRoleCommand, parseRoleCommand, parseRoleRequest, COMMON_ROLE_IDS } from "@/lib/roles";
 import { moveToReserve, returnFromReserve } from "@/lib/reserve";
@@ -413,19 +415,39 @@ async function handleRolesReaction({
 /* ------------------------------------------------------------------ */
 
 /**
- * Проверка прав на решение: модератор заявок, Командирский состав или
- * администратор сервера.
+ * Проверка прав на решение: администратор сервера, модератор заявок или
+ * Командирский состав.
  *
- * Проверяются роли именно на сервере (кэш участника), а не «кто угодно с
- * доступом к каналу»: решение по заявке выдаёт доступ в личный кабинет, и
+ * Проверяются права и роли именно на сервере (кэш участника), а не «кто угодно
+ * с доступом к каналу»: решение по заявке выдаёт доступ в личный кабинет, и
  * право на это должно быть явным. Командирский состав допущен наравне с
  * модератором — приказы по составу отдают и командиры.
+ *
+ * Право «Администратор» проверяется отдельно: у владельца сервера может не быть
+ * ни одной из настроенных ролей (он их и настраивает), и кнопка отвечала бы ему
+ * «недостаточно прав» на собственном сервере.
  */
 function canReview(
-  member: { roles: { cache: { has(id: string): boolean } } } | null,
+  member:
+    | {
+        roles: { cache: { has(id: string): boolean } };
+        permissions?: {
+          has(permission: PermissionResolvable, checkAdmin?: boolean): boolean;
+        };
+      }
+    | null,
   config: BotConfig
 ): boolean {
   if (!member) return false;
+  // Administrator — флаг Discord; строка, а не импорт enum, чтобы функция
+  // оставалась проверяемой тестами без сборки discord.js
+  if (typeof member.permissions?.has === "function") {
+    try {
+      if (member.permissions.has("Administrator")) return true;
+    } catch {
+      /* участник без вычисленных прав — проверяем роли ниже */
+    }
+  }
   const roles = member.roles.cache;
   return Boolean(
     (config.moderatorRoleId && roles.has(config.moderatorRoleId)) ||
@@ -483,9 +505,11 @@ async function handleReviewButton(
       parsed.scope === "recruit"
         ? parsed.action === "approve"
           ? // Решение по виду заявки: возврат из запаса восстанавливает бойца
-            // и переносит строку ШДС, а не зачисляет нового (см. review.ts)
-            await approveRecruitByKind(parsed.id, reviewer)
-          : await rejectRecruitApplication(parsed.id, reviewer)
+            // и переносит строку ШДС, а не зачисляет нового (см. review.ts).
+            // Discord ID нажавшего передаём: сообщение должно сказать
+            // «Одобрено модератором @ник».
+            await approveRecruitByKind(parsed.id, reviewer, interaction.user.id)
+          : await rejectRecruitApplication(parsed.id, reviewer, "", interaction.user.id)
         : parsed.action === "approve"
           ? await approveServiceReport(parsed.id, reviewer)
           : await rejectServiceReport(parsed.id, reviewer);
@@ -566,12 +590,65 @@ async function checkVacations(client: Client, config?: BotConfig) {
       const member = await guild.members.fetch(u.discordId).catch(() => null);
 
       if (nowMs >= untilMs) {
+        /**
+         * Отпуск закрывается целиком: флаг, дата и текстовый статус.
+         *
+         * Раньше здесь сбрасывались только флаг и дата. `status` оставался
+         * "vacation", а по нему работает вход в кабинет, проверки активности
+         * (онлайн-норма, снапшоты) и сверка ролей — та самая, что на каждом
+         * цикле видит статус отпуска и снова надевает роль «Отпуск» на бойца,
+         * который уже вернулся. Получался вечный отпуск.
+         *
+         * Исключённого (dismissed) не «возвращаем в строй»: у него отпуск
+         * просто снимается, статус остаётся прежним.
+         */
+        const wasService = normalizeMemberStatus(u.status) !== MEMBER_STATUS.DISMISSED;
         await db
           .update(members)
-          .set({ vacation: false, vacationUntil: null, vacationNotified: false })
+          .set({
+            vacation: false,
+            vacationUntil: null,
+            vacationNotified: false,
+            ...(wasService ? { status: MEMBER_STATUS.ACTIVE } : {}),
+            updatedAt: new Date(),
+          })
           .where(eq(members.id, u.id));
+
+        /**
+         * Роль «Отпуск» снимается, а причина отказа Discord — в журнал.
+         *
+         * Раньше здесь стояло `.catch(() => {})`: если у бота не хватало прав
+         * или роль стояла выше роли бота, боец оставался с ролью «Отпуск», а в
+         * логах не было ни строчки. Теперь текст ошибки Discord API виден в
+         * консоли с указанием, кому именно роль не сняли.
+         */
         if (member && cfg.leaveRoleId) {
-          await member.roles.remove(cfg.leaveRoleId).catch(() => {});
+          if (!member.roles.cache.has(cfg.leaveRoleId)) {
+            console.log(
+              `[bot] Окончание отпуска: у ${logRef("user", u.name)} роли «Отпуск» нет — снимать нечего`
+            );
+          } else {
+            try {
+              await member.roles.remove(cfg.leaveRoleId);
+              console.log(
+                `[bot] Окончание отпуска: роль «Отпуск» снята с ${logRef("user", u.name)}`
+              );
+            } catch (e) {
+              console.error(
+                `[bot] Окончание отпуска: не удалось снять роль «Отпуск» с ${logRef("user", u.name)} — ` +
+                  `${e instanceof Error ? e.message : String(e)}. ` +
+                  `Проверьте права бота (Управлять ролями) и положение роли «Отпуск» в иерархии.`
+              );
+            }
+          }
+        } else if (!member) {
+          console.warn(
+            "[bot] Окончание отпуска: участник не найден на сервере (вышел?), роль «Отпуск» не снята"
+          );
+        } else if (!cfg.leaveRoleId) {
+          console.warn(
+            "[bot] Окончание отпуска: не задана роль «Отпуск» (leave_role_id) — снимать нечего"
+          );
         }
 
         if (leaveChannel && leaveChannel.isTextBased()) {
@@ -1024,14 +1101,49 @@ export function initBot() {
             : null;
 
           const untilDate = req.vacationRemove ? null : parseVacationUntil(req.vacationDates);
-          if (target && config.leaveRoleId) {
-            if (req.vacationRemove) {
-              await target.roles.remove(config.leaveRoleId).catch((e) =>
-                console.error("[bot] Не удалось снять роль «Отпуск»:", e)
-              );
+
+          /**
+           * Роль «Отпуск» — с записью точной причины отказа.
+           *
+           * `.catch(() => {})` здесь был хуже молчания: бот писал в ветку
+           * «роль выдана», даже когда Discord отказывал (нет прав, роль выше
+           * роли бота). Теперь итог операции уходит в текст ветки и в консоль.
+           */
+          let roleOutcome = "";
+          if (!config.leaveRoleId) {
+            roleOutcome = "роль «Отпуск» не настроена (leave_role_id)";
+          } else if (!target) {
+            roleOutcome = "участник Discord не найден — роль не изменена";
+          } else if (req.vacationRemove) {
+            if (!target.roles.cache.has(config.leaveRoleId)) {
+              roleOutcome = "роли «Отпуск» у бойца нет — снимать нечего";
             } else {
-              await target.roles.add(config.leaveRoleId).catch((e) =>
-                console.error("[bot] Не удалось выдать роль «Отпуск»:", e)
+              try {
+                await target.roles.remove(config.leaveRoleId);
+                roleOutcome = "роль «Отпуск» снята";
+              } catch (e) {
+                roleOutcome = `роль «Отпуск» НЕ снята: ${
+                  e instanceof Error ? e.message : String(e)
+                }`;
+                console.error(
+                  `[bot] Не удалось снять роль «Отпуск» с ${logRef("user", req.userName)}:`,
+                  e
+                );
+              }
+            }
+          } else if (target.roles.cache.has(config.leaveRoleId)) {
+            roleOutcome = "роль «Отпуск» уже была выдана";
+          } else {
+            try {
+              await target.roles.add(config.leaveRoleId);
+              roleOutcome = "роль «Отпуск» выдана";
+            } catch (e) {
+              roleOutcome = `роль «Отпуск» НЕ выдана: ${
+                e instanceof Error ? e.message : String(e)
+              }`;
+              console.error(
+                `[bot] Не удалось выдать роль «Отпуск» ${logRef("user", req.userName)}:`,
+                e
               );
             }
           }
@@ -1052,6 +1164,16 @@ export function initBot() {
                     .where(eq(members.name, req.userName)))[0]
                 : undefined);
             if (matchRow) {
+              /**
+               * Флаг, дата и текстовый статус меняются вместе.
+               *
+               * Без `status` боец, вернувшийся из отпуска, оставался
+               * "vacation" в базе — и фоновая сверка ролей на ближайшем цикле
+               * снова надевала на него роль «Отпуск». Исключённого не
+               * «возвращаем в строй»: у него снимается только отпуск.
+               */
+              const serviceMember =
+                normalizeMemberStatus(matchRow.status) !== MEMBER_STATUS.DISMISSED;
               await db
                 .update(members)
                 .set(
@@ -1060,16 +1182,22 @@ export function initBot() {
                         vacation: false,
                         vacationUntil: null,
                         vacationNotified: false,
+                        ...(serviceMember ? { status: MEMBER_STATUS.ACTIVE } : {}),
                         updatedAt: new Date(),
                       }
                     : {
                         vacation: true,
                         vacationUntil: untilDate,
                         vacationNotified: false,
+                        ...(serviceMember ? { status: MEMBER_STATUS.VACATION } : {}),
                         updatedAt: new Date(),
                       }
                 )
                 .where(eq(members.id, matchRow.id));
+            } else {
+              console.warn(
+                `[bot] Отпуск: боец ${logRef("user", req.userName)} не найден в базе — статус не синхронизирован`
+              );
             }
           } catch (e) {
             console.error("[bot] Ошибка синхронизации отпуска с БД:", e);
@@ -1084,11 +1212,14 @@ export function initBot() {
               )
               .catch(() => console.log("[bot] Не удалось отправить ЛС (закрыты DM)"));
           }
-          outcome = target
-            ? req.vacationRemove
-              ? "отпуск снят: роль убрана, БД синхронизирована, ЛС отправлено"
-              : "роль выдана, БД синхронизирована, ЛС отправлено"
-            : "участник Discord не найден — роль не изменена";
+          // Итог берём из фактического результата роли, а не из наличия
+          // участника: раньше здесь утверждалось «роль выдана» даже при отказе
+          // Discord, и модератор в ветке видел ложный успех.
+          outcome = `${
+            req.vacationRemove ? "снятие отпуска" : "отпуск"
+          }: ${roleOutcome}, статус в БД синхронизирован${
+            target ? ", ЛС отправлено" : ""
+          }`;
         } else if (isReserveRequest(req)) {
           // Запас: работа с Google Таблицей + роли Discord
           const reserveResult = await applyReserveRequest(req, guild, config);

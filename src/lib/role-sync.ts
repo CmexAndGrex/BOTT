@@ -34,6 +34,7 @@ import {
   SUBDIV_ROLE_IDS,
   resolveBeretRoleId,
 } from "@/lib/roles";
+import { normalizeMemberStatus } from "@/lib/recruits";
 
 /* ------------------------------------------------------------------ */
 /* Модель участника и контекст сервера                                  */
@@ -214,6 +215,16 @@ export type DesiredRoles = {
   add: Set<string>;
   /** Что явно не должно быть на бойце (только из справочника ролей клана) */
   remove: Set<string>;
+  /**
+   * Роли статуса службы: снимаются даже при неполной карточке.
+   *
+   * «Отпуск» и «Запас» — не звание и не должность: они зависят только от
+   * состояния бойца (отпуск / запас), а не от заполненности звания и
+   * подразделения. Держать их в общем `remove` нельзя: неполная карточка
+   * блокирует все снятия, и боец, вернувшийся из отпуска без указанного
+   * подразделения, остался бы с ролью «Отпуск» навсегда.
+   */
+  removeAlways: Set<string>;
   /** Человекочитаемое пояснение для журнала */
   notes: string[];
   /** Данные неполные: карточку нельзя использовать для снятия ролей */
@@ -235,6 +246,7 @@ export function desiredRoles(member: RoleSyncMember, context: RoleSyncContext = 
   const notes: string[] = [];
   const add = new Set<string>();
   const remove = new Set<string>();
+  const removeAlways = new Set<string>();
 
   const dismissed = !member.active || member.status === "dismissed";
   // «В запасе» отличаем от «вышел» по роли, которая уже стоит на сервере: в
@@ -243,8 +255,28 @@ export function desiredRoles(member: RoleSyncMember, context: RoleSyncContext = 
   const currentRoles = new Set(context.currentRoleIds || []);
   const inReserve =
     dismissed && !!context.reserveRoleId && currentRoles.has(context.reserveRoleId as string);
-  const onVacation = !dismissed && (member.vacation || member.status === "vacation");
-  const pending = member.status === "pending";
+  /**
+   * Отпуск определяется по двум источникам, и оба обязательны.
+   *
+   * `member.vacation` — то, что ставит панель, бот и шедулер; `status` — то,
+   * что видит вход в кабинет. Значения статуса приходят из разных систем
+   * («vacation», «on_vacation», «В отпуске»), поэтому сравнение идёт через
+   * normalizeMemberStatus: строгое `=== "vacation"` не узнавало алиасы, и
+   * боец в отпуске, записанный как «on_vacation», терял роль «Отпуск» на
+   * ближайшем цикле.
+   *
+   * Важно: нормализация применяется ТОЛЬКО к отпуску. Статус `pending` и
+   * `dismissed` остаются строгими намеренно — там от признака зависит СНЯТИЕ
+   * ролей клана, и «неизвестное значение» (normalizeMemberStatus сводит его к
+   * pending) вычистило бы бойцу всё звание на первом же цикле. Ошибка в
+   * сторону «ничего не снято» безопаснее, чем ошибка в сторону «снято всё».
+   */
+  const statusKind = normalizeMemberStatus(member.status);
+  const onVacation = !dismissed && (member.vacation || statusKind === "vacation");
+  const pending = member.status === "pending" || member.status === "new";
+
+  // Роль «Отпуск» снимается по состоянию службы, а не по заполненности карточки
+  const leaveId = (context.leaveRoleId || "").trim();
 
   if (pending) {
     // Рапорт на рассмотрении: боец ещё не в составе, поэтому утверждать можно
@@ -252,26 +284,29 @@ export function desiredRoles(member: RoleSyncMember, context: RoleSyncContext = 
     // при одобрении заявки (review.ts) и здесь не трогается.
     notes.push("рапорт на рассмотрении — роли клана не выдаются");
     for (const id of CLAN_ROLE_IDS) remove.add(id);
-    return { add, remove, notes, complete: true, rankRoleId: null, subdiv: null };
+    // Заявка не может быть «в отпуске»: если роль осталась от прежней службы,
+    // её нужно снять — это состояние службы, оно известно доподлинно.
+    if (leaveId) removeAlways.add(leaveId);
+    return { add, remove, removeAlways, notes, complete: true, rankRoleId: null, subdiv: null };
   }
 
   if (inReserve) {
     notes.push("в запасе — роли клана сняты, выдана роль «Запас»");
     for (const id of CLAN_ROLE_IDS) remove.add(id);
-    if (context.leaveRoleId) remove.add(context.leaveRoleId);
+    if (leaveId) removeAlways.add(leaveId);
     remove.delete(context.reserveRoleId as string);
     add.add(context.reserveRoleId as string);
-    return { add, remove, notes, complete: true, rankRoleId: null, subdiv: null };
+    return { add, remove, removeAlways, notes, complete: true, rankRoleId: null, subdiv: null };
   }
 
   if (dismissed) {
     // Вышел из подразделения: клан-роли снимаются, боец остаётся «Друг АТК».
     notes.push("вне состава — роли клана сняты, выдана роль «Друг АТК»");
     for (const id of CLAN_ROLE_IDS) remove.add(id);
-    if (context.leaveRoleId) remove.add(context.leaveRoleId);
+    if (leaveId) removeAlways.add(leaveId);
     if (context.reserveRoleId) remove.add(context.reserveRoleId);
     add.add(COMMON_ROLE_IDS.FRIEND);
-    return { add, remove, notes, complete: true, rankRoleId: null, subdiv: null };
+    return { add, remove, removeAlways, notes, complete: true, rankRoleId: null, subdiv: null };
   }
 
   // Звание: карточка панели важнее табеля rs-red.com. В панели звание правит
@@ -346,12 +381,13 @@ export function desiredRoles(member: RoleSyncMember, context: RoleSyncContext = 
     notes.push(`должность «${member.post}» — роль назначена`);
   }
 
-  // Отпуск
-  if (onVacation && context.leaveRoleId) {
-    add.add(context.leaveRoleId);
+  // Отпуск: выдача зависит от состояния службы, снятие — тоже, поэтому снятие
+  // идёт в removeAlways и не блокируется неполной карточкой.
+  if (onVacation && leaveId) {
+    add.add(leaveId);
     notes.push("в отпуске — выдана роль «Отпуск»");
-  } else if (context.leaveRoleId) {
-    remove.add(context.leaveRoleId);
+  } else if (leaveId) {
+    removeAlways.add(leaveId);
   }
 
   // Роль запаса в строю быть не должна
@@ -369,7 +405,7 @@ export function desiredRoles(member: RoleSyncMember, context: RoleSyncContext = 
     }
   }
 
-  return { add, remove, notes, complete, rankRoleId, subdiv };
+  return { add, remove, removeAlways, notes, complete, rankRoleId, subdiv };
 }
 
 /**
@@ -482,9 +518,29 @@ export function computeRoleDelta(
     remove.push(id);
   }
 
-  // Неполная карточка: добавляем известное, но ничего не снимаем
+  /**
+   * Роли состояния службы («Отпуск») снимаются независимо от полноты карточки.
+   *
+   * Неполная карточка блокирует снятие ЗВАНИЙ и должностей — данных нет, и
+   * «не знаю» не означает «снять». Но отпуск к званию отношения не имеет:
+   * если боец вернулся (vacation = false), роль «Отпуск» должна уйти даже при
+   * пустом подразделении. Иначе боец, вернувшийся из отпуска без указанного
+   * подразделения, оставался бы с ролью «Отпуск» навсегда, а сверка на каждом
+   * цикле сообщала бы «данные неполные» вместо исправления.
+   */
+  const removeAlways: string[] = [];
+  for (const id of desired.removeAlways) {
+    if (!id) continue;
+    if (isEveryone(id) || isManaged(id) || isProtected(id)) continue;
+    if (!inOurCatalog(id)) continue;
+    if (!current.has(id)) continue;
+    if (remove.includes(id)) continue; // уже учтена обычным путём
+    removeAlways.push(id);
+  }
+
+  // Неполная карточка: добавляем известное, но снимаем только состояние службы
   const incomplete = !desired.complete;
-  const effectiveRemove = incomplete ? [] : remove;
+  const effectiveRemove = incomplete ? removeAlways : [...remove, ...removeAlways];
   const notes = [...desired.notes];
 
   if (incomplete && remove.length) {

@@ -23,7 +23,7 @@ import {
   validateReportPayload,
   type ServiceReportType,
 } from "@/lib/reports";
-import { publishReviewMessage, reportsChannelId } from "@/lib/review";
+import { publishReviewMessage, reportChannelIdFor } from "@/lib/review";
 import { LoginThrottle } from "@/lib/recruits";
 import { registerThrottle } from "@/lib/throttle-registry";
 
@@ -133,24 +133,38 @@ export async function POST(req: NextRequest) {
 
     throttle.registerFailure(throttleKey);
 
-    // Публикация в канале рапортов: ошибка Discord не отменяет рапорт —
-    // он уже в БД и виден модератору в панели
-    const channelId = await reportsChannelId();
-    const published = await publishReviewMessage(
-      channelId,
-      "report",
-      created.id,
-      buildReportEmbed({
-        id: created.id,
-        type,
-        callsign: created.callsign,
-        unit: auth.member.unit,
-        rank: auth.member.rank,
-        payload,
-        createdAt: created.createdAt,
-        status: "pending",
-      })
-    );
+    /**
+     * Канал зависит от типа рапорта (требование):
+     *   * role — канал «запрос-ролей» (roles_channel_id / DISCORD_ROLE_REQUESTS_CHANNEL_ID);
+     *   * vacation — канал «отпуска» (vacation_channel_id / DISCORD_VACATION_CHANNEL_ID);
+     *   * остальные служебные — журнал рапортов (reports_channel_id → ШДС).
+     *
+     * Отсутствие канала — предупреждение, а не ошибка: рапорт уже в БД и виден
+     * штабу в /admin/reports. Ронять создание рапорта из-за настройки нельзя.
+     */
+    const channelId = await reportChannelIdFor(type);
+    if (!channelId) {
+      console.warn(
+        `[reports] Рапорт #${created.id} (${type}): канал Discord не настроен — публикация только в панели модерации`
+      );
+    }
+    const published = channelId
+      ? await publishReviewMessage(
+          channelId,
+          "report",
+          created.id,
+          buildReportEmbed({
+            id: created.id,
+            type,
+            callsign: created.callsign,
+            unit: auth.member.unit,
+            rank: auth.member.rank,
+            payload,
+            createdAt: created.createdAt,
+            status: "pending",
+          })
+        )
+      : { ok: false as const, error: "Канал Discord не настроен" };
 
     if (published.ok) {
       await db
@@ -169,13 +183,26 @@ export async function POST(req: NextRequest) {
         "Рапорт": `#${created.id}`,
         "Суть": summarizeReport(type, payload),
         "IP": requestIp(req),
-        "Публикация": published.ok ? "в канал рапортов" : "только в панели",
+        "Канал": channelId || "не настроен",
+        "Публикация": published.ok ? "в канал Discord" : "только в панели",
       },
       kind: "system",
       title: "Новый рапорт",
       detail: `${created.callsign}: ${reportTypeMeta(type).label}`,
       ok: true,
     });
+
+    /**
+     * Куда именно ушёл рапорт — для интерфейса. Тексты разные намеренно:
+     * «отправлен в канал рапортов» на рапорте об отпуске сбивало бы с толку,
+     * ведь он публикуется в канал отпусков.
+     */
+    const channelLabel =
+      type === "role"
+        ? "запросов ролей"
+        : type === "vacation"
+          ? "отпусков"
+          : "рапортов";
 
     return NextResponse.json({
       ok: true,
@@ -184,7 +211,7 @@ export async function POST(req: NextRequest) {
       // Эта строка показывается, если канал не настроен: рапорт принят,
       // решение будет принято штабом в панели модерации
       notice: published.ok
-        ? "Рапорт отправлен в канал рапортов"
+        ? `Рапорт отправлен в канал ${channelLabel}`
         : "Рапорт принят и виден штабу в панели модерации",
     });
   } catch (e) {

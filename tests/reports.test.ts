@@ -25,8 +25,10 @@ import {
   isCommandPost,
   isCommandSection,
   isReasonableIsoDate,
+  buildRecruitApplicationMessage,
   isReviewStatus,
   isServiceReportType,
+  recruitDirectionHint,
   missingSectionExams,
   normalizeExamCode,
   parseReviewCustomId,
@@ -842,8 +844,33 @@ describe("CustomId кнопок Discord", () => {
     });
   });
 
-  test("область различает таблицы: id заявки и рапорта могут совпасть", () => {
+  test("custom_id заявки соответствует ТЗ: approve_recruit_<id>", () => {
+    // Требование задаёт точный формат кнопок модерации заявок
+    assert.equal(reviewCustomId("recruit", "approve", 12), "approve_recruit_12");
+    assert.equal(reviewCustomId("recruit", "reject", 12), "reject_recruit_12");
+    assert.deepEqual(parseReviewCustomId("approve_recruit_12"), {
+      scope: "recruit",
+      action: "approve",
+      id: 12,
+    });
+  });
+
+  test("сообщения до обновления продолжают работать (старый формат)", () => {
+    // Кнопки, отправленные прежде, не должны «осиротеть» после деплоя
     assert.deepEqual(parseReviewCustomId("recruit_approve_7"), {
+      scope: "recruit",
+      action: "approve",
+      id: 7,
+    });
+    assert.deepEqual(parseReviewCustomId("recruit_reject_7"), {
+      scope: "recruit",
+      action: "reject",
+      id: 7,
+    });
+  });
+
+  test("область различает таблицы: id заявки и рапорта могут совпасть", () => {
+    assert.deepEqual(parseReviewCustomId("approve_recruit_7"), {
       scope: "recruit",
       action: "approve",
       id: 7,
@@ -864,6 +891,8 @@ describe("CustomId кнопок Discord", () => {
       "report_approve_0",
       "report_approve_abc",
       "report_approve_99999999999999",
+      "approve_recruit_0",
+      "approve_recruit_abc",
       undefined,
       null,
     ]) {
@@ -964,6 +993,58 @@ describe("Embed-сообщения Discord", () => {
     });
     assert.equal(field(embed, "Discord"), "volk (ID: 1085141850966458519)");
     assert.equal(field(embed, "Решение"), "Офицер Барс · ЛК выслан");
+  });
+});
+
+describe("Текст заявки на вступление для канала запросов", () => {
+  test("направление берётся из анкеты, а не угадывается", () => {
+    assert.equal(recruitDirectionHint("Хочу в танкисты"), "Танковая рота (ТР)");
+    assert.equal(recruitDirectionHint("мечтаю об артиллерии"), "Артиллерийский дивизион (АД)");
+    assert.equal(recruitDirectionHint("только из орудия"), "Артиллерийский дивизион (АД)");
+    // Молчание кандидата — не повод записать его в чужой лист
+    assert.equal(recruitDirectionHint(""), "определяет штаб");
+    assert.equal(recruitDirectionHint(null), "определяет штаб");
+  });
+
+  test("строгий формат из ТЗ: шесть пунктов и упоминание автора заявки", () => {
+    const text = buildRecruitApplicationMessage({
+      fullName: "Иванов И.И.",
+      callsign: "Волк",
+      about: "Хочу в танкисты",
+      age: 22,
+      armaExperience: "600 часов",
+      discordId: "1085141850966458519",
+      discordTag: "volk",
+      commanderMention: "<@&1084735958399852544>",
+    });
+
+    assert.match(text, /Заявка на вступление/);
+    assert.match(text, /1\. ФИО: Иванов И\.И\./);
+    assert.match(text, /2\. Направление: Танковая рота \(ТР\)/);
+    assert.match(text, /3\. Возраст: 22/);
+    assert.match(text, /4\. Опыт в Arma 3: 600 часов/);
+    // Упоминание человека, а не голый ID: по нему видно, кого принимать
+    assert.match(text, /5\. Discord: <@1085141850966458519> \(volk\)/);
+    assert.match(text, /6\. Пинг: <@&1084735958399852544>/);
+  });
+
+  test("пустые поля не ломают сообщение и не выдумывают данных", () => {
+    const text = buildRecruitApplicationMessage({
+      fullName: null,
+      callsign: "Волк",
+      about: null,
+      age: null,
+      armaExperience: "",
+      discordId: null,
+      discordTag: null,
+      commanderMention: null,
+    });
+
+    assert.match(text, /1\. ФИО: не указано/);
+    assert.match(text, /3\. Возраст: —/);
+    assert.match(text, /5\. Discord: не указан/);
+    // Пинг несуществующей роли выглядел бы как «@unknown-role»
+    assert.match(text, /6\. Пинг: командиры подразделения не заданы/);
   });
 });
 

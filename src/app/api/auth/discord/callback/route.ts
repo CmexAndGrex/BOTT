@@ -32,6 +32,7 @@ import {
 import { isPanelStaffRole, browserOrigin, normalizeDiscordSnowflake } from "@/lib/validation";
 import {
   hasProfileAccess,
+  MEMBER_STATUS,
   normalizeMemberStatus,
   normalizePersonName,
   type MemberRole,
@@ -40,6 +41,7 @@ import { resolvePanelRights } from "@/lib/panel-rights";
 import {
   discordRedirectUri,
   exchangeDiscordCode,
+  healMemberAccessOnLogin,
   issueMemberSession,
   MEMBER_OAUTH_LINK_COOKIE,
   MEMBER_OAUTH_PENDING_COOKIE,
@@ -403,8 +405,22 @@ async function resolveMemberForLogin(
 async function handleLogin(req: NextRequest, profile: DiscordProfile): Promise<NextResponse> {
   const panel = await issuePanelSessionForDiscord(profile);
   const member = await resolveMemberForLogin(profile);
-  const status = member ? normalizeMemberStatus(member.status) : null;
-  const hasAccess = member ? hasProfileAccess(member.status) : false;
+
+  /**
+   * Самоисцеление статуса (требование «железной» авторизации).
+   *
+   * Порядок проверок: сначала сам факт записи в division_members, и только
+   * потом статус. Если боец в табеле есть и он не `dismissed`, доступ даётся
+   * ВСЕГДА, а `pending`/NULL в БД приводится к `active` прямо здесь. Это
+   * убирает случай «человек в составе, но видит плашку ожидания»: такая
+   * плашка теперь возможна только при отсутствии строки в табеле.
+   */
+  let status = member ? normalizeMemberStatus(member.status) : null;
+  if (member && status === MEMBER_STATUS.PENDING) {
+    status = await healMemberAccessOnLogin({ id: member.id, status: member.status });
+    member.status = status;
+  }
+  const hasAccess = member ? hasProfileAccess(status) : false;
 
   /* --- 1. Боец есть в составе ---------------------------------------- */
   if (member) {

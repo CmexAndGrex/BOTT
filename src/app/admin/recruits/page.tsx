@@ -141,6 +141,18 @@ export default function AdminRecruitsPage() {
       if (data.sheets && !data.sheets.ok) {
         problems.push(`Боец зачислен, но запись в Google Таблицу не удалась: ${data.sheets.error}`);
       }
+      /**
+       * Роль Discord «Отпуск»: если она не изменилась (нет прав у бота, роль
+       * выше роли бота, не привязан Discord ID), решение по рапорту уже
+       * принято, и молчать нельзя — штаб считал бы отпуск оформленным полностью.
+       */
+      if (data.vacationRole && !data.vacationRole.ok) {
+        problems.push(
+          `Решение сохранено, но роль Discord «Отпуск» не изменена: ${
+            data.vacationRole.error || data.vacationRole.message
+          }`
+        );
+      }
       if (action === "approve" && data.tempPassword && !data.dmSent) {
         problems.push(
           `ЛС не доставлено (закрыты личные сообщения). Логин: ${data.login}, временный пароль: ${data.tempPassword}`

@@ -32,6 +32,7 @@ import {
 import { recruitDmText, refreshRecruitMessage } from "@/lib/review";
 import { statusTrackingFields } from "@/lib/roles-monitor";
 import { generateTempPassword } from "@/lib/temp-password";
+import { applyVacationRole } from "@/lib/vacation-roles";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -190,6 +191,23 @@ export async function PATCH(req: NextRequest) {
       }
     }
 
+    /**
+     * Роль Discord «Отпуск» — по тем же правилам, что и кнопка в табеле.
+     *
+     * Ошибка Discord не отменяет решение штаба: в базе отпуск уже стоит.
+     * Поэтому результат уходит в ответ (панель предупредит модератора) и в
+     * журнал, но не превращается в 500.
+     */
+    let vacationRole: Awaited<ReturnType<typeof applyVacationRole>> | null = null;
+    if (action === "vacation" || action === "reactivate") {
+      vacationRole = await applyVacationRole({
+        discordId: updated.discordId,
+        vacation: action === "vacation",
+        memberName: updated.callsign || updated.name,
+        source: action === "vacation" ? "решение по рапорту: отпуск" : "решение по рапорту: возврат",
+      });
+    }
+
     await db.insert(logs).values({
       category: "edit",
       author,
@@ -199,6 +217,13 @@ export async function PATCH(req: NextRequest) {
         "Статус": updated.status,
         "Звание": updated.rank,
         "Подразделение": updated.unit || "не назначено",
+        ...(vacationRole
+          ? {
+              "Роль «Отпуск»": vacationRole.ok
+                ? vacationRole.message
+                : `не изменена: ${vacationRole.error ?? vacationRole.message}`,
+            }
+          : {}),
         ...(tempPassword
           ? { "ЛС с доступом": dmSent ? "доставлено" : "не доставлено" }
           : {}),
@@ -224,6 +249,16 @@ export async function PATCH(req: NextRequest) {
       ok: true,
       status: updated.status,
       sheets,
+      // Итог по роли Discord: модератор должен видеть, что она не изменилась
+      // (нет прав, роль выше роли бота, нет Discord ID) — решение уже принято
+      vacationRole: vacationRole
+        ? {
+            ok: vacationRole.ok,
+            action: vacationRole.action,
+            message: vacationRole.message,
+            error: vacationRole.error ?? null,
+          }
+        : null,
       // Если ЛС закрыто, модератор видит логин и временный пароль и передаёт их сам
       dmSent: tempPassword ? dmSent : undefined,
       tempPassword: tempPassword || undefined,
@@ -549,6 +584,37 @@ function buildPatch(member: MemberRow, body: UpdateBody, action: Action): PatchR
   }
 
   values.status = nextStatus ?? member.status;
+
+  /**
+   * Флаг отпуска ведётся вместе со статусом.
+   *
+   * Раньше действие «vacation» ставило только `status = "vacation"`, а флаг
+   * `members.vacation` оставался false. Последствия: шедулер окончания отпуска
+   * выбирает именно `vacation = true`, поэтому такой отпуск никогда не
+   * закрывался, а боец исключался из пингов и статистики навсегда. Обратная
+   * ошибка была у «reactivate»: статус возвращался в active, а флаг — нет, и
+   * боец оставался «в отпуске» по данным, на которые смотрит вся остальная
+   * логика (норма часов, снапшоты, сводки).
+   *
+   * Дата возвращения при возврате из отпуска снимается: это закрытый отпуск,
+   * и оставшийся срок показывал бы бейдж «в отпуске · до …» у бойца в строю.
+   */
+  if (action === "vacation") {
+    values.vacation = true;
+    // Дата не задана: отпуск бессрочный, шедулер его не тронет — закрыть
+    // сможет только штаб. Это осознанный выбор модератора, а не сбой.
+    values.vacationNotified = false;
+  } else if (action === "reactivate") {
+    values.vacation = false;
+    values.vacationUntil = null;
+    values.vacationNotified = false;
+  } else if (action === "reject") {
+    // Отклонённая заявка не может остаться «в отпуске»: вход закрыт, и срок
+    // отпуска держал бы бойца в выборке шедулера.
+    values.vacation = false;
+    values.vacationUntil = null;
+    values.vacationNotified = false;
+  }
 
   // Фиксация момента исключения/возврата в строй: по dismissedAt фоновая
   // задача контроля ролей отсчитывает сутки до напоминания комсоставу о

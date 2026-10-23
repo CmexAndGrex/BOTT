@@ -369,9 +369,13 @@ describe("Решение по заявке зависит от её вида", (
 
   test("панель модерации и кнопки Discord решают одинаково", () => {
     // Копия выбора в двух местах разошлась бы: из сайта зачисляло бы, а из
-    // Discord восстанавливало (или наоборот)
+    // Discord восстанавливало (или наоборот).
+    //
+    // Из бота дополнительно передаётся Discord ID нажавшего — по требованию
+    // сообщение должно сказать «Одобрено модератором @ник». Поэтому вызов
+    // проверяется по имени функции и её первому аргументу, а не дословно.
     assert.match(read("src/app/api/admin/reports/route.ts"), /approveRecruitByKind\(id, reviewer\)/);
-    assert.match(read("src/lib/bot.ts"), /approveRecruitByKind\(parsed\.id, reviewer\)/);
+    assert.match(read("src/lib/bot.ts"), /approveRecruitByKind\(parsed\.id, reviewer,/);
   });
 
   test("возврат восстанавливает бойца, а не создаёт нового", () => {

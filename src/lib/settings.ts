@@ -11,6 +11,29 @@ import { settings } from "@/db/schema";
  */
 export const RECRUIT_CHANNEL_SETTING = "recruits_channel_id";
 export const REPORTS_CHANNEL_SETTING = "reports_channel_id";
+/**
+ * Канал запросов на роли/специальность и канал отпусков.
+ *
+ * Это те же ключи, которыми уже пользуется бот (loadBotConfig в bot.ts):
+ * отдельного дубля «channel_role_requests» нет намеренно — одна настройка
+ * должна означать одно и то же и для бота, и для публикации рапортов с сайта.
+ */
+export const ROLE_REQUESTS_CHANNEL_SETTING = "roles_channel_id";
+export const VACATION_CHANNEL_SETTING = "vacation_channel_id";
+
+/**
+ * Запасные источники ID каналов — переменные окружения.
+ *
+ * Нужны для установок, где настройки панели ещё не заполнены (свежий деплой,
+ * запуск из .env без базы): рапорт при этом не теряется, а уходит в правильный
+ * канал. Порядок разрешения всегда один: значение из панели, затем env.
+ */
+export const CHANNEL_ENV_FALLBACKS: Record<string, string> = {
+  [RECRUIT_CHANNEL_SETTING]: "DISCORD_RECRUITS_CHANNEL_ID",
+  [REPORTS_CHANNEL_SETTING]: "DISCORD_REPORTS_CHANNEL_ID",
+  [ROLE_REQUESTS_CHANNEL_SETTING]: "DISCORD_ROLE_REQUESTS_CHANNEL_ID",
+  [VACATION_CHANNEL_SETTING]: "DISCORD_VACATION_CHANNEL_ID",
+};
 
 export const DEFAULT_SETTINGS: Record<string, string> = {
   // Discord

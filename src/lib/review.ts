@@ -20,6 +20,7 @@ import {
 import type { DiscordEmbed } from "@/lib/discord";
 import {
   BERET_CODE,
+  buildRecruitApplicationMessage,
   buildRecruitEmbed,
   buildReportEmbed,
   columnExamFor,
@@ -52,7 +53,14 @@ import {
 import { COMMON_ROLE_IDS } from "@/lib/roles";
 import { statusTrackingFields } from "@/lib/roles-monitor";
 import { isBeretPassed } from "@/lib/exams";
-import { getSettings } from "@/lib/settings";
+import {
+  CHANNEL_ENV_FALLBACKS,
+  getSettings,
+  RECRUIT_CHANNEL_SETTING,
+  REPORTS_CHANNEL_SETTING,
+  ROLE_REQUESTS_CHANNEL_SETTING,
+  VACATION_CHANNEL_SETTING,
+} from "@/lib/settings";
 // Сданные нормативы можно проставить правкой таблицы, а не рапортом через
 // панель: без чтения отметок из листа ШДС зачёт берёта и требований ступени
 // опирался бы только на электронные рапорты и пропускал ручные отметки.
@@ -410,7 +418,13 @@ export type ApproveRecruitResult = ReviewOutcome & {
  */
 export async function approveRecruitByKind(
   applicationId: number,
-  reviewer: string
+  reviewer: string,
+  /**
+   * Discord ID модератора, если решение принято кнопкой в канале. Нужен,
+   * чтобы обновлённое сообщение содержало «Одобрено модератором @ник»
+   * (требование). Из веб-панели значения нет — подписываем позывным.
+   */
+  reviewerDiscordId?: string | null
 ): Promise<ApproveRecruitResult> {
   const [application] = await db
     .select({ kind: recruitApplications.kind })
@@ -420,8 +434,8 @@ export async function approveRecruitByKind(
   if (!application) return { ok: false, message: NOT_FOUND, error: NOT_FOUND };
 
   return application.kind === APPLICATION_KIND_RESERVE_RETURN
-    ? approveReserveReturn(applicationId, reviewer)
-    : approveRecruitApplication(applicationId, reviewer);
+    ? approveReserveReturn(applicationId, reviewer, reviewerDiscordId)
+    : approveRecruitApplication(applicationId, reviewer, reviewerDiscordId);
 }
 
 /**
@@ -445,7 +459,8 @@ export async function approveRecruitByKind(
  */
 export async function approveReserveReturn(
   applicationId: number,
-  reviewer: string
+  reviewer: string,
+  reviewerDiscordId?: string | null
 ): Promise<ApproveRecruitResult> {
   const [application] = await db
     .select()
@@ -569,7 +584,11 @@ export async function approveReserveReturn(
     });
 
     if (decided) {
-      await refreshRecruitMessage({ ...decided, status: "approved" }, outcome);
+      await refreshRecruitMessage(
+        { ...decided, status: "approved" },
+        outcome,
+        reviewerDiscordId
+      );
     }
 
     return {
@@ -601,7 +620,8 @@ export async function approveReserveReturn(
  */
 export async function approveRecruitApplication(
   applicationId: number,
-  reviewer: string
+  reviewer: string,
+  reviewerDiscordId?: string | null
 ): Promise<ApproveRecruitResult> {
   const [application] = await db
     .select()
@@ -950,7 +970,9 @@ export async function approveRecruitApplication(
       `обновление сообщения заявки #${applicationId}`,
       () =>
         refreshRecruitMessage(
-          decided ?? { ...application, status: "approved" as ReviewStatus, memberId }
+          decided ?? { ...application, status: "approved" as ReviewStatus, memberId },
+          null,
+          reviewerDiscordId
         ),
       false
     );
@@ -987,7 +1009,8 @@ export async function approveRecruitApplication(
 export async function rejectRecruitApplication(
   applicationId: number,
   reviewer: string,
-  reason = ""
+  reason = "",
+  reviewerDiscordId?: string | null
 ): Promise<ReviewOutcome> {
   const [application] = await db
     .select()
@@ -1021,7 +1044,13 @@ export async function rejectRecruitApplication(
 
     // Статус в объекте подменяем до вызова: embed строится «как есть», а
     // updated из RETURNING уже содержит rejected — здесь это явная страховка
-    if (updated) await refreshRecruitMessage({ ...updated, status: "rejected" });
+    if (updated) {
+      await refreshRecruitMessage(
+        { ...updated, status: "rejected" },
+        comment ? `причина: ${comment}` : null,
+        reviewerDiscordId
+      );
+    }
 
     return {
       ok: true,
@@ -1479,24 +1508,68 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
  */
 export type PublishResult = { ok: true; messageId: string; channelId: string } | { ok: false; error: string };
 
+/**
+ * ID канала из настроек панели, при пустом значении — из окружения.
+ *
+ * Одна точка разрешения на все каналы: если правило «панель, затем env»
+ * расписать по функциям, оно неизбежно разойдётся (в одном месте забудут env,
+ * в другом — обрезку пробелов), и рапорт уйдёт не туда при смене настроек.
+ */
+async function configuredChannel(settingKey: string, envKey: string): Promise<string> {
+  const map = await getSettings();
+  return (
+    (map.get(settingKey) || "").trim() || (process.env[envKey] || "").trim()
+  );
+}
+
 /** Канал рапортов: настройка панели, при её отсутствии — канал ШДС */
 export async function reportsChannelId(): Promise<string> {
   const map = await getSettings();
-  return (
-    (map.get("reports_channel_id") || "").trim() ||
-    (process.env.DISCORD_REPORTS_CHANNEL_ID || "").trim() ||
-    (map.get("shds_channel_id") || "").trim()
+  const channel = await configuredChannel(
+    REPORTS_CHANNEL_SETTING,
+    CHANNEL_ENV_FALLBACKS[REPORTS_CHANNEL_SETTING]
   );
+  // ШДС — последний запасной вариант: заявка не должна «исчезнуть» из-за
+  // незаполненной настройки нового канала
+  return channel || (map.get("shds_channel_id") || "").trim();
 }
 
 /** Канал заявок на вступление: настройка панели, при её отсутствии — канал ШДС */
 export async function recruitsChannelId(): Promise<string> {
   const map = await getSettings();
-  return (
-    (map.get("recruits_channel_id") || "").trim() ||
-    (process.env.DISCORD_RECRUITS_CHANNEL_ID || "").trim() ||
-    (map.get("shds_channel_id") || "").trim()
+  const channel = await configuredChannel(
+    RECRUIT_CHANNEL_SETTING,
+    CHANNEL_ENV_FALLBACKS[RECRUIT_CHANNEL_SETTING]
   );
+  return channel || (map.get("shds_channel_id") || "").trim();
+}
+
+/**
+ * Канал для рапорта по его типу.
+ *
+ * Зачем разделение: требования говорят, что рапорт на смену роли/специальности
+ * идёт в канал запросов ролей, отпуск — в канал отпусков, а остальные
+ * служебные — в журнал рапортов. Очередь модерации при этом одна
+ * (/admin/reports), поэтому от выбора канала решение не зависит — теряется
+ * только удобство, а не сам рапорт.
+ *
+ * Пустой результат означает «канал не настроен»: вызывающий код обязан
+ * записать предупреждение и НЕ ронять создание рапорта.
+ */
+export async function reportChannelIdFor(type: string): Promise<string> {
+  if (type === "role") {
+    return configuredChannel(
+      ROLE_REQUESTS_CHANNEL_SETTING,
+      CHANNEL_ENV_FALLBACKS[ROLE_REQUESTS_CHANNEL_SETTING]
+    );
+  }
+  if (type === "vacation") {
+    return configuredChannel(
+      VACATION_CHANNEL_SETTING,
+      CHANNEL_ENV_FALLBACKS[VACATION_CHANNEL_SETTING]
+    );
+  }
+  return reportsChannelId();
 }
 
 /**
@@ -1511,7 +1584,19 @@ export async function publishReviewMessage(
   channelId: string,
   scope: "recruit" | "report",
   id: number,
-  embed: DiscordEmbed
+  embed: DiscordEmbed,
+  /**
+   * Необязательный текст сообщения над Embed и упоминания.
+   *
+   * Нужен заявкам на вступление: требование задаёт строгий текстовый формат и
+   * пинг командиров подразделения, а Discord не подсвечивает упоминания,
+   * зашитые в Embed. Для рапортов текст не передаётся — свободный текст бойца
+   * в упоминаниях не нужен.
+   */
+  extra: {
+    content?: string;
+    allowed_mentions?: { parse?: string[]; roles?: string[]; users?: string[] };
+  } = {}
 ): Promise<PublishResult> {
   const channel = realDiscordId(channelId);
   if (!channelId) {
@@ -1526,6 +1611,7 @@ export async function publishReviewMessage(
   try {
     const { sendChannelMessage } = await import("@/lib/discord");
     const message = await sendChannelMessage(channel, {
+      ...(extra.content ? { content: extra.content } : {}),
       embeds: [embed],
       components: [
         {
@@ -1533,7 +1619,8 @@ export async function publishReviewMessage(
           components: [
             {
               custom_id: reviewCustomId(scope, "approve", id),
-              label: "✅ Одобрить",
+              // Заявку «принимают», рапорт «одобряют» — термины из ТЗ
+              label: scope === "recruit" ? "✅ Принять" : "✅ Одобрить",
               style: 3,
             },
             {
@@ -1544,14 +1631,36 @@ export async function publishReviewMessage(
           ],
         },
       ],
-      // Упоминаний нет: Embed содержит позывные и свободный текст бойца
-      allowed_mentions: { parse: [], users: [], roles: [] },
+      // По умолчанию упоминаний нет: Embed содержит позывные и свободный текст
+      // бойца. Заявка на вступление передаёт явный список ролей для пинга.
+      allowed_mentions: extra.allowed_mentions ?? { parse: [], users: [], roles: [] },
     });
     return { ok: true, messageId: message.id, channelId: channel };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     console.warn(DISCORD_WARNING, `публикация ${scope} #${id}`, e);
     return { ok: false, error };
+  }
+}
+
+/**
+ * Упоминание командиров для пинга в заявке на вступление.
+ *
+ * Берём роль «Командирский состав», при её отсутствии — роль модератора
+ * заявок: это те же ID, по которым бот проверяет права нажавшего на кнопку,
+ * поэтому пинг и права всегда указывают на один круг лиц. Пусто — пинг не
+ * ставим: несуществующая роль в тексте выглядит как «@unknown-role».
+ */
+async function commandersMention(): Promise<string | null> {
+  try {
+    const map = await getSettings();
+    const roleId =
+      (map.get("command_role_id") || "").trim() ||
+      (map.get("moderator_role_id") || "").trim();
+    return realDiscordId(roleId) ? `<@&${realDiscordId(roleId)}>` : null;
+  } catch (e) {
+    console.warn("[review] Не удалось прочитать роли командиров для пинга:", e);
+    return null;
   }
 }
 
@@ -1565,6 +1674,7 @@ export async function publishReviewMessage(
 export async function publishRecruitApplication(
   application: typeof recruitApplications.$inferSelect
 ): Promise<PublishResult> {
+  const mention = await commandersMention();
   const published = await publishReviewMessage(
     await recruitsChannelId(),
     "recruit",
@@ -1582,7 +1692,27 @@ export async function publishRecruitApplication(
       // Модератор сразу видит, что это возврат из запаса, а не зачисление
       kind: application.kind,
       fullName: application.fullName,
-    })
+    }),
+    {
+      // Строгий текстовый формат из требований: он же — единственное место,
+      // где упоминание командиров реально подсвечивается (в Embed — нет)
+      content: buildRecruitApplicationMessage({
+        fullName: application.fullName,
+        callsign: application.callsign,
+        about: application.about,
+        age: application.age,
+        armaExperience: application.armaExperience || "",
+        discordId: realDiscordId(application.discordId) || null,
+        discordTag: application.discordTag,
+        commanderMention: mention,
+      }),
+      allowed_mentions: {
+        parse: [],
+        users: [],
+        // Пинг разрешён только для роли командиров — не для текста кандидата
+        roles: mention ? [mention.replace(/[^\d]/g, "")] : [],
+      },
+    }
   );
 
   if (published.ok) {
@@ -1757,7 +1887,13 @@ function disabledActionRow(
  */
 export async function refreshRecruitMessage(
   application: typeof recruitApplications.$inferSelect,
-  outcomeOverride?: string | null
+  outcomeOverride?: string | null,
+  /**
+   * Discord ID нажавшего на кнопку: в тексте сообщения появляется
+   * «Одобрено модератором <@id>» (требование). В вебе модератора нет — там
+   * остаётся подпись офицера из reviewedBy.
+   */
+  reviewerDiscordId?: string | null
 ): Promise<boolean> {
   // ID проверяются ДО любого сетевого запроса: значение из БД могло остаться
   // плейсхолдером («:id», обрезанная строка), а PATCH по такому пути Discord
@@ -1804,7 +1940,28 @@ export async function refreshRecruitMessage(
           : null),
     });
 
+    /**
+     * Текст над Embed после решения.
+     *
+     * Заменяем исходную заявку итогом: повторно читать список полей в канале
+     * незачем, а модератору важно видеть, кто именно распорядился. Упоминание
+     * человека не пингует его (allowed_mentions по умолчанию пуст), поэтому
+     * «@ник» в тексте — просто читаемая ссылка на профиль.
+     */
+    const moderator = reviewerDiscordId
+      ? `<@${reviewerDiscordId}>`
+      : application.reviewedBy
+        ? `**${application.reviewedBy}**`
+        : "Штаб";
+    const statusLine =
+      application.status === "approved"
+        ? `✅ Одобрено модератором ${moderator}`
+        : application.status === "rejected"
+          ? `🛑 Отклонено модератором ${moderator}`
+          : `🕓 Заявка на рассмотрении`;
+
     await editChannelMessage(channelId, messageId, {
+      content: statusLine,
       embeds: [embed],
       components: disabledActionRow(
         "✅ Одобрено",

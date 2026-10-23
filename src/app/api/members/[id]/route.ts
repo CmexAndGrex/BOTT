@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { members, logs } from "@/db/schema";
+import { members, logs, recruitApplications } from "@/db/schema";
 import { requireRosterEditor } from "@/lib/member-auth";
-import { MEMBER_STATUS } from "@/lib/recruits";
+import { MEMBER_STATUS, normalizeMemberStatus } from "@/lib/recruits";
+import { applyVacationRole, type VacationRoleOutcome } from "@/lib/vacation-roles";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,17 +34,45 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const changesDescription: string[] = [];
   const detailsObj: Record<string, string> = { "Боец": oldMember.name };
 
+  /**
+   * Отпуск — одна операция, а не два независимых поля.
+   *
+   * Флаг `vacation` (по нему шедулер закрывает отпуск и исключает бойца из
+   * пингов) и текстовый статус `status` (по нему работает вход в кабинет)
+   * обязаны меняться вместе. Раньше здесь ставился только флаг: боец с
+   * `vacation = true` и `status = "active"` показывался в табеле как «в
+   * строю», а боец со снятым отпуском и `status = "vacation"` продолжал
+   * считаться отсутствующим. Плюс ко всему роль Discord «Отпуск» в этой
+   * точке не менялась вовсе — кнопка в панели правила только базу.
+   */
+  const previousStatus = normalizeMemberStatus(oldMember.status);
+  let vacationRole: VacationRoleOutcome | null = null;
+
   if (typeof body.vacation === "boolean" && body.vacation !== oldMember.vacation) {
     set.vacation = body.vacation;
     changesDescription.push(`статус отпуска на "${body.vacation ? "В отпуске" : "Нет"}"`);
     detailsObj["Отпуск"] = body.vacation ? "В отпуске" : "Нет";
-    // Снятие отпуска возвращает бойца в рабочий строй: текстовый статус
-    // принудительно становится «active». Иначе он оставался "vacation", и
-    // проверки активности (онлайн-норма, снапшоты) продолжали считать бойца
-    // отсутствующим, хотя отпуск уже снят.
-    if (body.vacation === false) {
-      set.status = MEMBER_STATUS.ACTIVE;
+
+    // Статус ведём только у действующей карточки: у исключённого отпуск не
+    // должен «воскрешать» доступ, а у заявки на рассмотрении статус `pending`
+    // означает ещё не принятое решение.
+    const serviceMember =
+      previousStatus === MEMBER_STATUS.ACTIVE || previousStatus === MEMBER_STATUS.VACATION;
+    if (serviceMember) {
+      set.status = body.vacation ? MEMBER_STATUS.VACATION : MEMBER_STATUS.ACTIVE;
     }
+
+    // Возврат из отпуска обнуляет дату: иначе бейдж «в отпуске · до …»
+    // показывал бы устаревший срок, а шедулер видел бы закрытый отпуск.
+    if (body.vacation === false && body.vacationUntil === undefined) {
+      set.vacationUntil = null;
+    }
+
+    // Роль «Отпуск» в Discord — «мягкий» шаг: база обновляется в любом случае,
+    // а точная причина отказа Discord возвращается в ответе и попадает в журнал
+    // (см. applyVacationRole). Дискорд-вызов идёт ДО записи в БД, чтобы роль
+    // выдавалась по актуальному Discord ID из запроса, если он меняется тем же
+    // PATCH-ем.
   }
 
   // Дата возвращения из отпуска: управляется отдельным полем. Снятие отпуска
@@ -63,6 +92,16 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       detailsObj["Дата возвращения"] = valid ? valid.toISOString().slice(0, 10) : "не указана";
     }
   }
+
+  /**
+   * Флаг «привязка Discord открыла доступ».
+   *
+   * Тот же эффект, что и в /api/admin/roster/[id]/discord-id: сохранение ID —
+   * подтверждение личности штабом, поэтому боец со статусом `pending`
+   * переводится в `active`. Иначе боец, которому командир вписал ID из этой
+   * панели, продолжал бы видеть «рапорт на рассмотрении» при входе.
+   */
+  let autoActivated = false;
 
   if (body.discordId !== undefined) {
     const v = body.discordId;
@@ -86,11 +125,66 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       set.discordId = cleanedDiscord;
       changesDescription.push(`Discord ID на "${cleanedDiscord || "пусто"}"`);
       detailsObj["Discord ID"] = cleanedDiscord || "не указан";
+
+      // `dismissed` не трогаем: исключение не отменяется привязкой Discord
+      if (cleanedDiscord && normalizeMemberStatus(oldMember.status) === MEMBER_STATUS.PENDING) {
+        set.status = MEMBER_STATUS.ACTIVE;
+        set.active = true;
+        autoActivated = true;
+        changesDescription.push("статус на \"В строю\"");
+        detailsObj["Статус"] = "pending → active (привязан Discord)";
+      }
     }
+  }
+
+  /**
+   * Роль «Отпуск» в Discord применяется ДО записи в базу.
+   *
+   * Порядок именно такой: Discord ID из этого же запроса (если штаб привязал
+   * аккаунт одновременно с отпуском) уже разобран выше, и роль должна уйти на
+   * актуальный ID, а не на прежний из карточки. Отказ Discord не отменяет
+   * изменение в базе — отпуск решён штабом, и роль можно выдать повторно
+   * (кнопкой или ближайшим циклом сверки).
+   */
+  if (typeof set.vacation === "boolean") {
+    const targetDiscordId =
+      set.discordId !== undefined
+        ? (set.discordId as string | null)
+        : oldMember.discordId;
+
+    vacationRole = await applyVacationRole({
+      discordId: targetDiscordId,
+      vacation: set.vacation as boolean,
+      memberName: oldMember.callsign || oldMember.name,
+      source: "панель состава",
+    });
+
+    detailsObj["Роль «Отпуск»"] = vacationRole.ok
+      ? vacationRole.message
+      : `не изменена: ${vacationRole.error ?? vacationRole.message}`;
   }
 
   const rows = await db.update(members).set(set).where(eq(members.id, memberId)).returning();
   if (!rows.length) return NextResponse.json({ ok: false, error: "Боец не найден" }, { status: 404 });
+
+  // Заявки бойца закрываются вместе со статусом: очередь модерации не должна
+  // показывать уже принятого человека (сбой записи не отменяет правку карточки)
+  if (autoActivated) {
+    try {
+      await db
+        .update(recruitApplications)
+        .set({
+          status: "approved",
+          reviewedBy: "автоматически (привязан Discord ID)",
+          updatedAt: new Date(),
+        })
+        .where(
+          sql`${recruitApplications.memberId} = ${memberId} AND ${recruitApplications.status} IN ('pending', 'new')`
+        );
+    } catch (e) {
+      console.error("[members] Не удалось закрыть заявки бойца:", e);
+    }
+  }
 
   if (changesDescription.length > 0) {
     // Роль автора берём из карточки сессии (requireRosterEditor возвращает её
@@ -112,5 +206,20 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     });
   }
 
-  return NextResponse.json({ ok: true, member: rows[0] });
+  return NextResponse.json({
+    ok: true,
+    member: rows[0],
+    autoActivated,
+    // Итог по роли Discord: панель показывает предупреждение, если роль не
+    // изменилась (нет прав у бота, роль выше роли бота, нет Discord ID).
+    // Молчать об этом нельзя — штаб думает, что отпуск оформлен полностью.
+    vacationRole: vacationRole
+      ? {
+          ok: vacationRole.ok,
+          action: vacationRole.action,
+          message: vacationRole.message,
+          error: vacationRole.error ?? null,
+        }
+      : null,
+  });
 }

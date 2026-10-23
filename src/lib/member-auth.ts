@@ -15,14 +15,15 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { SignJWT, jwtVerify } from "jose";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { memberSessions, members, users } from "@/db/schema";
+import { memberSessions, members, recruitApplications, users } from "@/db/schema";
 import { getJwtSecret } from "@/lib/auth";
 import { getAuthUser, isSecureRequest } from "@/lib/api-auth";
 import {
   hasProfileAccess,
   MANUAL_DISCORD_ID,
+  MEMBER_STATUS,
   normalizeMemberStatus,
   type MemberRole,
   type MemberStatus,
@@ -164,6 +165,70 @@ async function verifyMemberToken(token: string): Promise<MemberTokenPayload | nu
 type LoadedMember = { member: SessionMember; tokenVersion: number };
 
 /**
+ * Самоисцеление статуса при входе (требование «железной» авторизации).
+ *
+ * Проблема, которую это лечит. Боец уже есть в `division_members`, но его
+ * статус остался `pending` (или NULL) — например, карточку создала
+ * синхронизация, а ручная правка сбросила статус, либо заявку одобрили до
+ * появления автоперевода. Такой человек видел «Ваш рапорт находится на
+ * рассмотрении штаба» при каждом входе, хотя он давно в составе, и решал, что
+ * доступ сломан.
+ *
+ * Правило: если запись в табеле есть и статус НЕ `dismissed`, это действующий
+ * боец — вход разрешён, а статус в БД приводится к `active`. Заявки этого бойца
+ * в `recruit_applications` одновременно переводятся в `approved`: очередь
+ * модерации не должна показывать уже принятого человека.
+ *
+ * `dismissed` не трогаем никогда — это осознанное исключение, и «лечить» его
+ * автопереводом в строй значило бы вернуть доступ уволенному.
+ *
+ * Ошибки записи не отменяют вход: человек уже подтвердил личность, а статус —
+ * производное поле. Возвращается тот статус, по которому принимается решение.
+ */
+export async function healMemberAccessOnLogin(member: {
+  id: number;
+  status: unknown;
+}): Promise<MemberStatus> {
+  const status = normalizeMemberStatus(member.status);
+
+  // Не pending — лечить нечего. `dismissed` — осознанное исключение.
+  if (status !== MEMBER_STATUS.PENDING) return status;
+
+  try {
+    await db
+      .update(members)
+      .set({ status: MEMBER_STATUS.ACTIVE, active: true, updatedAt: new Date() })
+      .where(eq(members.id, member.id));
+
+    /**
+     * Заявки закрываются тем же действием. `new` — наследие старых записей:
+     * в типе ReviewStatus его нет, но строка в БД осталась бы «в очереди»
+     * навсегда, поэтому фильтр идёт SQL-условием, а не значением типа.
+     */
+    await db
+      .update(recruitApplications)
+      .set({
+        status: "approved",
+        reviewedBy: "автоматически (вход бойца)",
+        updatedAt: new Date(),
+      })
+      .where(
+        sql`${recruitApplications.memberId} = ${member.id} AND ${recruitApplications.status} IN ('pending', 'new')`
+      );
+
+    console.info(
+      `[member-auth] Статус бойца #${member.id} самоисцелён: pending → active`
+    );
+  } catch (e) {
+    // Вход важнее записи статуса: решение «допустить» уже принято
+    console.error("[member-auth] Не удалось самоисцелить статус бойца:", e);
+  }
+
+  // Даже при сбое записи доступ выдаётся: правило «есть в табеле → боец»
+  return MEMBER_STATUS.ACTIVE;
+}
+
+/**
  * Читает карточку бойца по id в виде, нужном кабинету.
  * null — бойца нет или у него нет доступа (рапорт на рассмотрении / исключён).
  */
@@ -193,9 +258,20 @@ async function loadSessionMember(memberId: number): Promise<LoadedMember | null>
    * "pending" отсекало бы действующего бойца с альтернативным написанием, и
    * сессия кабинета «исчезала» сразу после успешного входа через Discord.
    */
-  const status = normalizeMemberStatus(row.status);
-  // Сессии непринятого рапорта и исключённого бойца недействительны
-  if (status === "dismissed" || status === "pending") return null;
+  /**
+   * Статус: исключённый боец доступа не получает, а `pending` самоисцеляется.
+   *
+   * Раньше здесь стояло `status === "dismissed" || status === "pending" →
+   * null`, и боец со статусом pending в табеле не мог открыть кабинет никогда:
+   * даже после входа через Discord он возвращался на экран «рапорт на
+   * рассмотрении». По требованию плашка ожидания теперь возможна ТОЛЬКО когда
+   * бойца нет в division_members, поэтому запись в табеле = доступ.
+   */
+  let status = normalizeMemberStatus(row.status);
+  if (status === MEMBER_STATUS.DISMISSED) return null;
+  if (status === MEMBER_STATUS.PENDING) {
+    status = await healMemberAccessOnLogin({ id: row.id, status: row.status });
+  }
 
   return {
     member: {

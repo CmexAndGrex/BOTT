@@ -23,11 +23,12 @@
  * синхронизации, панель показывает предупреждение вместо ложного успеха.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { logs, members } from "@/db/schema";
+import { logs, members, recruitApplications } from "@/db/schema";
 import { requireRosterEditor } from "@/lib/member-auth";
 import { isCrossSiteRequest, isUnsafeMethod } from "@/lib/csrf";
+import { MEMBER_STATUS, normalizeMemberStatus } from "@/lib/recruits";
 import { validateRosterDiscordId } from "@/lib/validation";
 
 export const runtime = "nodejs";
@@ -139,12 +140,50 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   }
 
   const before = member.discordId ?? null;
+
+  /**
+   * Привязка Discord ID — это и есть подтверждение личности бойца штабом.
+   *
+   * Поэтому `pending` в момент сохранения ID переводится в `active`
+   * (требование): иначе человек с привязанным Discord продолжал бы видеть
+   * «рапорт на рассмотрении» при входе, хотя командир уже вписал ему ID и тем
+   * самым принял его. `dismissed` не трогаем — исключение не отменяется
+   * привязкой. Заявки бойца закрываются тем же действием, чтобы очередь
+   * модерации не показывала уже принятого.
+   */
+  const wasPending = normalizeMemberStatus(member.status) === MEMBER_STATUS.PENDING;
+  const autoActivated = wasPending && !!discordId;
+
   const [updated] = await db
     .update(members)
-    .set({ discordId, updatedAt: new Date() })
+    .set({
+      discordId,
+      ...(autoActivated
+        ? { status: MEMBER_STATUS.ACTIVE, active: true }
+        : {}),
+      updatedAt: new Date(),
+    })
     .where(eq(members.id, memberId))
     .returning();
   if (!updated) return NextResponse.json({ ok: false, error: "Боец не найден" }, { status: 404 });
+
+  if (autoActivated) {
+    try {
+      await db
+        .update(recruitApplications)
+        .set({
+          status: "approved",
+          reviewedBy: "автоматически (привязан Discord ID)",
+          updatedAt: new Date(),
+        })
+        .where(
+          sql`${recruitApplications.memberId} = ${memberId} AND ${recruitApplications.status} IN ('pending', 'new')`
+        );
+    } catch (e) {
+      // Заявка — историческая запись: сбой не отменяет уже сохранённую привязку
+      console.error("[roster/discord-id] Не удалось закрыть заявку бойца:", e);
+    }
+  }
 
   const sheets = await syncSheet(updated, discordId ?? "");
 
@@ -153,6 +192,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const sheetNote = sheets.ok
     ? ""
     : ` · ШДС: ${sheets.error || "не обновлена"}`;
+  const statusNote = autoActivated ? " · статус: pending → active" : "";
 
   await db.insert(logs).values({
     category: "edit",
@@ -172,7 +212,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     },
     kind: "system",
     title: "Правка Discord ID",
-    detail: `Discord ID бойца ${member.name}: ${before ?? "пусто"} → ${discordId ?? "пусто"}${sheetNote}`,
+    detail: `Discord ID бойца ${member.name}: ${before ?? "пусто"} → ${discordId ?? "пусто"}${statusNote}${sheetNote}`,
     ok: sheets.ok,
     error: sheets.ok ? null : sheets.error ?? null,
   });
@@ -181,6 +221,9 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     ok: true,
     member: updated,
     sheets,
+    // Панель показывает, что доступ в кабинет открылся вместе с привязкой
+    autoActivated,
+    status: updated.status,
     // Предупреждение для панели: правка сохранена, но таблица отстала
     warning: sheets.ok
       ? null

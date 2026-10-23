@@ -17,10 +17,16 @@ import bcrypt from "bcryptjs";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { logs, members } from "@/db/schema";
-import { issueMemberSession, requestIp, setMemberCookie } from "@/lib/member-auth";
+import {
+  healMemberAccessOnLogin,
+  issueMemberSession,
+  requestIp,
+  setMemberCookie,
+} from "@/lib/member-auth";
 import {
   DISMISSED_NOTICE,
   LoginThrottle,
+  MEMBER_STATUS,
   normalizeCallsign,
   normalizeMemberStatus,
   normalizePersonName,
@@ -169,9 +175,19 @@ export async function POST(req: NextRequest) {
      * Рапорт на рассмотрении / отклонён — вход не выдаём. Статус читается
      * через normalizeMemberStatus: «В строю», in_service и service — это одно и
      * то же состояние, и действующий боец не должен видеть экран ожидания.
+     *
+     * `pending` в этом месте уже означает НЕ «заявка в очереди», а «карточка
+     * есть, но статус не проставлен»: заявки кандидатов живут в
+     * recruit_applications, а не в табеле. Такой статус самоисцеляется до
+     * `active` (healMemberAccessOnLogin) — иначе боец, заведённый
+     * синхронизацией, не смог бы войти никогда. Исключённый (`dismissed`)
+     * по-прежнему не проходит.
      */
-    const status: MemberStatus = normalizeMemberStatus(member.status);
-    if (!hasProfileAccess(member.status)) {
+    let status: MemberStatus = normalizeMemberStatus(member.status);
+    if (status === MEMBER_STATUS.PENDING) {
+      status = await healMemberAccessOnLogin({ id: member.id, status: member.status });
+    }
+    if (!hasProfileAccess(status)) {
       return NextResponse.json(
         {
           ok: false,
