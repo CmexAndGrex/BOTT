@@ -34,6 +34,8 @@ import type { MemberRole } from "@/lib/recruits";
 export type SessionMember = {
   id: number;
   callsign: string;
+  /** ФИО из табеля: подпись бойца в карточке рапорта */
+  name: string;
   rank: string;
   unit: string | null;
   status: string;
@@ -442,6 +444,13 @@ function ExamForm({
    * по нему не предлагаем.
    */
   const groups = useMemo(() => formExamGroups(member?.unit ?? null), [member?.unit]);
+  /**
+   * Экзаменатор (кто принимал норматив). Обязательное поле формы: без него штаб
+   * не может подтвердить, что экзамен действительно принимали, а в карточке
+   * Discord поле «Экзаменатор» оставалось бы пустым.
+   */
+  const [examiner, setExaminer] = useState("");
+
   /** Выбранные нормативы: код → оценка (пустая строка = без оценки) */
   const [selected, setSelected] = useState<Record<string, string>>(() => {
     // Отмечаем только те предвыбранные названия, что есть в перечне: чужой
@@ -455,7 +464,10 @@ function ExamForm({
   });
 
   const chosen = Object.keys(selected);
-  const reset = () => setSelected({});
+  const reset = () => {
+    setSelected({});
+    setExaminer("");
+  };
 
   const toggle = (code: string) => {
     setSelected((prev) => {
@@ -468,11 +480,12 @@ function ExamForm({
     });
   };
 
-  const payload: { exams: ExamItem[] } = {
+  const payload: { exams: ExamItem[]; examiner?: string } = {
     exams: chosen.map((code) => {
       const grade = selected[code] ?? "";
       return grade ? { exam_code: code, grade } : { exam_code: code };
     }),
+    examiner: examiner.trim(),
   };
 
   return (
@@ -492,6 +505,22 @@ function ExamForm({
           относятся к вашему направлению: лист ШДС определит штаб при зачислении.
         </p>
       )}
+
+      {/* Экзаменатор обязателен: по нему штаб проверяет, что норматив принимали */}
+      <div>
+        <label className="label mb-1.5 block">Экзаменатор</label>
+        <input
+          className="input w-full"
+          value={examiner}
+          onChange={(e) => setExaminer(e.target.value)}
+          placeholder="Укажите ФИО или позывной экзаменатора (например: Сильвестр К.Д.)"
+          maxLength={120}
+          required
+        />
+        <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+          Кто принимал экзамен / норматив. Поле обязательно и попадает в карточку рапорта.
+        </p>
+      </div>
 
       {/* Блоки листа идут по порядку сетки ШДС: боец ищет норматив там же, где
           видит его столбец в таблице, а не в одном общем списке */}
@@ -559,7 +588,12 @@ function ExamForm({
         <span className="text-[11.5px]" style={{ color: "var(--dim)" }}>
           Выбрано нормативов: {chosen.length}. Оценку можно оставить пустой — её впишет экзаменатор.
         </span>
-        <button type="submit" className="btn btn-primary px-4 py-2" disabled={sending || chosen.length === 0}>
+        <button
+          type="submit"
+          className="btn btn-primary px-4 py-2"
+          // Экзаменатор обязателен: без него рапорт не принимается
+          disabled={sending || chosen.length === 0 || examiner.trim().length < 2}
+        >
           {sending ? <Spinner /> : <Send size={15} />} Отправить рапорт
         </button>
       </div>

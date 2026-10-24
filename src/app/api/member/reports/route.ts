@@ -12,7 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { desc, eq } from "drizzle-orm";
 import { db } from "@/db";
-import { logs, serviceReports } from "@/db/schema";
+import { logs, members, serviceReports } from "@/db/schema";
 import { requestIp, requireActiveMember } from "@/lib/member-auth";
 import {
   buildReportEmbed,
@@ -23,7 +23,13 @@ import {
   validateReportPayload,
   type ServiceReportType,
 } from "@/lib/reports";
-import { publishReviewMessage, realDiscordId, reportChannelIdFor } from "@/lib/review";
+import {
+  publishReviewMessage,
+  realDiscordId,
+  reportChannelIdFor,
+  resolveMemberUnitFromDiscord,
+} from "@/lib/review";
+import { getSettings } from "@/lib/settings";
 import { LoginThrottle } from "@/lib/recruits";
 import { registerThrottle } from "@/lib/throttle-registry";
 
@@ -142,6 +148,42 @@ export async function POST(req: NextRequest) {
      * Отсутствие канала — предупреждение, а не ошибка: рапорт уже в БД и виден
      * штабу в /admin/reports. Ронять создание рапорта из-за настройки нельзя.
      */
+    /**
+     * Подразделение бойца для карточки рапорта.
+     *
+     * Если в профиле оно не указано (или осталось «не назначено»), выводим его
+     * по ролям участника в гильдии Discord и сразу сохраняем в карточку: иначе
+     * поле «Подразделение» в Embed навсегда показывало бы «не назначено», а
+     * форма подачи — объединённый перечень нормативов двух листов.
+     *
+     * Рапорт «Запись в ШДС» исключён: он сам задаёт подразделение, и подменять
+     * его ролью Discord было бы ошибкой. Сбой Discord не мешает подаче —
+     * рапорт уже создан.
+     */
+    let unit = auth.member.unit;
+    if (!unit && type !== "shds_entry") {
+      const detected = await resolveMemberUnitFromDiscord(
+        { unit, discordId: auth.member.discordId },
+        await getSettings()
+      );
+      if (detected) {
+        unit = detected;
+        try {
+          await db
+            .update(members)
+            .set({ unit: detected, updatedAt: new Date() })
+            .where(eq(members.id, auth.member.id));
+          console.info(
+            `[reports] Рапорт #${created.id}: подразделение определено по ролям Discord — «${detected}»`
+          );
+        } catch (e) {
+          // Отметка в карточке — не повод отменять рапорт: Embed уже покажет
+          // найденное подразделение, а повторная запись произойдёт при следующем рапорте
+          console.warn("[reports] Не удалось сохранить подразделение бойца:", e);
+        }
+      }
+    }
+
     const configuredChannelId = await reportChannelIdFor(type);
     // ID канала проверяем ДО запроса: настройка могла остаться пустой или
     // плейсхолдером («:id»), и POST по такому пути Discord отвергает с
@@ -161,7 +203,10 @@ export async function POST(req: NextRequest) {
             id: created.id,
             type,
             callsign: created.callsign,
-            unit: auth.member.unit,
+            // ФИО и Discord ID: в поле «Боец» — реальное имя и кликабельный тег
+            name: auth.member.name,
+            discordId: auth.member.discordId,
+            unit,
             rank: auth.member.rank,
             payload,
             createdAt: created.createdAt,

@@ -961,7 +961,15 @@ export const REPORT_TEXT_MAX = 500;
 
 export type ExamItem = { exam_code: string; grade?: string };
 
-export type ExamPayload = { exams: ExamItem[] };
+/**
+ * Рапорт на сдачу экзаменов/нормативов.
+ *
+ * `examiner` — кто принимал экзамен (ФИО или позывной). Поле хранится рядом со
+ * списком нормативов, а не отдельной колонкой БД: payload и так jsonb, а
+ * экзаменатор осмыслен только для этого типа рапорта и уезжает в Embed отдельным
+ * полем под «Бойцом».
+ */
+export type ExamPayload = { exams: ExamItem[]; examiner?: string };
 export type RolePayload = { role: string; post: string; comment: string };
 /**
  * Перевод по должности ШДС.
@@ -1022,9 +1030,24 @@ export function isReasonableIsoDate(value: unknown): boolean {
   return year >= YEAR_MIN && year <= YEAR_MAX;
 }
 
-/** Разбор пакетного списка нормативов (чекбоксы + поля оценок) */
+/**
+ * Разбор пакетного списка нормативов (чекбоксы + поля оценок).
+ *
+ * Принимает как голый массив (старый формат), так и объект `{ exams, examiner }`
+ * (текущий): форма подачи присылает объект, потому что вместе с нормативами
+ * обязан быть указан экзаменатор. Форма без объекта по-прежнему работает —
+ * рапорт не должен падать из-за старого клиента.
+ */
 function validateExams(input: unknown): ReportValidation<ExamPayload> {
-  const raw = Array.isArray(input) ? input : [];
+  const container =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : null;
+  const raw = Array.isArray(input)
+    ? input
+    : Array.isArray(container?.exams)
+      ? (container?.exams as unknown[])
+      : [];
   if (raw.length === 0) {
     return { ok: false, error: "Сдать экзамены: выберите хотя бы один норматив" };
   }
@@ -1093,7 +1116,14 @@ function validateExams(input: unknown): ReportValidation<ExamPayload> {
     exams.push(grade ? { exam_code: canonical, grade } : { exam_code: canonical });
   }
 
-  return { ok: true, payload: { exams } };
+  /**
+   * Экзаменатор обязателен в форме подачи, но не в валидаторе: тот же путь
+   * используется заявками из Discord и старыми записями, где поля нет. Пустое
+   * значение просто не попадает в payload — Embed покажет поле только когда оно
+   * заполнено.
+   */
+  const examiner = clip(container?.examiner ?? container?.экзаменатор, 120);
+  return { ok: true, payload: examiner ? { exams, examiner } : { exams } };
 }
 
 function validateRole(input: Record<string, unknown>): ReportValidation<RolePayload> {
@@ -1225,7 +1255,10 @@ export function validateReportPayload(
 
   switch (type) {
     case "exam":
-      return validateExams(Array.isArray(input) ? input : raw.exams);
+      // Передаём значение целиком: validateExams сам различает голый массив
+      // (старый клиент и заявки из Discord) и объект `{ exams, examiner }`
+      // (форма подачи). Передача одного raw.exams теряла экзаменатора.
+      return validateExams(input);
     case "role":
       return validateRole(raw);
     case "position_transfer":
@@ -1267,7 +1300,10 @@ export function readReportPayload(type: ServiceReportType, value: unknown): Repo
         const grade = clip(record.grade, 30);
         exams.push(grade ? { exam_code: code, grade } : { exam_code: code });
       }
-      return { exams };
+      // Экзаменатор читается так же терпимо, как пишется: в jsonb могла остаться
+      // строка произвольной длины или не-строка — возвращаем только строку.
+      const examiner = clip(raw.examiner, 120);
+      return examiner ? { exams, examiner } : { exams };
     }
     case "role":
       return {
@@ -1610,6 +1646,10 @@ export type ReportEmbedInput = {
   id: number;
   type: ServiceReportType;
   callsign: string;
+  /** ФИО бойца из карточки: показывается вместо голого «#id» */
+  name?: string | null;
+  /** Discord ID бойца: выводится кликабельным упоминанием <@id> */
+  discordId?: string | null;
   unit?: string | null;
   rank?: string | null;
   payload: ReportPayload;
@@ -1621,12 +1661,47 @@ export type ReportEmbedInput = {
   outcome?: string | null;
 };
 
+/**
+ * Подпись бойца для карточки рапорта: «ФИО» либо «ФИО «позывной»».
+ *
+ * Требование: вместо голого «#66» показывать реальное ФИО. Если ФИО в карточке
+ * не заведено (строки синхронизации rs-red.com), откатываемся на позывной —
+ * выдумывать имя нельзя. Позывной не дублируется, когда он и есть ФИО (карточки,
+ * где name == callsign).
+ */
+export function fighterDisplayName(name?: string | null, callsign?: string | null): string {
+  const person = String(name ?? "").trim();
+  const nick = String(callsign ?? "").trim();
+  if (!person) return nick;
+  if (!nick || person === nick) return person;
+  return `${person} «${nick}»`;
+}
+
+/** Кликабельное упоминание бойца по Discord ID либо пустая строка */
+function discordMention(id?: string | null): string {
+  const value = String(id ?? "").trim();
+  return /^\d{5,25}$/.test(value) ? `<@${value}>` : "";
+}
+
 /** Embed рапорта действующего состава */
 export function buildReportEmbed(input: ReportEmbedInput): ReviewEmbed {
   const meta = reportTypeMeta(input.type);
 
+  const fighter = fighterDisplayName(input.name, input.callsign);
+  const mention = discordMention(input.discordId);
+  const fighterValue = mention ? `${fighter || "боец"}\n${mention}` : fighter;
+
+  // Экзаменатор — отдельное поле под «Бойцом», только у рапорта на экзамен
+  const examiner =
+    input.type === "exam"
+      ? String((input.payload as ExamPayload)?.examiner ?? "").trim().slice(0, 120)
+      : "";
+
   const fields: ReviewEmbed["fields"] = [
-    { name: "Боец", value: embedValue(input.callsign), inline: true },
+    { name: "Боец", value: embedValue(fighterValue), inline: true },
+    ...(examiner
+      ? [{ name: "Экзаменатор", value: embedValue(examiner), inline: true }]
+      : []),
     { name: "Подразделение", value: embedValue(input.unit || "не назначено"), inline: true },
     { name: "Звание", value: embedValue(input.rank || "—"), inline: true },
     { name: "Суть рапорта", value: embedValue(summarizeReport(input.type, input.payload)), inline: false },

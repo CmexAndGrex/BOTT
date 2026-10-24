@@ -49,6 +49,8 @@ const SETTING_NAMES: Record<string, string> = {
   roles_channel_id: "ID канала запросов ролей",
   moderator_role_id: "ID роли модератора заявок", leave_role_id: "ID роли «Отпуск»",
   beret_role_id: "ID роли «Берет»",
+  tank_role_id: "ID роли «Танковая рота»",
+  art_role_id: "ID роли «Артиллерийский дивизион»",
   command_role_id: "ID роли «Командирский состав»",
   left_members_check: "контроль вышедших из подразделения", left_check_channel_id: "канал пинга о вышедших",
   roles_monitor_enabled: "контроль снятия ролей у исключённых", roles_monitor_channel_id: "канал уведомлений о неснятых ролях",

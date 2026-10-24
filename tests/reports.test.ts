@@ -18,6 +18,7 @@ import {
   examCatalog,
   examColumnTokens,
   EXAM_GRADES,
+  fighterDisplayName,
   findExam,
   findPositionSection,
   formExamGroups,
@@ -42,6 +43,7 @@ import {
   summarizeReport,
   validateReportPayload,
 } from "../src/lib/reports.ts";
+import { memberUnitFromRoles } from "../src/lib/review.ts";
 import { TEMP_PASSWORD_LENGTH, TEMP_PASSWORD_PREFIX, generateTempPassword } from "../src/lib/temp-password.ts";
 import { checkPasswordPolicy } from "../src/lib/password-policy.ts";
 import { matchExamColumns } from "../src/lib/gsheets.ts";
@@ -471,6 +473,31 @@ describe("Проверка payload: экзамены", () => {
     });
   });
 
+  test("форма присылает объект с экзаменатором — он сохраняется в payload", () => {
+    const result = validateReportPayload("exam", {
+      exams: [{ exam_code: "ПМП", grade: "Хорошо" }],
+      examiner: "Сильвестр К.Д.",
+    });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.deepEqual(result.payload, {
+      exams: [{ exam_code: "ПМП", grade: "Хорошо" }],
+      examiner: "Сильвестр К.Д.",
+    });
+  });
+
+  test("пустой экзаменатор не попадает в payload (заявки из Discord)", () => {
+    const result = validateReportPayload("exam", { exams: [{ exam_code: "ПМП" }], examiner: "  " });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal("examiner" in result.payload, false);
+  });
+
+  test("объект без списка нормативов отклоняется", () => {
+    const result = validateReportPayload("exam", { exams: [], examiner: "Сильвестр К.Д." });
+    assert.equal(result.ok, false);
+  });
+
   test("регистр и «ё» в названии норматива не важны", () => {
     const result = validateReportPayload("exam", [{ exam_code: "минометное дело (обучение)" }]);
     assert.equal(result.ok, true);
@@ -792,6 +819,27 @@ describe("Чтение payload из jsonb — данные не считаютс
     assert.equal(payload.discordId, "10851418");
   });
 
+  test("экзаменатор читается из jsonb и обрезается по лимиту", () => {
+    const payload = readReportPayload("exam", {
+      exams: [{ exam_code: "ПМП" }],
+      examiner: "Сильвестр К.Д.",
+    }) as ExamPayload;
+    assert.equal(payload.examiner, "Сильвестр К.Д.");
+
+    const long = readReportPayload("exam", {
+      exams: [{ exam_code: "ПМП" }],
+      examiner: "а".repeat(500),
+    }) as ExamPayload;
+    assert.equal(long.examiner?.length, 120);
+
+    // Не-строка в jsonb не превращается в «[object Object]»
+    const broken = readReportPayload("exam", {
+      exams: [{ exam_code: "ПМП" }],
+      examiner: { foo: "bar" },
+    }) as ExamPayload;
+    assert.equal(broken.examiner, undefined);
+  });
+
   test("длинный текст обрезается по лимиту", () => {
     const payload = readReportPayload("reserve", {
       reason: "а".repeat(REPORT_TEXT_MAX + 500),
@@ -944,6 +992,57 @@ describe("Embed-сообщения Discord", () => {
     assert.equal(field(embed, "Решение"), "Штаб");
   });
 
+  test("боец показывается ФИО и кликабельным тегом, а не голым позывным", () => {
+    const embed = buildReportEmbed({
+      ...baseReport,
+      callsign: "Кайзер",
+      name: "Кайзер К.И.",
+      discordId: "1085141850966458519",
+    });
+    const value = field(embed, "Боец");
+    assert.match(value, /Кайзер К\.И\. «Кайзер»/);
+    assert.match(value, /<@1085141850966458519>/);
+  });
+
+  test("без Discord ID тег не выдумывается, подпись остаётся читаемой", () => {
+    const embed = buildReportEmbed({ ...baseReport, name: "Розгов А.В.", discordId: null });
+    const value = field(embed, "Боец");
+    assert.match(value, /Розгов А\.В\. «Сокол»/);
+    assert.equal(value.includes("<@"), false);
+  });
+
+  test("без ФИО откат на позывной: имя не выдумывается", () => {
+    const embed = buildReportEmbed({ ...baseReport, name: "", callsign: "Сокол" });
+    assert.equal(field(embed, "Боец"), "Сокол");
+  });
+
+  test("поле «Экзаменатор» есть только у рапорта на экзамен и под «Бойцом»", () => {
+    const examEmbed = buildReportEmbed({
+      ...baseReport,
+      type: "exam",
+      payload: { exams: [{ exam_code: "ПМП", grade: "Отлично" }], examiner: "Сильвестр К.Д." },
+    });
+    assert.equal(field(examEmbed, "Экзаменатор"), "Сильвестр К.Д.");
+    const names = (examEmbed.fields ?? []).map((f) => f.name);
+    assert.equal(names.indexOf("Экзаменатор"), names.indexOf("Боец") + 1);
+
+    // У рапорта на отпуск поля нет даже при «случайном» examiner в payload
+    const vacation = buildReportEmbed({
+      ...baseReport,
+      payload: { from: "2026-07-01", to: "2026-07-14", reason: "Отпуск", examiner: "Сильвестр" } as never,
+    });
+    assert.equal(hasField(vacation, "Экзаменатор"), false);
+  });
+
+  test("экзамен без экзаменатора не оставляет пустого поля", () => {
+    const embed = buildReportEmbed({
+      ...baseReport,
+      type: "exam",
+      payload: { exams: [{ exam_code: "ПМП" }] },
+    });
+    assert.equal(hasField(embed, "Экзаменатор"), false);
+  });
+
   test("пустые подразделение и звание не оставляют дыр в карточке", () => {
     const embed = buildReportEmbed({
       ...baseReport,
@@ -993,6 +1092,26 @@ describe("Embed-сообщения Discord", () => {
     });
     assert.equal(field(embed, "Discord"), "volk (ID: 1085141850966458519)");
     assert.equal(field(embed, "Решение"), "Офицер Барс · ЛК выслан");
+  });
+});
+
+describe("Подпись бойца и автоопределение подразделения", () => {
+  test("ФИО и позывной не дублируются, если совпадают", () => {
+    assert.equal(fighterDisplayName("Кайзер К.И.", "Кайзер"), "Кайзер К.И. «Кайзер»");
+    assert.equal(fighterDisplayName("Сокол", "Сокол"), "Сокол");
+    assert.equal(fighterDisplayName("", "Сокол"), "Сокол");
+    assert.equal(fighterDisplayName(null, null), "");
+  });
+
+  test("подразделение выводится по роли участника гильдии", () => {
+    const mapping = { tank: "111111111111111111", art: "222222222222222222" };
+    assert.equal(memberUnitFromRoles([mapping.tank], mapping), "Танковая рота");
+    assert.equal(memberUnitFromRoles([mapping.art], mapping), "Артиллерийский дивизион");
+    // Чужие роли (звания, корпус) подразделения не назначают
+    assert.equal(memberUnitFromRoles(["333333333333333333"], mapping), null);
+    assert.equal(memberUnitFromRoles([], mapping), null);
+    // Роли не настроены — угадывать нельзя
+    assert.equal(memberUnitFromRoles([mapping.tank], { tank: "", art: "" }), null);
   });
 });
 

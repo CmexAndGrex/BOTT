@@ -214,12 +214,40 @@ export default function IntegrationsTab({
             </Field>
             <Field
               label="ID роли модератора заявок"
-              hint="Всегда может подтверждать и отклонять заявки."
+              hint={
+                <>
+                  Всегда может подтверждать и отклонять заявки и рапорты. Эта же роль
+                  пингуется при публикации рапорта в канале. Пусто — переменная{" "}
+                  <span className="kbd">DISCORD_MODERATOR_ROLE_ID</span>.
+                </>
+              }
             >
               <input
                 className="input input-mono"
                 value={settings.moderator_role_id}
                 onChange={(e) => digits("moderator_role_id")(e.target.value)}
+              />
+            </Field>
+            <Field
+              label="ID роли «Танковая рота»"
+              hint="Нужна автоопределению подразделения, если в карточке бойца оно не задано. Пусто — ищется по имени."
+            >
+              <input
+                className="input input-mono"
+                placeholder="пусто — ищется по имени «Танковая рота»"
+                value={settings.tank_role_id}
+                onChange={(e) => digits("tank_role_id")(e.target.value)}
+              />
+            </Field>
+            <Field
+              label="ID роли «Артиллерийский дивизион»"
+              hint="Та же логика, что у роли роты: подразделение выводится по ролям участника."
+            >
+              <input
+                className="input input-mono"
+                placeholder="пусто — ищется по имени «Артиллерийский дивизион»"
+                value={settings.art_role_id}
+                onChange={(e) => digits("art_role_id")(e.target.value)}
               />
             </Field>
             <Field label="ID роли «Отпуск»" hint="Выдаётся на время отпуска и снимается при возврате.">

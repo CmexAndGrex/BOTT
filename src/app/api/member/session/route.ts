@@ -67,6 +67,8 @@ export async function GET(req: NextRequest) {
     member: {
       id: member.id,
       callsign: member.callsign,
+      // ФИО нужно форме рапорта: карточка в Discord показывает реальное имя
+      name: member.name,
       rank: member.rank,
       post: member.post,
       unit: member.unit,
@@ -95,6 +97,7 @@ export type SessionResponse = {
   member?: {
     id: number;
     callsign: string;
+    name: string;
     rank: string;
     post: string | null;
     unit: string | null;

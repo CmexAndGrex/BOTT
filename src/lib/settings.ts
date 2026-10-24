@@ -35,6 +35,18 @@ export const CHANNEL_ENV_FALLBACKS: Record<string, string> = {
   [VACATION_CHANNEL_SETTING]: "DISCORD_VACATION_CHANNEL_ID",
 };
 
+/**
+ * Запасные источники ID ролей Discord — переменные окружения.
+ *
+ * По той же причине, что и каналы (CHANNEL_ENV_FALLBACKS): на свежем деплое
+ * настройки панели могут быть ещё не заполнены, а рапорт обязан не потерять
+ * пинг модератора и не «выдумать» подразделение. Порядок всегда один: значение
+ * из панели, затем env.
+ */
+export const ROLE_ENV_FALLBACKS: Record<string, string> = {
+  moderator_role_id: "DISCORD_MODERATOR_ROLE_ID",
+};
+
 export const DEFAULT_SETTINGS: Record<string, string> = {
   // Discord
   discord_token: "",
@@ -62,6 +74,16 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
    * зависит от сервера.
    */
   beret_role_id: "",
+  /**
+   * Роли подразделений Discord: «Танковая рота» и «Артиллерийский дивизион».
+   *
+   * Нужны автоопределению подразделения бойца: если в профиле
+   * (division_members.unit) подразделение не указано, оно выводится по этим
+   * ролям участника гильдии (см. review.ts, resolveMemberUnitFromRoles). Пусто —
+   * роль ищется на сервере по имени, поэтому настраивать необязательно.
+   */
+  tank_role_id: "",
+  art_role_id: "",
   /**
    * Белый список ID вебхуков, сообщения которых считаются заявками
    * (формы присылают заявки через вебхуки Discord). Пусто = вебхуки

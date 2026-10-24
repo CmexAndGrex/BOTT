@@ -67,6 +67,14 @@ export type MemberLoginKind = "discord" | "password";
 export type SessionMember = {
   id: number;
   callsign: string;
+  /**
+   * ФИО бойца из табеля.
+   *
+   * Нужно карточке рапорта: в Embed поле «Боец» показывает реальное ФИО, а не
+   * голый «#id». В строках синхронизации rs-red.com ФИО может совпадать с
+   * позывным — форма подписи это учитывает (fighterDisplayName в reports.ts).
+   */
+  name: string;
   discordId: string | null;
   rank: string;
   unit: string | null;
@@ -237,6 +245,7 @@ async function loadSessionMember(memberId: number): Promise<LoadedMember | null>
     .select({
       id: members.id,
       callsign: members.callsign,
+      name: members.name,
       discordId: members.discordId,
       rank: members.rank,
       unit: members.unit,
@@ -277,6 +286,7 @@ async function loadSessionMember(memberId: number): Promise<LoadedMember | null>
     member: {
       id: row.id,
       callsign: row.callsign || "",
+      name: row.name || "",
       discordId: row.discordId,
       rank: row.rank,
       unit: row.unit,
@@ -618,6 +628,7 @@ export function hasStaffRights(member: { role: unknown; post?: unknown; rank?: u
 const EMPTY_SESSION_MEMBER: SessionMember = {
   id: 0,
   callsign: "",
+  name: "",
   discordId: null,
   rank: "",
   unit: null,

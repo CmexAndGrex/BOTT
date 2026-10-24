@@ -13,6 +13,9 @@ import { db } from "@/db";
 import { logs, members, recruitApplications, serviceReports } from "@/db/schema";
 import {
   editChannelMessage,
+  getGuildMemberRoles,
+  getGuildRoles,
+  mentionRole,
   sendDirectMessage,
   type DiscordActionRow,
   type DmResult,
@@ -49,8 +52,10 @@ import {
   DEFAULT_RANK,
   MEMBER_STATUS,
   normalizePersonName,
+  UNITS,
+  type Unit,
 } from "@/lib/recruits";
-import { COMMON_ROLE_IDS } from "@/lib/roles";
+import { COMMON_ROLE_IDS, findRoleIdByName } from "@/lib/roles";
 import { statusTrackingFields } from "@/lib/roles-monitor";
 import { isBeretPassed } from "@/lib/exams";
 import {
@@ -58,6 +63,7 @@ import {
   getSettings,
   RECRUIT_CHANNEL_SETTING,
   REPORTS_CHANNEL_SETTING,
+  ROLE_ENV_FALLBACKS,
   ROLE_REQUESTS_CHANNEL_SETTING,
   VACATION_CHANNEL_SETTING,
 } from "@/lib/settings";
@@ -1551,6 +1557,86 @@ async function configuredChannel(settingKey: string, envKey: string): Promise<st
   );
 }
 
+/**
+ * ID роли модератора заявок и рапортов: настройка панели, при её отсутствии —
+ * переменная окружения DISCORD_MODERATOR_ROLE_ID. Пусто — пинг не ставим.
+ *
+ * Та же роль, по которой бот проверяет право нажать кнопку решения: пинг и
+ * права обязаны указывать на один круг лиц, иначе упоминание уходило бы людям,
+ * которые не могут принять решение.
+ */
+async function moderatorRoleId(): Promise<string> {
+  const map = await getSettings();
+  const raw =
+    (map.get("moderator_role_id") || "").trim() ||
+    (process.env[ROLE_ENV_FALLBACKS.moderator_role_id] || "").trim();
+  return realDiscordId(raw);
+}
+
+/**
+ * Подразделение по ролям участника гильдии.
+ *
+ * Чистая функция (без сети) — правило проверяется тестами напрямую: приоритет у
+ * назначенного ID роли, при его отсутствии подразделение ищется по имени на
+ * сервере (это делает вызывающий код). Рота приоритетнее дивизиона: роли
+ * взаимоисключающие, но порядок фиксируем, чтобы результат был детерминирован.
+ */
+export function memberUnitFromRoles(
+  memberRoleIds: readonly string[],
+  mapping: { tank?: string | null; art?: string | null }
+): Unit | null {
+  const ids = new Set(memberRoleIds.map((id) => String(id).trim()).filter(Boolean));
+  const tank = String(mapping.tank ?? "").trim();
+  const art = String(mapping.art ?? "").trim();
+  if (tank && ids.has(tank)) return "Танковая рота";
+  if (art && ids.has(art)) return "Артиллерийский дивизион";
+  return null;
+}
+
+/**
+ * Определение подразделения бойца по ролям Discord, если оно не назначено.
+ *
+ * Требование: пока `division_members.unit` пусто или «не назначено», рапорт
+ * выводит подразделение по ролям участника на сервере — «Танковая рота» или
+ * «Артиллерийский дивизион» — и сохраняет найденное значение в карточку, чтобы
+ * поле больше не оставалось пустым.
+ *
+ * Ошибки Discord не пробрасываются: без подразделения рапорт всё равно
+ * создаётся, а сотрудник штаба назначит лист вручную.
+ */
+export async function resolveMemberUnitFromDiscord(
+  member: { unit: string | null; discordId: string | null },
+  map: Map<string, string>
+): Promise<Unit | null> {
+  const current = (member.unit || "").trim();
+  if (UNITS.includes(current as Unit)) return current as Unit;
+
+  const discordId = realDiscordId(member.discordId);
+  if (!discordId) return null;
+
+  const guildId = await resolveGuildId((map.get("guild_id") || "").trim());
+  if (!guildId) return null;
+
+  try {
+    const [roles, memberRoles] = await Promise.all([
+      getGuildRoles(guildId),
+      getGuildMemberRoles(guildId, discordId),
+    ]);
+    if (!memberRoles) return null;
+
+    const tank =
+      realDiscordId(map.get("tank_role_id")) || findRoleIdByName(roles, "Танковая рота");
+    const art =
+      realDiscordId(map.get("art_role_id")) ||
+      findRoleIdByName(roles, "Артиллерийский дивизион");
+
+    return memberUnitFromRoles(memberRoles, { tank, art });
+  } catch (e) {
+    console.warn("[review] Не удалось определить подразделение по ролям Discord:", e);
+    return null;
+  }
+}
+
 /** Канал рапортов: настройка панели, при её отсутствии — канал ШДС */
 export async function reportsChannelId(): Promise<string> {
   const map = await getSettings();
@@ -1638,9 +1724,22 @@ export async function publishReviewMessage(
     };
   }
   try {
+    /**
+     * Пинг модератора в канале.
+     *
+     * Требование: при публикации рапорта упоминание роли модератора должно
+     * загораться у её участников. Discord НЕ подсвечивает упоминания внутри
+     * Embed, поэтому пинг ставится в `content`, а `allowed_mentions.roles`
+     * разрешает его явно — без этого Discord вырезал бы упоминание как
+     * «неразрешённое». Если роль не настроена, content не передаётся вовсе:
+     * пустая строка и «@unknown-role» в сообщении только мешают.
+     */
+    const pingRole = scope === "report" && !extra.content ? await moderatorRoleId() : "";
+    const content = extra.content ?? (pingRole ? mentionRole(pingRole) : "");
+
     const { sendChannelMessage } = await import("@/lib/discord");
     const message = await sendChannelMessage(channel, {
-      ...(extra.content ? { content: extra.content } : {}),
+      ...(content ? { content } : {}),
       embeds: [embed],
       components: [
         {
@@ -1665,8 +1764,13 @@ export async function publishReviewMessage(
         },
       ],
       // По умолчанию упоминаний нет: Embed содержит позывные и свободный текст
-      // бойца. Заявка на вступление передаёт явный список ролей для пинга.
-      allowed_mentions: extra.allowed_mentions ?? { parse: [], users: [], roles: [] },
+      // бойца. Заявка на вступление передаёт явный список ролей для пинга,
+      // рапорт — роль модератора (см. pingRole выше).
+      allowed_mentions:
+        extra.allowed_mentions ??
+        (pingRole
+          ? { parse: [], users: [], roles: [pingRole] }
+          : { parse: [], users: [], roles: [] }),
     });
     return { ok: true, messageId: message.id, channelId: channel };
   } catch (e) {
@@ -1807,7 +1911,12 @@ export async function approveServiceReport(
       // отпуск) — передаём свежие значения, чтобы Embed не показывал устаревшее
       const [member] = updated.memberId
         ? await db
-            .select({ unit: members.unit, rank: members.rank })
+            .select({
+              unit: members.unit,
+              rank: members.rank,
+              name: members.name,
+              discordId: members.discordId,
+            })
             .from(members)
             .where(eq(members.id, updated.memberId))
         : [];
@@ -2015,7 +2124,12 @@ export async function refreshRecruitMessage(
 /** Обновление сообщения-рапорта: тот же принцип, что и у заявок */
 export async function refreshReportMessage(
   report: typeof serviceReports.$inferSelect,
-  member?: { unit: string | null; rank: string } | null,
+  member?: {
+    unit: string | null;
+    rank: string;
+    name?: string | null;
+    discordId?: string | null;
+  } | null,
   outcome?: string | null
 ): Promise<boolean> {
   // Та же проверка, что и у заявок: по нечисловому ID запрос не отправляется
@@ -2035,6 +2149,10 @@ export async function refreshReportMessage(
       id: report.id,
       type: report.type,
       callsign: report.callsign,
+      // ФИО и Discord ID — из свежей карточки бойца: в Embed поле «Боец»
+      // показывает реальное имя и кликабельный пинг, а не голый позывной
+      name: member?.name ?? null,
+      discordId: member?.discordId ?? null,
       unit: member?.unit ?? null,
       rank: member?.rank ?? null,
       payload: readReportPayload(report.type, report.payload),
