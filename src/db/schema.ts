@@ -11,7 +11,7 @@ import {
   json,
   jsonb,
 } from "drizzle-orm/pg-core";
-import type { MemberRole, MemberStatus } from "@/lib/recruits";
+import type { MemberRole, MemberStatus, Unit } from "@/lib/recruits";
 import type { ServiceReportType } from "@/lib/reports";
 import type { ArmoryDivision, ArmoryEquipment } from "@/lib/armory";
 
@@ -312,6 +312,15 @@ export const recruitApplications = pgTable(
       .default("recruit"),
     /** ФИО возвращающегося из запаса: по нему ищется строка на листе «Запас» */
     fullName: text("full_name"),
+    /**
+     * Подразделение, выбранное кандидатом в форме /apply.
+     *
+     * Значения совпадают с UNITS в src/lib/recruits.ts («Танковая рота» или
+     * «Артиллерийский дивизион»). По нему при одобрении назначается лист ШДС
+     * (shds_sheet_tank / shds_sheet_art) и роль подразделения в Discord.
+     * null — кандидат подразделение не выбирал (старые заявки, Google-форма).
+     */
+    unit: text("unit").$type<Unit>(),
     /** Логин или глобальное имя в Discord (поле формы, проверяется модератором) */
     discordTag: text("discord_tag"),
     /** Snowflake ID: заполняется из cookie Discord либо модератором */

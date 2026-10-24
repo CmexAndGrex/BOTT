@@ -51,6 +51,13 @@ const SETTING_NAMES: Record<string, string> = {
   beret_role_id: "ID роли «Берет»",
   tank_role_id: "ID роли «Танковая рота»",
   art_role_id: "ID роли «Артиллерийский дивизион»",
+  // Зачисление и роли (вкладка «Зачисление и роли»)
+  role_corps_id: "ID роли «Артиллерийско-Танковый Корпус»",
+  role_tank_id: "ID роли «Танковая рота» при вступлении",
+  role_art_id: "ID роли «Артиллерийский дивизион» при вступлении",
+  role_recruit_rank_id: "ID роли начального звания",
+  shds_sheet_tank: "название листа ШДС Танковой роты",
+  shds_sheet_art: "название листа ШДС Артиллерийского дивизиона",
   command_role_id: "ID роли «Командирский состав»",
   left_members_check: "контроль вышедших из подразделения", left_check_channel_id: "канал пинга о вышедших",
   roles_monitor_enabled: "контроль снятия ролей у исключённых", roles_monitor_channel_id: "канал уведомлений о неснятых ролях",

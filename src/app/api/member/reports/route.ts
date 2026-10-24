@@ -30,7 +30,7 @@ import {
   resolveMemberUnitFromDiscord,
 } from "@/lib/review";
 import { getSettings } from "@/lib/settings";
-import { LoginThrottle } from "@/lib/recruits";
+import { isUnassignedUnit, LoginThrottle } from "@/lib/recruits";
 import { registerThrottle } from "@/lib/throttle-registry";
 
 export const runtime = "nodejs";
@@ -161,7 +161,13 @@ export async function POST(req: NextRequest) {
      * рапорт уже создан.
      */
     let unit = auth.member.unit;
-    if (!unit && type !== "shds_entry") {
+    /**
+     * Подразделение выводится не только при пустом поле, но и при служебной
+     * пометке «не назначено»: такая запись встречается после ручных правок и
+     * синхронизации, и без автоопределения оценки при одобрении экзамена
+     * уехали бы не в тот лист (или не уехали вовсе).
+     */
+    if (isUnassignedUnit(unit) && type !== "shds_entry") {
       const detected = await resolveMemberUnitFromDiscord(
         { unit, discordId: auth.member.discordId },
         await getSettings()

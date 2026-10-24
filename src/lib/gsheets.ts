@@ -6,7 +6,7 @@
  */
 import { GoogleSpreadsheet, GoogleSpreadsheetWorksheet } from "google-spreadsheet";
 import { JWT } from "google-auth-library";
-import { getSettings } from "@/lib/settings";
+import { getSettings, unitSheetName } from "@/lib/settings";
 // Справочник секций и проверка требований ступени живут в домене рапортов
 // (reports.ts): там же их читает форма подачи, поэтому «секция рапорта» и
 // «блок строк листа» не могут разойтись. Обратной зависимости нет — reports.ts
@@ -18,7 +18,7 @@ import {
   POSITION_SECTIONS,
   examCatalog,
 } from "@/lib/reports";
-import { normalizePersonName } from "@/lib/recruits";
+import { isUnit, normalizePersonName } from "@/lib/recruits";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -207,14 +207,44 @@ export async function getDoc(): Promise<GoogleSpreadsheet> {
   return doc;
 }
 
-/** Лист по названию подразделения (название листа = «Подразделение») */
+/**
+ * Лист по названию подразделения.
+ *
+ * Имя листа берётся из настроек (shds_sheet_tank / shds_sheet_art), а при
+ * пустой настройке совпадает с названием подразделения — так листы названы в
+ * таблице по умолчанию. Сначала ищется настроенное имя, затем само название
+ * подразделения: если администратор переименовал лист и не успел обновить
+ * настройку, зачисление всё равно найдёт нужный лист, а не упадёт с
+ * «лист не найден».
+ *
+ * Раскладка (колонки, блоки, оценки) от имени не зависит — она привязана к
+ * подразделению через resolveLayout().
+ */
 export async function getSheet(unit: string): Promise<GoogleSpreadsheetWorksheet> {
   const doc = await getDoc();
-  const target = unit.trim().toLowerCase();
   const sheets = Object.values(doc.sheetsById) as GoogleSpreadsheetWorksheet[];
-  const sheet = sheets.find((s) => (s.title || "").trim().toLowerCase() === target);
-  if (!sheet) throw new Error(`Лист «${unit}» не найден в таблице`);
-  return sheet;
+  const normalizedUnit = unit.trim();
+  const candidates = [normalizedUnit];
+
+  // Каноническое подразделение → настроенное имя листа
+  const map = await getSettings();
+  const canonical = normalizedUnit.toLowerCase();
+  if (isUnit(normalizedUnit)) {
+    candidates.unshift(unitSheetName(normalizedUnit, map));
+  } else if (/танк/.test(canonical)) {
+    candidates.unshift(unitSheetName("Танковая рота", map));
+  } else if (/дивизион|артиллер/.test(canonical)) {
+    candidates.unshift(unitSheetName("Артиллерийский дивизион", map));
+  }
+
+  for (const name of candidates) {
+    const target = name.trim().toLowerCase();
+    if (!target) continue;
+    const sheet = sheets.find((s) => (s.title || "").trim().toLowerCase() === target);
+    if (sheet) return sheet;
+  }
+
+  throw new Error(`Лист «${unit}» не найден в таблице`);
 }
 
 /* ------------------------------------------------------------------ */

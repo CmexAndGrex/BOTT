@@ -142,6 +142,16 @@ export default function AdminRecruitsPage() {
         problems.push(`Боец зачислен, но запись в Google Таблицу не удалась: ${data.sheets.error}`);
       }
       /**
+       * Роли Discord при зачислении (корпус, подразделение, звание).
+       *
+       * Тексты с «не выданы» и «не выдана» означают частичный отказ Discord
+       * (нет прав у бота, роль выше роли бота). Решение штаба при этом в силе,
+       * поэтому это предупреждение, а не ошибка сохранения.
+       */
+      if (typeof data.roles === "string" && data.roles.startsWith("роли не выданы")) {
+        problems.push(`Боец зачислен, но роли Discord не выданы: ${data.roles}`);
+      }
+      /**
        * Роль Discord «Отпуск»: если она не изменилась (нет прав у бота, роль
        * выше роли бота, не привязан Discord ID), решение по рапорту уже
        * принято, и молчать нельзя — штаб считал бы отпуск оформленным полностью.
@@ -165,9 +175,15 @@ export default function AdminRecruitsPage() {
         // Заявка объединена с существующей карточкой: дубль в составе не создан
         setFlash(data.message || "Боец уже в составе — карточка обновлена, дубль не создан");
       } else if (action === "approve" && data.dmSent) {
-        setFlash(`${recruit.callsign || recruit.name} зачислен, доступ выслан в ЛС`);
+        setFlash(
+          `${recruit.callsign || recruit.name} зачислен, доступ выслан в ЛС${
+            typeof data.roles === "string" ? `. ${data.roles}` : ""
+          }`
+        );
       } else if (data.sheets?.message) {
-        setFlash(data.sheets.message);
+        setFlash(
+          `${data.sheets.message}${typeof data.roles === "string" ? `. ${data.roles}` : ""}`
+        );
       } else {
         setFlash(
           action === "reject" ? "Рапорт отклонён" : `${recruit.callsign || recruit.name} обновлён`

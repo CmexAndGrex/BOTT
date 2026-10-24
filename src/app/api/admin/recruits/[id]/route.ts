@@ -19,17 +19,20 @@ import { sendDirectMessage } from "@/lib/discord";
 import { requireStaff } from "@/lib/member-auth";
 import {
   DEFAULT_RANK,
+  isEnlistmentRank,
   isFullNameWithInitials,
   isMemberRole,
+  isUnit,
   MANUAL_DISCORD_ID,
   MEMBER_STATUS,
   normalizePersonName,
   RANKS,
   readApplication,
+  RECRUIT_RANK,
   UNITS,
   type MemberStatus,
 } from "@/lib/recruits";
-import { recruitDmText, refreshRecruitMessage } from "@/lib/review";
+import { grantEnlistmentRoles, recruitDmText, refreshRecruitMessage } from "@/lib/review";
 import { statusTrackingFields } from "@/lib/roles-monitor";
 import { generateTempPassword } from "@/lib/temp-password";
 import { applyVacationRole } from "@/lib/vacation-roles";
@@ -238,17 +241,38 @@ export async function PATCH(req: NextRequest) {
     // (reactivate) таблицу не трогает: боец уже в ней, а повторное «Добавление»
     // заняло бы новую строку «Вакант» и оставило старую с его именем.
     let sheets: { ok: boolean; message?: string; error?: string } | null = null;
+    let rolesOutcome: string | null = null;
     if (action === "approve") {
       sheets = await addToShdsSheet(updated);
       if (!sheets.ok) {
         console.error("[recruits] Синхронизация с таблицей не удалась:", sheets.error);
       }
+
+      /**
+       * Роли Discord — тот же набор, что и при одобрении кнопкой в канале:
+       * корпус + подразделение + начальное звание (см. grantEnlistmentRoles).
+       * Решение в панели и решение в Discord обязаны давать одинаковый итог,
+       * иначе «через сайт зачислили без ролей» выяснялось бы уже постфактум.
+       *
+       * Ошибка Discord не отменяет решение: карточка и ШДС уже обновлены,
+       * текст итога вернётся модератору в ответе.
+       */
+      rolesOutcome = await grantEnlistmentRoles(
+        updated.discordId,
+        // isUnit — единственная проверка значения из БД: «не назначено» и
+        // произвольный текст роль подразделения не назначают
+        isUnit(updated.unit) ? updated.unit : null,
+        updated.rank
+      );
     }
 
     return NextResponse.json({
       ok: true,
       status: updated.status,
       sheets,
+      // Итог выдачи ролей при зачислении: модератор видит, что именно выдано
+      // (или почему Discord отказал) сразу, без похода в журнал
+      roles: rolesOutcome,
       // Итог по роли Discord: модератор должен видеть, что она не изменилась
       // (нет прав, роль выше роли бота, нет Discord ID) — решение уже принято
       vacationRole: vacationRole
@@ -371,7 +395,18 @@ async function mergeIntoExistingMember(
       ...(freeCallsign && pending.callsign ? { callsign: pending.callsign } : {}),
       passwordHash: existing.passwordHash || pending.passwordHash,
       role: existing.role === "recruit" ? "member" : existing.role,
-      rank: existing.rank || DEFAULT_RANK,
+      /**
+       * Подразделение и звание — из карточки-заявки, если у существующей
+       * карточки их нет.
+       *
+       * Кандидат выбирает подразделение в форме /apply, и оно уже записано в
+       * карточку-заявку. При слиянии это единственный источник правильного
+       * листа ШДС: пустое поле унаследованной карточки (строка синхронизации
+       * rs-red.com) иначе пришлось бы заполнять вручную. Присвоенное звание
+       * (Ефрейтор и выше) не понижается.
+       */
+      ...(pending.unit && !existing.unit ? { unit: pending.unit } : {}),
+      rank: isEnlistmentRank(existing.rank) ? RECRUIT_RANK : existing.rank || DEFAULT_RANK,
       ...statusTrackingFields(
         keepVacation ? MEMBER_STATUS.VACATION : MEMBER_STATUS.ACTIVE,
         existing.status
@@ -554,7 +589,15 @@ function buildPatch(member: MemberRow, body: UpdateBody, action: Action): PatchR
     if (!unit) {
       return { ok: false, error: "Выберите подразделение — от него зависит лист Google Таблицы" };
     }
-    values.rank = values.rank ?? (member.rank || DEFAULT_RANK);
+    /**
+     * Звание при зачислении — «Рядовой», а не «Курсант».
+     *
+     * «Курсант» — статус кандидата (DEFAULT_RANK у рапорта), а в ШДС и на
+     * сервере у бойца в строю звание «Рядовой». Уже присвоенное звание
+     * (Ефрейтор и выше) сохраняется: повторное одобрение не понижает бойца.
+     */
+    const baseRank = values.rank ?? member.rank ?? DEFAULT_RANK;
+    values.rank = isEnlistmentRank(baseRank) ? RECRUIT_RANK : baseRank;
     values.role = values.role ?? (member.role === "recruit" ? "member" : member.role);
     values.active = true;
     values.applicationData = {
@@ -652,10 +695,19 @@ async function addToShdsSheet(
       isVacation: false,
       vacationRemove: false,
       shdsAction: SHDS_ACTIONS.ADD,
-      // Имя листа = подразделение бойца (см. UNITS в recruits.ts)
+      // Имя листа = подразделение бойца (настроенное имя — см. getSheet)
       unit: member.unit,
-      userName: member.callsign || member.name,
-      rank: member.rank || DEFAULT_RANK,
+      /**
+       * В колонку «Фамилия, инициалы» пишется ФИО бойца.
+       *
+       * Позывной — это логин, а не табельная запись: при зачислении из панели
+       * раньше в таблицу попадал позывной, и строка расходилась с ФИО в
+       * карточке. У строк синхронизации rs-red.com ФИО может быть односложным
+       * (там лежит ник) — тогда откатываемся на него, чтобы ячейка имени не
+       * осталась пустой.
+       */
+      userName: member.name.includes(" ") ? member.name : member.callsign || member.name,
+      rank: isEnlistmentRank(member.rank) ? RECRUIT_RANK : member.rank || DEFAULT_RANK,
       steamId: "",
       discordId:
         member.discordId && member.discordId !== MANUAL_DISCORD_ID ? member.discordId : "",

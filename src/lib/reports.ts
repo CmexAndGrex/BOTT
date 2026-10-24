@@ -1493,6 +1493,14 @@ export type RecruitEmbedInput = {
   kind?: RecruitApplicationKind | null;
   /** ФИО возвращающегося из запаса — показывается отдельным полем */
   fullName?: string | null;
+  /**
+   * Подразделение, выбранное кандидатом в форме /apply.
+   *
+   * Модератор должен видеть его в карточке ДО решения: от подразделения
+   * зависит лист ШДС и роль Discord, а старые заявки (и Google-форма) этого
+   * поля не имеют — тогда остаётся прежняя подсказка по тексту анкеты.
+   */
+  unit?: Unit | null;
 };
 
 /** Строка «ДД.ММ.ГГГГ ЧЧ:ММ» в московском времени */
@@ -1539,9 +1547,21 @@ export function buildRecruitEmbed(input: RecruitEmbedInput): ReviewEmbed {
   const kind = input.kind ?? APPLICATION_KIND_RECRUIT;
   const isReserveReturn = kind === APPLICATION_KIND_RESERVE_RETURN;
 
+  /**
+   * Подразделение в карточке.
+   *
+   * Приоритет у явного выбора из формы: это решение кандидата, по нему будет
+   * выбран лист ШДС. Если поля нет (заявка Google-формы, старые записи),
+   * показываем прежнюю подсказку по тексту анкеты — угадывать лист нельзя.
+   */
+  const unitLabel = input.unit
+    ? `${input.unit}${input.unit === "Танковая рота" ? " (ТР)" : " (АД)"}`
+    : recruitDirectionHint(input.about);
+
   const fields: ReviewEmbed["fields"] = [
     { name: "Позывной", value: embedValue(input.callsign), inline: true },
     { name: "Возраст", value: input.age ? String(input.age) : "—", inline: true },
+    { name: "Подразделение", value: embedValue(unitLabel), inline: true },
     ...(isReserveReturn
       ? [
           {
@@ -1605,6 +1625,11 @@ export type RecruitApplicationMessageInput = {
   discordId: string | null;
   discordTag: string | null;
   /**
+   * Подразделение, выбранное кандидатом. Пусто — направление выводится из
+   * текста анкеты (прежнее поведение для заявок Google-формы).
+   */
+  unit?: Unit | null;
+  /**
    * Упоминание командиров подразделения (готовая строка вида `<@&123>`).
    * Пусто — строки пинга нет: упоминать несуществующую роль нельзя, Discord
    * покажет «@unknown-role».
@@ -1623,10 +1648,16 @@ export type RecruitApplicationMessageInput = {
 export function buildRecruitApplicationMessage(
   input: RecruitApplicationMessageInput
 ): string {
+  // Выбранное подразделение важнее догадки по тексту: именно оно определит
+  // лист ШДС при зачислении
+  const direction = input.unit
+    ? `${input.unit}${input.unit === "Танковая рота" ? " (ТР)" : " (АД)"}`
+    : recruitDirectionHint(input.about);
+
   const lines = [
     "**Заявка на вступление:**",
     `1. ФИО: ${input.fullName?.trim() || "не указано"}`,
-    `2. Направление: ${recruitDirectionHint(input.about)}`,
+    `2. Направление: ${direction}`,
     `3. Возраст: ${input.age ?? "—"}`,
     `4. Опыт в Arma 3: ${input.armaExperience.trim() || "—"}`,
     `5. Discord: ${

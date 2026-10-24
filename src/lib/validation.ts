@@ -592,3 +592,61 @@ export function commanderBadgeLabel(fighter: { name?: string | null; post?: stri
   if (isDeputyDivisionCommander(fighter)) return "★ ЗАМ. КОМ. ДИВИЗИОНА";
   return null;
 }
+
+/* ------------------------------------------------------------------ */
+/* Права на решения по заявкам в Discord                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Фамилии высшего комсостава, которым разрешено принимать решения кнопками в
+ * Discord, даже если у них нет роли модератора.
+ *
+ * Требование перечисляет их поимённо: Командир Корпуса (Волков) и его
+ * заместители (Иванов И.А., Иванов К.М.). Список выводится из тех же
+ * констант, что и защита от предупреждений, — двух разных перечней
+ * «командования» в проекте быть не должно.
+ */
+export const COMMAND_STAFF_FULL_NAMES: readonly string[] = [
+  CORPS_COMMANDER_FULL_NAME,
+  ...CORPS_DEPUTY_FULL_NAMES,
+];
+
+/** Фамилии (первое слово ФИО) высшего комсостава — ключи сравнения */
+const COMMAND_STAFF_SURNAME_KEYS: readonly string[] = COMMAND_STAFF_FULL_NAMES.map((fullName) =>
+  fullNameKey(fullName.trim().split(/\s+/)[0] ?? "")
+).filter(Boolean);
+
+/**
+ * Имя участника Discord совпадает с высшим комсоставом.
+ *
+ * Сравниваются два варианта:
+ *   * полное ФИО («Волков Д. В.», «Иванов К.М.») — по ключу без разделителей;
+ *   * односложное имя/ник («Волков», «Иванов») — по фамилии из списка.
+ *
+ * Ник в Discord редко содержит инициалы, поэтому одного строгого сравнения
+ * ФИО было бы мало: командир корпуса с ником «Волков» не смог бы принять
+ * заявку. Обратная сторона — однофамилец получит право; в подразделении это
+ * приемлемо, а роль модератора остаётся основным способом выдачи прав.
+ */
+export function isCommandStaffIdentity(name: unknown): boolean {
+  const key = fullNameKey(name);
+  if (!key) return false;
+  if (COMMAND_STAFF_FULL_NAMES.some((fullName) => fullNameKey(fullName) === key)) return true;
+  return COMMAND_STAFF_SURNAME_KEYS.includes(key);
+}
+
+/** Признаки командирской роли Discord: «Командир роты», «Зам. ком. дивизиона» */
+const COMMAND_STAFF_ROLE_RE = /(ком|командир|кмд).*(корпус|рот|дивизион)|зам.*(корпус|рот|дивизион)/;
+
+/**
+ * Название роли Discord указывает на командирскую должность.
+ *
+ * В Discord должности часто заведены ролями («Командир танковой роты»,
+ * «Зам. ком. арт. дивизиона»), и требование разрешает им одобрять заявки.
+ * Сравнение идёт по нормализованной строке: точки, регистр и сокращения
+ * («зам.кмд.») не мешают.
+ */
+export function isCommandStaffRoleName(roleName: unknown): boolean {
+  const key = postKey(roleName);
+  return !!key && COMMAND_STAFF_ROLE_RE.test(key);
+}

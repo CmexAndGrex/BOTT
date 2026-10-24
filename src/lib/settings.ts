@@ -1,5 +1,11 @@
 import { db } from "@/db";
 import { settings } from "@/db/schema";
+import {
+  DEFAULT_SHEET_ART,
+  DEFAULT_SHEET_TANK,
+  UNIT_ROLE_NAMES,
+  type Unit,
+} from "@/lib/recruits";
 
 /**
  * Дополнительные настройки каналов Discord для заявок и рапортов.
@@ -47,6 +53,80 @@ export const ROLE_ENV_FALLBACKS: Record<string, string> = {
   moderator_role_id: "DISCORD_MODERATOR_ROLE_ID",
 };
 
+/* ------------------------------------------------------------------ */
+/* Зачисление новобранцев: роли и листы ШДС                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Ключи настроек ролей Discord, которые выдаются при зачислении.
+ *
+ * Вынесены в константы, потому что читают их три разных места: форма
+ * настроек, панель модерации и Discord-бот. Строка, набранная руками в одном
+ * из них, разошлась бы с остальными, и роль молча не выдавалась бы.
+ */
+export const ENLISTMENT_ROLE_SETTINGS = {
+  /** Основная роль корпуса — «Артиллерийско-Танковый Корпус» */
+  corps: "role_corps_id",
+  /** Роль подразделения «Танковая рота» */
+  tank: "role_tank_id",
+  /** Роль подразделения «Артиллерийский дивизион» */
+  art: "role_art_id",
+  /** Роль начального звания («Рядовой» / «Курсант») */
+  rank: "role_recruit_rank_id",
+} as const;
+
+/**
+ * Ключи настроек названий листов ШДС по подразделениям.
+ *
+ * Раскладка листа (колонки, блоки, границы оценок) зашита в коде и от имени
+ * листа не зависит: настроить можно только имя, чтобы таблицу можно было
+ * называть по-своему. Пусто — берётся имя по умолчанию (см. UNITS).
+ */
+export const UNIT_SHEET_SETTINGS: Record<Unit, string> = {
+  "Танковая рота": "shds_sheet_tank",
+  "Артиллерийский дивизион": "shds_sheet_art",
+};
+
+/** Имена листов ШДС по умолчанию: те же, что и у подразделений */
+export const DEFAULT_UNIT_SHEET_NAMES: Record<Unit, string> = {
+  "Танковая рота": DEFAULT_SHEET_TANK,
+  "Артиллерийский дивизион": DEFAULT_SHEET_ART,
+};
+
+/**
+ * Ключи настроек ролей подразделений.
+ *
+ * Новые ключи (role_tank_id / role_art_id) приоритетнее прежних
+ * (tank_role_id / art_role_id): старые остаются рабочими для установок, где их
+ * уже заполнили, — иначе обновление панели молча отключило бы автоопределение
+ * подразделения по ролям.
+ */
+export const UNIT_ROLE_SETTINGS: Record<Unit, { key: string; legacyKey: string }> = {
+  "Танковая рота": { key: ENLISTMENT_ROLE_SETTINGS.tank, legacyKey: "tank_role_id" },
+  "Артиллерийский дивизион": { key: ENLISTMENT_ROLE_SETTINGS.art, legacyKey: "art_role_id" },
+};
+
+/** Название листа ШДС для подразделения: настройка, при пустом значении — по умолчанию */
+export function unitSheetName(unit: Unit, map: Map<string, string>): string {
+  const key = UNIT_SHEET_SETTINGS[unit];
+  const configured = (map.get(key) || "").trim();
+  return configured || DEFAULT_UNIT_SHEET_NAMES[unit];
+}
+
+/**
+ * ID роли подразделения из настроек (с учётом прежнего ключа).
+ * Пусто — роль ищется по имени на сервере, поэтому настраивать необязательно.
+ */
+export function unitRoleId(unit: Unit, map: Map<string, string>): string {
+  const { key, legacyKey } = UNIT_ROLE_SETTINGS[unit];
+  return (map.get(key) || "").trim() || (map.get(legacyKey) || "").trim();
+}
+
+/** Имя роли подразделения на сервере — запасной путь, когда ID не задан */
+export function unitRoleName(unit: Unit): string {
+  return UNIT_ROLE_NAMES[unit];
+}
+
 export const DEFAULT_SETTINGS: Record<string, string> = {
   // Discord
   discord_token: "",
@@ -84,6 +164,22 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
    */
   tank_role_id: "",
   art_role_id: "",
+  /**
+   * Роли Discord, которые выдаются при зачислении новобранца (вкладка
+   * «Зачисление и роли»). Пусто — роль ищется по имени на сервере, поэтому
+   * зачисление не ломается на установке без настроек.
+   */
+  role_corps_id: "",
+  role_tank_id: "",
+  role_art_id: "",
+  role_recruit_rank_id: "",
+  /**
+   * Названия листов ШДС, в которые пишется зачисленный боец. Пусто — имя
+   * подразделения («Танковая рота» / «Артиллерийский дивизион»): так листы
+   * называются в таблице по умолчанию.
+   */
+  shds_sheet_tank: "",
+  shds_sheet_art: "",
   /**
    * Белый список ID вебхуков, сообщения которых считаются заявками
    * (формы присылают заявки через вебхуки Discord). Пусто = вебхуки

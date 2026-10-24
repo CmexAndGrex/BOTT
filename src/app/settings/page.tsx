@@ -12,6 +12,7 @@
  *
  * Разметка разнесена по компонентам вкладок:
  *   * integrations-tab.tsx — Discord, Google Таблица, rs-red.com, расширение;
+ *   * enlistment-tab.tsx   — роли Discord при вступлении и листы ШДС;
  *   * scheduler-tab.tsx    — задачи №1–5 и сводка автоматики;
  *   * content-tab.tsx      — тексты пингов, гифки, карта должностей;
  *   * maintenance-tab.tsx  — сверка ролей и панель обслуживания с копиями.
@@ -31,6 +32,7 @@ import {
   type SettingsState,
 } from "@/components/settings/tabs";
 import IntegrationsTab from "@/components/settings/integrations-tab";
+import EnlistmentTab from "@/components/settings/enlistment-tab";
 import SchedulerTab from "@/components/settings/scheduler-tab";
 import ContentTab from "@/components/settings/content-tab";
 import MaintenanceTab from "@/components/settings/maintenance-tab";
@@ -232,6 +234,12 @@ export default function SettingsPage() {
             regenerateKey={regenerateKey}
             regenerating={regenerating}
           />
+        </SettingsTabPanel>
+      )}
+
+      {tab === "enlistment" && (
+        <SettingsTabPanel id="enlistment">
+          <EnlistmentTab settings={settings} set={set} />
         </SettingsTabPanel>
       )}
 

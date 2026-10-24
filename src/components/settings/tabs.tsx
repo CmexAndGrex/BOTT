@@ -24,6 +24,7 @@ import {
   CalendarClock,
   Plug,
   SlidersHorizontal,
+  UserPlus,
   Wrench,
 } from "lucide-react";
 
@@ -34,7 +35,12 @@ export type SettingsState = Record<string, string>;
 export type SetSetting = (key: string, value: string) => void;
 
 /** Идентификаторы вкладок: они же значения ?tab= в адресе */
-export type SettingsTabId = "integrations" | "scheduler" | "content" | "maintenance";
+export type SettingsTabId =
+  | "integrations"
+  | "enlistment"
+  | "scheduler"
+  | "content"
+  | "maintenance";
 
 export type SettingsTab = {
   id: SettingsTabId;
@@ -50,6 +56,12 @@ export const SETTINGS_TABS: SettingsTab[] = [
     label: "Интеграции",
     hint: "Discord, Google Таблица, rs-red.com и расширение панели",
     icon: Plug,
+  },
+  {
+    id: "enlistment",
+    label: "Зачисление и роли",
+    hint: "Роли Discord при вступлении и листы ШДС по подразделениям",
+    icon: UserPlus,
   },
   {
     id: "scheduler",

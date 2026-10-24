@@ -35,6 +35,7 @@ import { db } from "@/db";
 import { members, processedRequests } from "@/db/schema";
 import { getSettings } from "@/lib/settings";
 import { MEMBER_STATUS, normalizeMemberStatus } from "@/lib/recruits";
+import { isCommandStaffIdentity, isCommandStaffRoleName } from "@/lib/validation";
 import { applyShdsRequest, parseRequestText, SHDS_ACTIONS, type ParsedRequest } from "@/lib/gsheets";
 import { applyRoleCommand, parseRoleCommand, parseRoleRequest, COMMON_ROLE_IDS } from "@/lib/roles";
 import { moveToReserve, returnFromReserve } from "@/lib/reserve";
@@ -415,8 +416,8 @@ async function handleRolesReaction({
 /* ------------------------------------------------------------------ */
 
 /**
- * Проверка прав на решение: администратор сервера, модератор заявок или
- * Командирский состав.
+ * Проверка прав на решение: администратор сервера, модератор заявок,
+ * Командирский состав или лично высший комсостав корпуса.
  *
  * Проверяются права и роли именно на сервере (кэш участника), а не «кто угодно
  * с доступом к каналу»: решение по заявке выдаёт доступ в личный кабинет, и
@@ -426,11 +427,29 @@ async function handleRolesReaction({
  * Право «Администратор» проверяется отдельно: у владельца сервера может не быть
  * ни одной из настроенных ролей (он их и настраивает), и кнопка отвечала бы ему
  * «недостаточно прав» на собственном сервере.
+ *
+ * Дополнительно допускаются (требование):
+ *   * участники с ФИО/ником высшего комсостава — Волков, Иванов И.А.,
+ *     Иванов К.М. (isCommandStaffIdentity);
+ *   * участники с командирской ролью Discord — «Командир роты», «Зам. ком.
+ *     дивизиона» и подобные (isCommandStaffRoleName).
+ *
+ * Тип участника описан вручную, а не через discord.js: функция остаётся
+ * проверяемой тестами без шлюзового клиента.
  */
 function canReview(
   member:
     | {
-        roles: { cache: { has(id: string): boolean } };
+        roles: {
+          cache: {
+            has(id: string): boolean;
+            /** Роли участника: нужны для проверки командирских имён ролей */
+            map?<T>(fn: (role: { id: string; name: string }) => T): T[];
+          };
+        };
+        displayName?: string | null;
+        user?: { username?: string | null; globalName?: string | null } | null;
+        nickname?: string | null;
         permissions?: {
           has(permission: PermissionResolvable, checkAdmin?: boolean): boolean;
         };
@@ -449,10 +468,32 @@ function canReview(
     }
   }
   const roles = member.roles.cache;
-  return Boolean(
+  if (
     (config.moderatorRoleId && roles.has(config.moderatorRoleId)) ||
-      (config.commandRoleId && roles.has(config.commandRoleId))
-  );
+    (config.commandRoleId && roles.has(config.commandRoleId))
+  ) {
+    return true;
+  }
+
+  /**
+   * Высший комсостав по ФИО/нику. Порядок проверки именно после ролей:
+   * роль — подтверждённое право, а совпадение ника — запасной путь для тех,
+   * кому роль ещё не выдали.
+   */
+  const names = [member.displayName, member.nickname, member.user?.globalName, member.user?.username];
+  if (names.some((name) => isCommandStaffIdentity(name))) return true;
+
+  // Командирские роли: «Командир роты», «Зам. ком. дивизиона» и т.п.
+  if (typeof roles.map === "function") {
+    try {
+      const roleNames = roles.map((role) => role.name);
+      if (roleNames.some((name) => isCommandStaffRoleName(name))) return true;
+    } catch {
+      /* кэш ролей без имён — ограничиваемся проверками выше */
+    }
+  }
+
+  return false;
 }
 
 /** Текст ответа модератору (ephemeral) после решения по кнопке */
@@ -485,9 +526,13 @@ async function handleReviewButton(
     .catch(() => null);
 
   if (!canReview(reviewerMember, config)) {
+    /**
+     * Текст отказа закреплён требованием дословно: боец без прав должен
+     * получить понятный ответ, а не молчание и не «приложение не отвечает».
+     * Ответ эфемерный — канал не засоряется.
+     */
     await interaction.reply({
-      content:
-        "🚫 Недостаточно прав: решение по заявкам принимают модератор заявок и Командирский состав.",
+      content: "❌ У вас нет прав для принятия решений по рапортам/заявкам",
       ephemeral: true,
     });
     return;

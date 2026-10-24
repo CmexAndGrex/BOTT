@@ -29,15 +29,19 @@ import {
   isDiscordSnowflake,
   isFullNameWithInitials,
   isRecruitApplicationKind,
+  isUnit,
   LoginThrottle,
   MANUAL_DISCORD_ID,
   normalizeCallsign,
   normalizeFullName,
   normalizePersonName,
   PENDING_NOTICE,
+  RECRUIT_RANK,
   readApplication,
+  UNITS,
   validateApplication,
   type RecruitApplicationKind,
+  type Unit,
 } from "@/lib/recruits";
 import { registerThrottle } from "@/lib/throttle-registry";
 
@@ -57,6 +61,8 @@ const throttle = registerThrottle(new LoginThrottle(5, 30 * 60 * 1000));
 type ApplyBody = {
   callsign?: unknown;
   password?: unknown;
+  /** Подразделение из формы: «Танковая рота» или «Артиллерийский дивизион» */
+  unit?: unknown;
   age?: unknown;
   armaExperience?: unknown;
   specialization?: unknown;
@@ -102,6 +108,33 @@ export async function POST(req: NextRequest) {
   const kind: RecruitApplicationKind = isRecruitApplicationKind(body.kind)
     ? body.kind
     : DEFAULT_APPLICATION_KIND;
+
+  /**
+   * Подразделение — обязательный выбор формы.
+   *
+   * От него зависит, в какой лист ШДС попадёт зачисленный боец и какую роль
+   * Discord ему выдадут. Угадывать его по тексту анкеты нельзя: ошибка увела бы
+   * бойца не в тот лист, а расхождение с табелем пришлось бы разбирать вручную.
+   * Значение не из UNITS отклоняется явной ошибкой, а не «тихо приводится» к
+   * роте: пусть кандидат выберет сам.
+   */
+  const unitRaw = typeof body.unit === "string" ? body.unit.trim() : "";
+  if (!unitRaw) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: `Выберите подразделение: ${UNITS.join(" или ")}`,
+      },
+      { status: 400 }
+    );
+  }
+  if (!isUnit(unitRaw)) {
+    return NextResponse.json(
+      { ok: false, error: `Неизвестное подразделение «${unitRaw}»` },
+      { status: 400 }
+    );
+  }
+  const unit: Unit = unitRaw;
 
   /**
    * ФИО обязательно для ЛЮБОЙ заявки.
@@ -168,6 +201,8 @@ export async function POST(req: NextRequest) {
     // из запаса от зачисления и находит строку бойца на листе «Запас»
     kind,
     fullName,
+    // Подразделение: сохраняется в заявке и определяет лист ШДС при зачислении
+    unit,
   });
 }
 
@@ -290,8 +325,15 @@ async function createRecruit(
         callsign: input.callsign,
         passwordHash,
         rank: DEFAULT_RANK,
-        // Подразделение назначает модератор: от него зависит лист Google Таблицы
-        unit: null,
+        /**
+         * Подразделение из формы ставится сразу.
+         *
+         * Раньше здесь было null («назначает модератор»), и при одобрении
+         * заявки лист ШДС выбирал человек — а кандидат уже выбрал
+         * подразделение явно. Незачем заставлять штаб повторять выбор и
+         * рисковать ошибкой: правильный лист известен из заявки.
+         */
+        unit: input.unit,
         status: "pending",
         role: "recruit",
         discordId,
@@ -328,6 +370,13 @@ type ApplicationInput = {
   kind: RecruitApplicationKind;
   /** ФИО возвращающегося (пусто для новобранца) */
   fullName: string;
+  /**
+   * Подразделение, выбранное кандидатом в форме.
+   *
+   * Обязательно: от него зависит лист ШДС (shds_sheet_tank / shds_sheet_art) и
+   * роль Discord при зачислении. Проверено в POST — здесь уже Unit.
+   */
+  unit: Unit;
 };
 
 /**
@@ -361,6 +410,9 @@ async function finalizeApplication(
         // отличает возврат из запаса от зачисления и находит строку бойца
         kind: input.kind,
         fullName: input.fullName || null,
+        // Подразделение из формы: определяет лист ШДС и роль Discord при
+        // одобрении (см. approveRecruitApplication / approveReserveReturn)
+        unit: input.unit,
         discordTag: input.discordTag.trim().slice(0, 64) || fromCookie?.username || "",
         discordId,
         age: input.data.age,
@@ -393,6 +445,7 @@ async function finalizeApplication(
         "Позывной": input.callsign,
         "Вид заявки": APPLICATION_KIND_LABELS[input.kind],
         ...(input.fullName ? { "ФИО": input.fullName } : {}),
+        "Подразделение": input.unit,
         "Возраст": String(input.data.age),
         "Специализация": input.data.specialization,
         "Discord": discordId || "не указан",

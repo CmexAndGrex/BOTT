@@ -49,22 +49,32 @@ import {
 import { generateTempPassword } from "@/lib/temp-password";
 import {
   APPLICATION_KIND_RESERVE_RETURN,
-  DEFAULT_RANK,
+  CORPS_ROLE_NAME,
+  isEnlistmentRank,
+  isUnassignedUnit,
+  isUnit,
   MEMBER_STATUS,
   normalizePersonName,
+  RECRUIT_RANK,
   UNITS,
   type Unit,
 } from "@/lib/recruits";
-import { COMMON_ROLE_IDS, findRoleIdByName } from "@/lib/roles";
+// Из roles.ts берутся только константы и поиск роли по имени; resolveBeretRoleId
+// подгружается динамически в applyReport — так исторический контракт модуля
+// (лёгкий импорт в тестах) не меняется
+import { COMMON_ROLE_IDS, findRoleIdByName, PRIVATE_ROLE_ID, RANK_ROLE_IDS } from "@/lib/roles";
 import { statusTrackingFields } from "@/lib/roles-monitor";
 import { isBeretPassed } from "@/lib/exams";
 import {
   CHANNEL_ENV_FALLBACKS,
+  ENLISTMENT_ROLE_SETTINGS,
   getSettings,
   RECRUIT_CHANNEL_SETTING,
   REPORTS_CHANNEL_SETTING,
   ROLE_ENV_FALLBACKS,
   ROLE_REQUESTS_CHANNEL_SETTING,
+  unitRoleId,
+  unitRoleName,
   VACATION_CHANNEL_SETTING,
 } from "@/lib/settings";
 // Сданные нормативы можно проставить правкой таблицы, а не рапортом через
@@ -305,36 +315,111 @@ export function recruitDmText(callsign: string, password: string): string {
 }
 
 /**
- * Выдача базовой роли новобранца на сервере.
+ * Подпись бойца для колонки «Фамилия, инициалы» в ШДС.
  *
- * Работает через Bot API (REST), а не через кэш гильдии: решение может прийти
- * из веб-панели, где шлюзового клиента Discord нет вовсе. `guild_id` берём из
- * настроек, а при его отсутствии — только при единственном сервере у бота:
- * иначе роль уехала бы «не на тот» сервер.
+ * Требование зачисления: в таблицу пишется ФИО, а не позывной — позывной
+ * остаётся логином. У карточек синхронизации rs-red.com ФИО может быть не
+ * заполнено (там лежит односложное имя), тогда откатываемся на позывной:
+ * пустая ячейка имени сделала бы бойца ненаходимым на листе.
  */
-async function grantRecruitRole(discordId: string | null): Promise<void> {
-  if (!discordId) return;
+function sheetNameFor(member: { name: string; callsign: string | null }): string {
+  const name = (member.name || "").trim();
+  const callsign = (member.callsign || "").trim();
+  // ФИО содержит пробел («Иванов И.И.»); одиночное слово — это позывной
+  if (name && name.includes(" ")) return name;
+  return callsign || name;
+}
+
+/**
+ * Выдача ролей Discord при зачислении новобранца.
+ *
+ * Требование: одобренный кандидат получает три роли —
+ *   1. «Артиллерийско-Танковый Корпус» (основная роль корпуса);
+ *   2. роль своего подразделения («Танковая рота» / «Артиллерийский дивизион»);
+ *   3. роль начального звания («Рядовой» / «Курсант»).
+ *
+ * Порядок разрешения ID роли одинаков для всех трёх: настройка панели →
+ * поиск по имени на сервере → «зашитая» константа только там, где она есть
+ * (роль корпуса и «Рядовой» — официальные роли клана). Так зачисление работает
+ * и на установке без настроек, и на сервере, где ID ролей другие.
+ *
+ * Ошибки Discord не пробрасываются: решение штаба уже записано в БД, а роль
+ * повторно выдаст кнопка в панели или фоновая сверка ролей. Итог возвращается
+ * текстом и попадает в ответ офицеру и в журнал.
+ */
+export async function grantEnlistmentRoles(
+  discordId: string | null,
+  unit: Unit | null,
+  rank: string
+): Promise<string> {
+  if (!discordId) return "роли не выданы: у бойца нет Discord ID";
+
   try {
     const map = await getSettings();
     const token =
       (map.get("discord_token") || "").trim() || (process.env.DISCORD_BOT_TOKEN || "").trim();
-    if (!token) return;
+    if (!token) return "роли не выданы: не задан токен бота";
 
-    let guildId = (map.get("guild_id") || "").trim();
-    const { addGuildMemberRole, getBotGuildIds } = await import("@/lib/discord");
-    if (!guildId) {
-      const ids = await getBotGuildIds();
-      if (ids.length !== 1) {
-        console.warn("[review] guild_id не задан, бот на нескольких серверах — роль не выдана");
-        return;
-      }
-      [guildId] = ids;
+    const guildId = await resolveGuildId((map.get("guild_id") || "").trim());
+    if (!guildId) return "роли не выданы: сервер Discord не определён (guild_id)";
+
+    const { addGuildMemberRole, getGuildRoles } = await import("@/lib/discord");
+    // Список ролей нужен только как запасной путь: если все три ID заданы в
+    // настройках, лишний запрос к Discord не делается
+    const configuredCorps = realDiscordId(map.get(ENLISTMENT_ROLE_SETTINGS.corps));
+    const configuredUnit = unit ? realDiscordId(unitRoleId(unit, map)) : "";
+    const configuredRank = realDiscordId(map.get(ENLISTMENT_ROLE_SETTINGS.rank));
+    const needsLookup =
+      !configuredCorps || (unit && !configuredUnit) || !configuredRank;
+    const roles = needsLookup ? await getGuildRoles(guildId) : [];
+
+    const roleIds: { roleId: string; label: string }[] = [];
+
+    // 1. Основная роль корпуса
+    const corpsId =
+      configuredCorps ||
+      findRoleIdByName(roles, CORPS_ROLE_NAME) ||
+      COMMON_ROLE_IDS.ATK_CORPS;
+    if (corpsId) roleIds.push({ roleId: corpsId, label: "корпус" });
+
+    // 2. Роль подразделения — только когда подразделение известно
+    if (unit) {
+      const unitId = configuredUnit || findRoleIdByName(roles, unitRoleName(unit));
+      if (unitId) roleIds.push({ roleId: unitId, label: unit });
     }
 
-    await addGuildMemberRole(guildId, discordId, COMMON_ROLE_IDS.RECRUIT);
+    // 3. Роль начального звания
+    const rankId =
+      configuredRank ||
+      findRoleIdByName(roles, rank) ||
+      RANK_ROLE_IDS[rank] ||
+      (rank === RECRUIT_RANK ? PRIVATE_ROLE_ID : "");
+    if (rankId) roleIds.push({ roleId: rankId, label: rank });
+
+    if (roleIds.length === 0) return "роли не выданы: ни одна роль не найдена на сервере";
+
+    const granted: string[] = [];
+    const failed: string[] = [];
+    for (const { roleId, label } of roleIds) {
+      try {
+        await addGuildMemberRole(guildId, discordId, roleId);
+        granted.push(label);
+      } catch (e) {
+        // Одна роль не должна отменять остальные: роли выдаются по очереди
+        failed.push(`${label} (${e instanceof Error ? e.message : String(e)})`);
+        console.warn(DISCORD_WARNING, `роль «${label}» не выдана`, e);
+      }
+    }
+
+    if (granted.length === 0) {
+      return `роли не выданы: ${failed.join("; ")}`;
+    }
+    return failed.length
+      ? `выданы роли: ${granted.join(", ")}; не выданы: ${failed.join("; ")}`
+      : `выданы роли: ${granted.join(", ")}`;
   } catch (e) {
-    // Роль — не критичная часть: доступ в ЛК уже выдан
-    console.warn(DISCORD_WARNING, "роль новобранца не выдана", e);
+    console.warn(DISCORD_WARNING, "роли при зачислении не выданы", e);
+    return `роли не выданы: ${e instanceof Error ? e.message : String(e)}`;
   }
 }
 
@@ -346,8 +431,9 @@ async function grantRecruitRole(discordId: string | null): Promise<void> {
  * текстом в итог решения и попадает в журнал — штаб повторит синхронизацию из
  * панели, где для этого есть отдельное действие.
  *
- * Подразделение на момент зачисления обычно ещё не назначено (его выбирает
- * штаб), и тогда строку записывать некуда — сообщаем об этом прямо, а не молчим.
+ * Подразделение приходит из формы заявки, поэтому лист известен заранее. Пусто
+ * оно только у заявок Google-формы и записей до появления поля: тогда строку
+ * заводит штаб вручную, и мы говорим об этом прямо, а не молчим.
  */
 async function writeMemberToShds(memberId: number, callsign: string): Promise<string> {
   try {
@@ -361,10 +447,11 @@ async function writeMemberToShds(memberId: number, callsign: string): Promise<st
       isVacation: false,
       vacationRemove: false,
       shdsAction: SHDS_ACTIONS.ADD,
-      // Имя листа = подразделение бойца
+      // Имя листа = подразделение бойца (настроенное имя листа — в getSheet)
       unit: member.unit,
-      userName: member.callsign || member.name,
-      rank: member.rank || DEFAULT_RANK,
+      // В колонку «Фамилия, инициалы» пишется ФИО бойца, а не позывной
+      userName: sheetNameFor(member),
+      rank: member.rank || RECRUIT_RANK,
       steamId: "",
       discordId: realDiscordId(member.discordId),
       отделение: "",
@@ -415,7 +502,7 @@ async function ensureShdsRowForMember(
     const layout = resolveLayout(member.unit);
     await sheet.loadCells();
 
-    const names = [member.callsign, member.name, callsign, ...extraNames].filter(
+    const names = [member.callsign, member.name, sheetNameFor(member), callsign, ...extraNames].filter(
       (n): n is string => Boolean(n && n.trim())
     );
     for (const name of names) {
@@ -541,12 +628,26 @@ export async function approveReserveReturn(
   }
 
   try {
+    /**
+     * Подразделение возврата.
+     *
+     * Приоритет: поле карточки → выбор кандидата в форме заявки. Второй
+     * источник нужен бойцам, у которых unit не заполнен (строки синхронизации
+     * rs-red.com): возвращающийся сам указывает подразделение в форме, и
+     * строка должна вернуться именно туда, а не «куда-нибудь».
+     */
+    const restoredUnit = isUnit(member.unit)
+      ? member.unit
+      : isUnit(application.unit)
+        ? application.unit
+        : member.unit || undefined;
+
     // 1. Google Таблица: строка целиком (с отметками экзаменов) возвращается в
     //    подразделение, лист «Запас» очищается, прежние роли читаются из колонки AI
     const { returnFromReserve } = await import("@/lib/reserve");
     const sheet = await returnFromReserve({
       userName: member.callsign || member.name,
-      unit: member.unit || undefined,
+      unit: restoredUnit,
       rank: member.rank,
       discordId: realDiscordId(member.discordId),
       post: member.post || "",
@@ -568,6 +669,10 @@ export async function approveReserveReturn(
       .set({
         active: true,
         status: MEMBER_STATUS.ACTIVE,
+        // Подразделение заполняется выбором из формы, если карточка его не имела:
+        // иначе поле осталось бы пустым и следующий рапорт снова упирался бы в
+        // «подразделение не назначено»
+        ...(isUnit(restoredUnit) && !isUnit(member.unit) ? { unit: restoredUnit } : {}),
         // Возврат в строй закрывает контроль ролей: момент исключения и признак
         // отправленного напоминания снимаются, при следующем исключении отсчёт
         // начнётся заново.
@@ -674,6 +779,15 @@ export async function approveRecruitApplication(
   }
 
   /**
+   * Подразделение, выбранное кандидатом в форме.
+   *
+   * Именно оно определяет лист ШДС (shds_sheet_tank / shds_sheet_art) и роль
+   * Discord. У заявок Google-формы и записей до появления поля выбор пуст —
+   * тогда подразделение остаётся за штабом, как раньше.
+   */
+  const chosenUnit: Unit | null = isUnit(application.unit) ? application.unit : null;
+
+  /**
    * Боец уже есть в составе — по Discord ID или по нормализованному ФИО.
    *
    * Проверка стоит ДО разбора позывного: иначе заявка человека, который уже
@@ -740,6 +854,18 @@ export async function approveRecruitApplication(
           status: MEMBER_STATUS.ACTIVE,
           active: true,
           role: lookup.member.role === "recruit" ? "member" : lookup.member.role,
+          /**
+           * Подразделение и звание доводятся до состояния «зачислен».
+           *
+           * Карточка из /apply уже содержит unit из формы, но заявка могла
+           * быть подана до появления поля (или через Google-форму). Пустое
+           * подразделение здесь заполняется выбором из заявки, если он есть.
+           * Звание «Курсант» (значение по умолчанию при создании рапорта)
+           * меняется на «Рядовой» — именно это звание записывается в ШДС и
+           * висит ролью на сервере.
+           */
+          ...(chosenUnit && isUnassignedUnit(lookup.member.unit) ? { unit: chosenUnit } : {}),
+          ...(isEnlistmentRank(lookup.member.rank) ? { rank: RECRUIT_RANK } : {}),
           applicationData: {
             ...(lookup.member.applicationData ?? {}),
             reviewedBy: reviewer,
@@ -852,6 +978,17 @@ export async function approveRecruitApplication(
             ),
             // Discord ID из заявки — актуальный: кандидат мог привязать новый
             discordId: discordFromApplication || existing.discordId,
+            /**
+             * Подразделение: выбор из заявки заполняет пустое поле карточки.
+             *
+             * Существующий unit не перезаписываем — боец мог быть переведён в
+             * другое подразделение приказом, и заявка не должна его «вернуть».
+             * А вот пустое/«не назначено» поле заполняется выбором кандидата:
+             * от него зависит лист ШДС при зачислении.
+             */
+            ...(chosenUnit && isUnassignedUnit(existing.unit) ? { unit: chosenUnit } : {}),
+            // Звание «Курсант»/пустое → «Рядовой»: именно его ждёт ШДС и роль
+            ...(isEnlistmentRank(existing.rank) ? { rank: RECRUIT_RANK } : {}),
             // Логин ставим только когда он свободен (см. assignCallsign)
             ...(assignCallsign && assignCallsign !== existing.callsign
               ? { callsign: assignCallsign }
@@ -910,10 +1047,18 @@ export async function approveRecruitApplication(
             name: application.fullName || callsign,
             callsign,
             passwordHash,
-            rank: DEFAULT_RANK,
-            // Подразделение назначает штаб в панели: от него зависит лист ШДС,
-            // и угадывать его по заявке нельзя
-            unit: null,
+            // Звание бойца в строю: «Рядовой» (курсант — статус кандидата)
+            rank: RECRUIT_RANK,
+            /**
+             * Подразделение — из заявки.
+             *
+             * Раньше здесь было null, и лист ШДС выбирал модератор уже после
+             * одобрения. Теперь кандидат выбирает подразделение в форме
+             * обязательно: правильный лист известен сразу, и запись в ШДС
+             * выполняется тем же решением. Пусто только у заявок, заведённых
+             * Google-формой или до появления поля.
+             */
+            unit: chosenUnit,
             status: MEMBER_STATUS.ACTIVE,
             role: "recruit",
             discordId: application.discordId,
@@ -978,7 +1123,23 @@ export async function approveRecruitApplication(
       );
     }
 
-    await grantRecruitRole(realDiscordId(application.discordId) || null);
+    /**
+     * Роли Discord выдаются по итоговой карточке бойца, а не по заявке.
+     *
+     * Разница принципиальна: подразделение могло быть унаследовано от
+     * существующей карточки (перевод приказом), а звание — уже присвоено.
+     * Читаем строку после всех UPDATE, чтобы роль подразделения и звания
+     * совпали с тем, что записано в БД и в ШДС.
+     */
+    const [enlisted] = await db.select().from(members).where(eq(members.id, memberId));
+    const enlistmentUnit: Unit | null = isUnit(enlisted?.unit) ? enlisted.unit : null;
+    const enlistmentRank = (enlisted?.rank || RECRUIT_RANK).trim() || RECRUIT_RANK;
+
+    const rolesOutcome = await grantEnlistmentRoles(
+      realDiscordId(application.discordId) || realDiscordId(enlisted?.discordId) || null,
+      enlistmentUnit,
+      enlistmentRank
+    );
 
     await db.insert(logs).values({
       category: "edit",
@@ -989,6 +1150,9 @@ export async function approveRecruitApplication(
         "Позывной": loginName,
         ...(application.fullName ? { "ФИО": application.fullName } : {}),
         "Discord": application.discordId || "не привязан",
+        "Подразделение": enlistmentUnit || "не назначено",
+        "Звание": enlistmentRank,
+        "Роли": rolesOutcome,
         "ЛС с доступом": dmDelivered ? "доставлено" : "не доставлено",
         "ШДС": shdsOutcome || "не выполнялось",
         "Повтор": isRetry ? "да" : "нет",
@@ -1027,7 +1191,7 @@ export async function approveRecruitApplication(
       ok: true,
       message: `${loginName} зачислен${accessNote}${passwordNote}${
         shdsOutcome ? `. ${shdsOutcome}` : ""
-      }`,
+      }. ${rolesOutcome}`,
       memberId,
       callsign: loginName,
       dmDelivered,
@@ -1201,6 +1365,34 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
   try {
     switch (report.type) {
       case "exam": {
+        /**
+         * Подразделение на лету: поле пусто или «не назначено».
+         *
+         * Требование: если у бойца в базе unit не задан, определить его по
+         * ролям Discord и СОХРАНИТЬ, чтобы оценки при одобрении экзамена
+         * гарантированно попали в правильный лист ШДС. Порядок важен: сначала
+         * определяем (и записываем в БД), затем пишем оценки — иначе столбец
+         * нормативов пришлось бы выбирать «на глаз».
+         */
+        if (isUnassignedUnit(member.unit)) {
+          const detected = await resolveMemberUnitFromDiscord(
+            { unit: member.unit, discordId: member.discordId },
+            map
+          );
+          if (detected) {
+            member.unit = detected;
+            try {
+              await db
+                .update(members)
+                .set({ unit: detected, updatedAt: new Date() })
+                .where(eq(members.id, member.id));
+              parts.push(`подразделение определено по ролям Discord: «${detected}»`);
+            } catch (e) {
+              console.warn("[review] Не удалось сохранить подразделение бойца:", e);
+            }
+          }
+        }
+
         if (!member.unit) {
           parts.push("подразделение не назначено — экзамены в ШДС не отмечены");
           break;
@@ -1610,6 +1802,8 @@ export async function resolveMemberUnitFromDiscord(
 ): Promise<Unit | null> {
   const current = (member.unit || "").trim();
   if (UNITS.includes(current as Unit)) return current as Unit;
+  // «не назначено» — та же пустота, что и null: идём определять по ролям
+  if (!isUnassignedUnit(current) && current) return null;
 
   const discordId = realDiscordId(member.discordId);
   if (!discordId) return null;
@@ -1624,11 +1818,18 @@ export async function resolveMemberUnitFromDiscord(
     ]);
     if (!memberRoles) return null;
 
+    /**
+     * ID ролей подразделений: сначала новая настройка (role_tank_id /
+     * role_art_id), затем прежняя (tank_role_id / art_role_id), затем поиск по
+     * имени на сервере. Три уровня нужны для установок, где настройки ещё не
+     * заполнены в новом формате.
+     */
     const tank =
-      realDiscordId(map.get("tank_role_id")) || findRoleIdByName(roles, "Танковая рота");
+      realDiscordId(unitRoleId("Танковая рота", map)) ||
+      findRoleIdByName(roles, unitRoleName("Танковая рота"));
     const art =
-      realDiscordId(map.get("art_role_id")) ||
-      findRoleIdByName(roles, "Артиллерийский дивизион");
+      realDiscordId(unitRoleId("Артиллерийский дивизион", map)) ||
+      findRoleIdByName(roles, unitRoleName("Артиллерийский дивизион"));
 
     return memberUnitFromRoles(memberRoles, { tank, art });
   } catch (e) {
@@ -1830,6 +2031,8 @@ export async function publishRecruitApplication(
       // Модератор сразу видит, что это возврат из запаса, а не зачисление
       kind: application.kind,
       fullName: application.fullName,
+      // Подразделение из формы: по нему будет выбран лист ШДС при одобрении
+      unit: application.unit ?? null,
     }),
     {
       // Строгий текстовый формат из требований: он же — единственное место,
@@ -1843,6 +2046,7 @@ export async function publishRecruitApplication(
         discordId: realDiscordId(application.discordId) || null,
         discordTag: application.discordTag,
         commanderMention: mention,
+        unit: application.unit ?? null,
       }),
       allowed_mentions: {
         parse: [],
@@ -2077,6 +2281,9 @@ export async function refreshRecruitMessage(
       // потерял бы свой заголовок после решения
       kind: application.kind,
       fullName: application.fullName,
+      // Подразделение из формы остаётся в карточке и после решения: по нему
+      // видно, в какой лист ШДС записан боец
+      unit: application.unit ?? null,
       outcome:
         outcomeOverride ??
         (application.status === "approved"

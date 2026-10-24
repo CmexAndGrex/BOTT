@@ -14,7 +14,7 @@ import { db } from "@/db";
 import { members, recruitApplications } from "@/db/schema";
 import { getSettings, setSettingQuiet } from "@/lib/settings";
 import { columnIndexOf, getDoc, resolveLayout } from "@/lib/gsheets";
-import { normalizeCallsign } from "@/lib/recruits";
+import { isUnit, normalizeCallsign, type Unit } from "@/lib/recruits";
 import { sendChannelMessage } from "@/lib/discord";
 
 export type FormResponse = {
@@ -350,12 +350,24 @@ async function persistEnlistmentApplication(resp: FormResponse): Promise<boolean
     .join(" · ")
     .slice(0, 1000);
 
+  /**
+   * Подразделение из ответа формы.
+   *
+   * В форме /apply выбор обязателен, а Google-форма может его не спрашивать:
+   * тогда поле остаётся пустым, и подразделение определяет штаб (или роли
+   * Discord при рапорте). Приводим значение к каноническому виду — в таблицу
+   * уходит имя листа, и произвольная строка его не найдёт.
+   */
+  const unitFromForm: Unit | null = isUnit(resp.unit) ? resp.unit : null;
+
   const [created] = await db
     .insert(recruitApplications)
     .values({
       callsign,
       kind: "recruit",
       discordId: /^\d{5,25}$/.test(resp.discordId) ? resp.discordId : null,
+      // Подразделение определяет лист ШДС и роль Discord при зачислении
+      unit: unitFromForm,
       about: about || null,
       status: "pending",
     })

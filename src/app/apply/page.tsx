@@ -36,7 +36,10 @@ import {
   isFullNameWithInitials,
   PENDING_NOTICE,
   SPECIALIZATIONS,
+  UNITS,
+  UNIT_LABELS,
   type RecruitApplicationKind,
+  type Unit,
   APPLICATION_KIND_RESERVE_RETURN,
 } from "@/lib/recruits";
 
@@ -56,6 +59,15 @@ export default function ApplyPage() {
   /** ФИО возвращающегося: по нему находят строку на листе «Запас» */
   const [fullName, setFullName] = useState("");
   const [password, setPassword] = useState("");
+  /**
+   * Подразделение, в которое кандидат просится.
+   *
+   * Обязательный выбор: от него зависит, в какой лист ШДС попадёт боец при
+   * одобрении и какую роль Discord ему выдадут. Пустое значение (не выбрано)
+   * отправлять нельзя — иначе штабу пришлось бы угадывать лист, а ошибка
+   * увела бы бойца не в то подразделение.
+   */
+  const [unit, setUnit] = useState<Unit | "">("");
   const [age, setAge] = useState("");
   const [armaExperience, setArmaExperience] = useState("");
   const [specialization, setSpecialization] = useState("");
@@ -106,6 +118,16 @@ export default function ApplyPage() {
     setError("");
 
     /**
+     * Подразделение — обязательный выбор. Проверка на клиенте повторяет
+     * серверную (роут /api/apply отвечает 400 на пустое значение): форма
+     * показывает подсказку сразу, а не после круга «отправил — ошибка».
+     */
+    if (!unit) {
+      setError("Выберите подразделение: Танковая рота или Артиллерийский дивизион");
+      return;
+    }
+
+    /**
      * Клиентская проверка ФИО идёт до сети: сервер отклонит ту же строку, но
      * здесь кандидат видит подсказку сразу, без круга «отправил — ошибка».
      * Правило одно на оба места — isFullNameWithInitials из lib/recruits.
@@ -124,6 +146,9 @@ export default function ApplyPage() {
         body: JSON.stringify({
           callsign,
           password,
+          // Подразделение из формы: сохраняется в recruit_applications.unit и
+          // определяет лист ШДС и роль Discord при зачислении
+          unit,
           age,
           armaExperience,
           specialization,
@@ -222,6 +247,57 @@ return (
             {kind === APPLICATION_KIND_RESERVE_RETURN
               ? "Возврат из запаса: штаб восстановит вашу строку в подразделении и вернёт прежние роли Discord"
               : "Новобранец: первичный приём в подразделение"}
+          </p>
+        </div>
+
+        {/**
+         * Подразделение — обязательный выбор.
+         *
+         * От него зависит лист ШДС (shds_sheet_tank / shds_sheet_art) и роль
+         * Discord, поэтому переключатель, а не свободный текст: значения
+         * фиксированы доменом (UNITS). Карточки вместо radio — так на телефоне
+         * видно и название, и сокращение (ТР/АД), и нажатие по большой
+         * площади не требует попадания в кружок.
+         */}
+        <div>
+          <label className="label mb-1.5 block">
+            Подразделение <span style={{ color: "var(--red)" }}>*</span>
+          </label>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Подразделение">
+            {UNITS.map((option) => {
+              const selected = unit === option;
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  className="rounded-xl px-4 py-3 text-left transition"
+                  onClick={() => setUnit(option)}
+                  style={{
+                    border: `1px solid ${selected ? "rgba(190,18,60,.55)" : "var(--stroke-soft)"}`,
+                    background: selected ? "var(--red-soft)" : "rgba(255,255,255,.02)",
+                    color: selected ? "#fff" : "var(--muted)",
+                    cursor: "pointer",
+                  }}
+                >
+                  <span className="flex items-center gap-2 text-[13px] font-bold">
+                    <span className={`dot ${selected ? "dot-err" : "dot-dim"}`} />
+                    {UNIT_LABELS[option]}
+                  </span>
+                  <span className="mt-1 block text-[11.5px]" style={{ color: "var(--dim)" }}>
+                    {option === "Танковая рота"
+                      ? "Экипажи боевых машин, мехводы, наводчики"
+                      : "Расчёты орудий, разведка и корректировка"}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+            {isReserveReturn
+              ? "Укажите подразделение, в котором вы служили: в него же вернётся ваша строка в ШДС"
+              : "Подразделение определяет лист ШДС и роль Discord, которые будут выданы при зачислении"}
           </p>
         </div>
 
