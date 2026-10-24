@@ -417,11 +417,18 @@ export function normalizeUrl(input: string): string | null {
  * Плашка «★ КОМАНДИР» в панели «Контроль» появлялась у младших командиров, а
  * кнопки «1/2 Пред.» / «2/2 Пред.» у них скрывались.
  *
- * Теперь состав определяется явно и узко:
+ * Теперь состав определяется явно и узко. Все проверки идут по нормализованной
+ * должности (postKey: нижний регистр, «ё»→«е», точки и лишние пробелы заменены),
+ * поэтому сокращения и приписки распознаванию не мешают:
  *   * «★ КОМАНДИР КОРПУСА» — ФИО «Волков Д. В.» ИЛИ должность «Командир Корпуса»;
- *   * «★ ЗАМ. КОМАНДИРА»   — реальные заместители (зам. ком. корпуса, заместитель
- *                            командира);
- *   * «★ КОМ. РОТЫ» / «★ КОМ. ДИВИЗИОНА» — командиры роты и арт. дивизиона.
+ *   * «★ ЗАМ. КОМАНДИРА»   — ФИО (Иванов И. А., Иванов К. М.) ИЛИ должность вида
+ *                            «зам. ком. корпуса» / «заместитель командира»
+ *                            («Зам. Ком. Корпуса по ВиСПР» — тоже зам.);
+ *   * «★ КОМ. РОТЫ» / «★ ЗАМ. КОМ. РОТЫ» — командир и заместитель командира
+ *                            танковой роты (в том числе «Зам.кмд. танковой роты»);
+ *   * «★ КОМ. ДИВИЗИОНА» / «★ ЗАМ. КОМ. ДИВИЗИОНА» — командир и заместитель
+ *                            командира арт. дивизиона (в том числе «Зам.кмд.
+ *                            арт. дивизиона»).
  * Прочие должности со словом «командир» (КБМ, отделение, расчёт, экипаж)
  * командованием НЕ считаются: они получают стандартные кнопки предупреждений.
  *
@@ -435,28 +442,42 @@ export function normalizeUrl(input: string): string | null {
 /** ФИО Командира Корпуса; сравнение — без учёта регистра, точек и пробелов */
 export const CORPS_COMMANDER_FULL_NAME = "Волков Д. В.";
 
+/** ФИО заместителей командира корпуса из официального списка */
+export const CORPS_DEPUTY_FULL_NAMES: readonly string[] = [
+  "Иванов И. А.",
+  "Иванов К. М.",
+];
+
 /** Должность Командира Корпуса (сравнение — строгое, по нормализованной строке) */
 export const CORPS_COMMANDER_POSTS: readonly string[] = ["командир корпуса"];
 
-/** Признаки заместителя командира — подстрока нормализованной должности */
-export const DEPUTY_COMMANDER_MARKERS: readonly string[] = [
-  "зам ком корпуса",
-  "заместитель командира",
-  "зам командира",
+/**
+ * Признаки заместителя командира (заместитель/зам. командира корпуса).
+ *
+ * Регулярные выражения применяются к нормализованной должности (postKey:
+ * нижний регистр, «ё»→«е», точки и лишние пробелы заменены), поэтому
+ * «Зам. Ком. Корпуса по ВиСПР» и «Заместитель командира корпуса» ловятся
+ * одинаково, а сокращения («зам.», «зам.кмд.») совпадению не мешают.
+ */
+export const DEPUTY_COMMANDER_MARKERS: readonly RegExp[] = [
+  /зам.*ком.*корпус/,
+  /заместител.*командир/,
 ];
 
-/** Командиры роты — должность строго равна одному из написаний */
-export const COMPANY_COMMANDER_POSTS: readonly string[] = [
-  "командир роты",
-  "командир танковой роты",
-];
+/** Признак заместителя в нормализованной должности: «зам», «заместитель», «зам.кмд.» */
+const DEPUTY_TOKEN_RE = /зам/;
 
-/** Командиры артиллерийского дивизиона — должность строго равна одному из написаний */
-export const DIVISION_COMMANDER_POSTS: readonly string[] = [
-  "командир дивизиона",
-  "командир арт дивизиона",
-  "командир артиллерийского дивизиона",
-];
+/** Командир роты (в том числе танковой); «зам» отсекается в функции */
+export const COMPANY_COMMANDER_RE = /ком.*рот/;
+
+/** Заместитель командира роты (в том числе танковой), включая «зам.кмд.» */
+export const DEPUTY_COMPANY_COMMANDER_RE = /зам.*рот/;
+
+/** Командир дивизиона (в том числе артиллерийского); «зам» отсекается в функции */
+export const DIVISION_COMMANDER_RE = /ком.*дивизион/;
+
+/** Заместитель командира дивизиона (в том числе арт.), включая «зам.кмд.» */
+export const DEPUTY_DIVISION_COMMANDER_RE = /зам.*дивизион/;
 
 /**
  * Ключ сравнения должности: нижний регистр, «ё»→«е», точки вырезаны, лишние
@@ -489,27 +510,54 @@ function fullNameKey(value: unknown): string {
 /** Ключ ФИО командира корпуса — вычисляется один раз */
 const CORPS_COMMANDER_NAME_KEY = fullNameKey(CORPS_COMMANDER_FULL_NAME);
 
+/** Ключи ФИО заместителей командира корпуса — вычисляются один раз */
+const CORPS_DEPUTY_NAME_KEYS: readonly string[] = CORPS_DEPUTY_FULL_NAMES.map(fullNameKey);
+
 /** Боец — Командир Корпуса: по ФИО «Волков Д. В.» или должности «Командир Корпуса» */
 export function isCorpsCommander(fighter: { name?: string | null; post?: string | null }): boolean {
   if (fullNameKey(fighter?.name) === CORPS_COMMANDER_NAME_KEY) return true;
   return CORPS_COMMANDER_POSTS.includes(postKey(fighter?.post));
 }
 
-/** Проверка, является ли боец именно заместителем командира */
-export function isDeputyCommander(fighter: { post?: string | null }): boolean {
+/**
+ * Боец — заместитель командира корпуса.
+ *
+ * Признаётся по ФИО из официального списка (Иванов И. А., Иванов К. М.) ИЛИ по
+ * должности: «зам.*ком.*корпус» (включая «Зам. Ком. Корпуса по ВиСПР») либо
+ * «заместитель командира». Проверка идёт по нормализованной строке, поэтому
+ * сокращения («зам.», «зам.кмд.») и приписки («по ВиСПР») совпадению не мешают.
+ */
+export function isDeputyCommander(fighter: { name?: string | null; post?: string | null }): boolean {
+  if (CORPS_DEPUTY_NAME_KEYS.includes(fullNameKey(fighter?.name))) return true;
   const post = postKey(fighter?.post);
   if (!post) return false;
-  return DEPUTY_COMMANDER_MARKERS.some((marker) => post.includes(marker));
+  return DEPUTY_COMMANDER_MARKERS.some((marker) => marker.test(post));
 }
 
-/** Боец — командир роты (в том числе танковой) */
+/** Боец — командир роты (в том числе танковой); заместители отсекаются */
 export function isCompanyCommander(fighter: { post?: string | null }): boolean {
-  return COMPANY_COMMANDER_POSTS.includes(postKey(fighter?.post));
+  const post = postKey(fighter?.post);
+  if (!post || DEPUTY_TOKEN_RE.test(post)) return false;
+  return COMPANY_COMMANDER_RE.test(post);
 }
 
-/** Боец — командир артиллерийского дивизиона */
+/** Боец — заместитель командира роты (включая «зам.кмд.») */
+export function isDeputyCompanyCommander(fighter: { post?: string | null }): boolean {
+  const post = postKey(fighter?.post);
+  return !!post && DEPUTY_COMPANY_COMMANDER_RE.test(post);
+}
+
+/** Боец — командир артиллерийского дивизиона; заместители отсекаются */
 export function isDivisionCommander(fighter: { post?: string | null }): boolean {
-  return DIVISION_COMMANDER_POSTS.includes(postKey(fighter?.post));
+  const post = postKey(fighter?.post);
+  if (!post || DEPUTY_TOKEN_RE.test(post)) return false;
+  return DIVISION_COMMANDER_RE.test(post);
+}
+
+/** Боец — заместитель командира дивизиона (включая «зам.кмд.») */
+export function isDeputyDivisionCommander(fighter: { post?: string | null }): boolean {
+  const post = postKey(fighter?.post);
+  return !!post && DEPUTY_DIVISION_COMMANDER_RE.test(post);
 }
 
 /** Боец — командир роты или дивизиона (любой из уровней подразделения) */
@@ -524,7 +572,14 @@ export function isUnitCommander(fighter: { post?: string | null }): boolean {
  * выполняют общую норму часов и получают стандартные кнопки предупреждений.
  */
 export function isCommanderFighter(fighter: { name?: string | null; post?: string | null }): boolean {
-  return isCorpsCommander(fighter) || isDeputyCommander(fighter) || isUnitCommander(fighter);
+  return (
+    isCorpsCommander(fighter) ||
+    isDeputyCommander(fighter) ||
+    isCompanyCommander(fighter) ||
+    isDeputyCompanyCommander(fighter) ||
+    isDivisionCommander(fighter) ||
+    isDeputyDivisionCommander(fighter)
+  );
 }
 
 /** Бейдж командного состава для панели «Контроль»; null — обычный боец */
@@ -532,6 +587,8 @@ export function commanderBadgeLabel(fighter: { name?: string | null; post?: stri
   if (isCorpsCommander(fighter)) return "★ КОМАНДИР КОРПУСА";
   if (isDeputyCommander(fighter)) return "★ ЗАМ. КОМАНДИРА";
   if (isCompanyCommander(fighter)) return "★ КОМ. РОТЫ";
+  if (isDeputyCompanyCommander(fighter)) return "★ ЗАМ. КОМ. РОТЫ";
   if (isDivisionCommander(fighter)) return "★ КОМ. ДИВИЗИОНА";
+  if (isDeputyDivisionCommander(fighter)) return "★ ЗАМ. КОМ. ДИВИЗИОНА";
   return null;
 }

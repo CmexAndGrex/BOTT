@@ -17,6 +17,7 @@ import {
   parseLines,
   resolveCookie,
 } from "@/lib/settings";
+import { isCommanderFighter } from "@/lib/validation";
 
 export type TaskResult = {
   ok: boolean;
@@ -481,8 +482,18 @@ export async function runWeeklyRecord(source = "schedule"): Promise<TaskResult> 
 
     let newWarnings = fighter.warnings;
     if (!fighter.vacation) {
-      newWarnings = fighter.hours < norm ? fighter.warnings + 1 : 0;
-      if (newWarnings > fighter.warnings) newWarningsTotal++;
+      // Комсостав (командиры и заместители корпуса, роты, дивизиона) не
+      // наказывается автоматическими предупреждениями за нехватку часов:
+      // инкремент счётчика пропускаем. Выполнение нормы по-прежнему сбрасывает
+      // ранее накопленные предупреждения.
+      if (fighter.hours < norm) {
+        if (!isCommanderFighter(fighter)) {
+          newWarnings = fighter.warnings + 1;
+          if (newWarnings > fighter.warnings) newWarningsTotal++;
+        }
+      } else {
+        newWarnings = 0;
+      }
     }
     if (newWarnings > 2) newWarnings = 2;
 

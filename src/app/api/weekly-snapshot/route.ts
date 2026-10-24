@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { computeStats } from "@/lib/tasks";
 import { getSettings, normHours } from "@/lib/settings";
 import { authorizeCron, getAuthUser } from "@/lib/api-auth";
+import { isCommanderFighter } from "@/lib/validation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,8 +35,15 @@ export async function GET(req: NextRequest) {
 
       let newWarnings = fighter.warnings;
       if (!fighter.vacation) {
-        if (fighter.hours < 10) newWarnings += 1;
-        else newWarnings = 0;
+        // Комсостав (командиры и заместители корпуса, роты, дивизиона) не
+        // наказывается автоматическими предупреждениями за нехватку часов:
+        // инкремент счётчика пропускаем. Выполнение нормы сбрасывает
+        // ранее накопленные предупреждения.
+        if (fighter.hours < 10) {
+          if (!isCommanderFighter(fighter)) newWarnings += 1;
+        } else {
+          newWarnings = 0;
+        }
       }
       if (newWarnings > 2) newWarnings = 2;
 
