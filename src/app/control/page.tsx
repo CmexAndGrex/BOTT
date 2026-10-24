@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, CheckCircle2, UserMinus, XCircle } from "lucide-react";
 import { Avatar, Section, Spinner } from "@/components/ui";
-import { isCommanderFighter, isDeputyCommander } from "@/lib/validation";
+import { isCommanderFighter, commanderBadgeLabel } from "@/lib/validation";
 
 type Stat = { id: number; hours: number; vacation: boolean; createdAt: string };
 type Fighter = { id: number; name: string; rankName: string | null; post?: string | null; hours: number; vacation: boolean; discordId: string | null; warnings: number; active: boolean; stats: Stat[] };
@@ -200,24 +200,37 @@ export default function ControlPage() {
 
                       {/* ПРЕДУПРЕЖДЕНИЯ / СТАТУС КОМСОСТАВА */}
                       <td style={{ textAlign: "center" }}>
-                        {isCommanderFighter(f) ? (
-                          <span
-                            className="badge font-bold"
-                            style={{
-                              background: "rgba(255,176,32,0.18)",
-                              color: "var(--amber)",
-                              borderColor: "rgba(255,176,32,0.5)",
-                              boxShadow: "0 0 10px rgba(255,176,32,0.2)",
-                              letterSpacing: "0.03em"
-                            }}
-                          >
-                            {isDeputyCommander(f) ? "★ ЗАМ. КОМАНДИРА" : "★ КОМАНДИР"}
-                          </span>
-                        ) : (
-                          <span className={`badge ${f.warnings === 0 ? "badge-green" : f.warnings === 1 ? "badge-amber" : "badge-red"}`}>
-                            {f.warnings}/2 пред.
-                          </span>
-                        )}
+                        {/*
+                          Плашку получает только высший командный состав корпуса
+                          (Командир корпуса, заместители, командиры роты и
+                          дивизиона). Младшие командиры (КБМ, отделения, расчёты)
+                          сюда не попадают и видят обычные кнопки предупреждений,
+                          так как обязаны выполнять общую норму часов.
+                        */}
+                        {(() => {
+                          const badge = commanderBadgeLabel(f);
+                          if (!badge) {
+                            return (
+                              <span className={`badge ${f.warnings === 0 ? "badge-green" : f.warnings === 1 ? "badge-amber" : "badge-red"}`}>
+                                {f.warnings}/2 пред.
+                              </span>
+                            );
+                          }
+                          return (
+                            <span
+                              className="badge font-bold"
+                              style={{
+                                background: "rgba(255,176,32,0.18)",
+                                color: "var(--amber)",
+                                borderColor: "rgba(255,176,32,0.5)",
+                                boxShadow: "0 0 10px rgba(255,176,32,0.2)",
+                                letterSpacing: "0.03em"
+                              }}
+                            >
+                              {badge}
+                            </span>
+                          );
+                        })()}
                       </td>
 
                       {/* КНОПКИ УПРАВЛЕНИЯ */}

@@ -103,10 +103,39 @@ const DISCORD_WARNING = "[review] Ошибка Discord, продолжаем з�
  * catch вызывающей функции, превратив уже принятое решение в «ошибку
  * зачисления». Ошибка только журналируется, а вызывающий получает fallback.
  */
+/**
+ * Детальный разбор 400 Invalid Form Body.
+ *
+ * Discord кладёт в тело ответа путь до конкретного невалидного поля
+ * (`embeds.0.fields.2.value`). Без этой записи в журнале остаётся только
+ * «Invalid Form Body», и причину приходится угадывать по коду. Логируем
+ * исключительно 400/50035: 404 и 429 — ожидаемые ответы (удалённое сообщение,
+ * лимит), и засорять ими журнал незачем.
+ */
+function logDiscord400(err: unknown): void {
+  const status = (err as { status?: unknown })?.status;
+  const code = (err as { code?: unknown })?.code;
+  const isFormError = status === 400 || code === 50035;
+  if (!isFormError) return;
+
+  console.error(
+    "[DISCORD_400_DETAIL]",
+    JSON.stringify(
+      (err as { rawError?: unknown })?.rawError ??
+        (err as { data?: unknown })?.data ??
+        (err as { response?: { data?: unknown } })?.response?.data ??
+        err,
+      null,
+      2
+    )
+  );
+}
+
 async function safeDiscord<T>(label: string, run: () => Promise<T>, fallback: T): Promise<T> {
   try {
     return await run();
   } catch (err) {
+    logDiscord400(err);
     console.warn(DISCORD_WARNING, label, err);
     return fallback;
   }
@@ -121,7 +150,7 @@ async function safeDiscord<T>(label: string, run: () => Promise<T>, fallback: T)
  * значению не отправляется вовсе (Discord ответил бы 400 «Invalid Form Body»),
  * а вызывающий код получает «не отправлено» вместо исключения.
  */
-function realDiscordId(value: string | null | undefined): string {
+export function realDiscordId(value: string | null | undefined): string {
   const id = String(value ?? "").trim();
   return /^\d{5,25}$/.test(id) ? id : "";
 }
@@ -1618,12 +1647,16 @@ export async function publishReviewMessage(
           type: 1,
           components: [
             {
+              // type: 2 обязателен: без него Discord отвечает
+              // 400 Invalid Form Body на каждую кнопку
+              type: 2,
               custom_id: reviewCustomId(scope, "approve", id),
               // Заявку «принимают», рапорт «одобряют» — термины из ТЗ
               label: scope === "recruit" ? "✅ Принять" : "✅ Одобрить",
               style: 3,
             },
             {
+              type: 2,
               custom_id: reviewCustomId(scope, "reject", id),
               label: "❌ Отклонить",
               style: 4,
@@ -1637,6 +1670,7 @@ export async function publishReviewMessage(
     });
     return { ok: true, messageId: message.id, channelId: channel };
   } catch (e) {
+    logDiscord400(e);
     const error = e instanceof Error ? e.message : String(e);
     console.warn(DISCORD_WARNING, `публикация ${scope} #${id}`, e);
     return { ok: false, error };
@@ -1868,8 +1902,9 @@ function disabledActionRow(
     {
       type: 1,
       components: [
-        { custom_id: approveId, label: approveLabel, style: 3, disabled: true },
-        { custom_id: rejectId, label: rejectLabel, style: 4, disabled: true },
+        // type: 2 у каждой кнопки — требование Discord к форме запроса
+        { type: 2, custom_id: approveId, label: approveLabel, style: 3, disabled: true },
+        { type: 2, custom_id: rejectId, label: rejectLabel, style: 4, disabled: true },
       ],
     },
   ];

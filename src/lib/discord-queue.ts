@@ -33,10 +33,24 @@ export class DiscordApiError extends Error {
   readonly retryAfterMs: number | null;
   /** Путь запроса: в логе он обезличен, но различает маршруты */
   readonly path: string;
+  /**
+   * Тело ответа Discord как есть (JSON).
+   *
+   * Нужно для разбора 400 Invalid Form Body: Discord кладёт туда
+   * `errors.<поле>._errors[].message`, и без исходного объекта в логе видно
+   * только «Invalid Form Body», а не конкретное проблемное поле Embed.
+   */
+  readonly rawError: unknown;
 
   constructor(
     message: string,
-    init: { status?: number; code?: number | null; retryAfterMs?: number | null; path?: string } = {}
+    init: {
+      status?: number;
+      code?: number | null;
+      retryAfterMs?: number | null;
+      path?: string;
+      rawError?: unknown;
+    } = {}
   ) {
     super(message);
     this.name = "DiscordApiError";
@@ -44,6 +58,7 @@ export class DiscordApiError extends Error {
     this.code = init.code ?? null;
     this.retryAfterMs = init.retryAfterMs ?? null;
     this.path = init.path ?? "";
+    this.rawError = init.rawError ?? null;
   }
 }
 

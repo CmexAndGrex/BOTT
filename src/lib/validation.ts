@@ -407,20 +407,131 @@ export function normalizeUrl(input: string): string | null {
   }
 }
 
-/** ID бойцов, относящихся к командному составу (иммунитет от предупреждений) */
-export const COMMANDER_MEMBER_IDS: readonly number[] = [8, 12, 17, 30];
+/* ------------------------------------------------------------------ */
+/* Командный состав: иммунитет от предупреждений онлайна               */
+/* ------------------------------------------------------------------ */
+/*
+ * Раньше комсостав определялся по подстроке «командир» в должности, из-за чего
+ * иммунитет от предупреждений получали командиры боевых машин, отделений и
+ * расчётов — те, кто обязан выполнять общую норму часов наравне со всеми.
+ * Плашка «★ КОМАНДИР» в панели «Контроль» появлялась у младших командиров, а
+ * кнопки «1/2 Пред.» / «2/2 Пред.» у них скрывались.
+ *
+ * Теперь состав определяется явно и узко:
+ *   * «★ КОМАНДИР КОРПУСА» — ФИО «Волков Д. В.» ИЛИ должность «Командир Корпуса»;
+ *   * «★ ЗАМ. КОМАНДИРА»   — реальные заместители (зам. ком. корпуса, заместитель
+ *                            командира);
+ *   * «★ КОМ. РОТЫ» / «★ КОМ. ДИВИЗИОНА» — командиры роты и арт. дивизиона.
+ * Прочие должности со словом «командир» (КБМ, отделение, расчёт, экипаж)
+ * командованием НЕ считаются: они получают стандартные кнопки предупреждений.
+ *
+ * Правило намеренно не зависит от БД и Next.js: оно живёт рядом с прочими
+ * чистыми предикатами validation.ts и проверяется напрямую
+ * (tests/commander-protection.test.ts). Клиент «Контроль» и роут /api/warn
+ * используют одну и ту же функцию, поэтому «плашка есть, а кнопок нет» больше
+ * разойтись не может.
+ */
 
-/** Проверка, относится ли боец к комсоставу (командир / зам. командира) */
-export function isCommanderFighter(fighter: { id?: number | null; post?: string | null }): boolean {
-  if (fighter.id != null && COMMANDER_MEMBER_IDS.includes(fighter.id)) {
-    return true;
-  }
-  const post = (fighter.post || "").toLowerCase();
-  return post.includes("командир") || post.includes("заместитель командира");
+/** ФИО Командира Корпуса; сравнение — без учёта регистра, точек и пробелов */
+export const CORPS_COMMANDER_FULL_NAME = "Волков Д. В.";
+
+/** Должность Командира Корпуса (сравнение — строгое, по нормализованной строке) */
+export const CORPS_COMMANDER_POSTS: readonly string[] = ["командир корпуса"];
+
+/** Признаки заместителя командира — подстрока нормализованной должности */
+export const DEPUTY_COMMANDER_MARKERS: readonly string[] = [
+  "зам ком корпуса",
+  "заместитель командира",
+  "зам командира",
+];
+
+/** Командиры роты — должность строго равна одному из написаний */
+export const COMPANY_COMMANDER_POSTS: readonly string[] = [
+  "командир роты",
+  "командир танковой роты",
+];
+
+/** Командиры артиллерийского дивизиона — должность строго равна одному из написаний */
+export const DIVISION_COMMANDER_POSTS: readonly string[] = [
+  "командир дивизиона",
+  "командир арт дивизиона",
+  "командир артиллерийского дивизиона",
+];
+
+/**
+ * Ключ сравнения должности: нижний регистр, «ё»→«е», точки вырезаны, лишние
+ * пробелы сжаты. Должность приходит из ШДС, rs-red.com и ручного ввода панели,
+ * поэтому «Командир арт. дивизиона» и «КОМАНДИР  АРТ. ДИВИЗИОНА» обязаны
+ * распознаваться одинаково.
+ */
+function postKey(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[.,]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Ключ ФИО: нижний регистр, «ё»→«е», любые разделители (пробелы, точки)
+ * удаляются, поэтому «Волков Д. В.», «Волков Д.В.» и «волков  д в» дают один
+ * ключ. Инициалы в табеле встречаются и с пробелом, и без — сравнивать их
+ * построчно значило бы не признать командира в написании «Волков Д.В.».
+ */
+function fullNameKey(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^a-zа-я0-9]/g, "");
+}
+
+/** Ключ ФИО командира корпуса — вычисляется один раз */
+const CORPS_COMMANDER_NAME_KEY = fullNameKey(CORPS_COMMANDER_FULL_NAME);
+
+/** Боец — Командир Корпуса: по ФИО «Волков Д. В.» или должности «Командир Корпуса» */
+export function isCorpsCommander(fighter: { name?: string | null; post?: string | null }): boolean {
+  if (fullNameKey(fighter?.name) === CORPS_COMMANDER_NAME_KEY) return true;
+  return CORPS_COMMANDER_POSTS.includes(postKey(fighter?.post));
 }
 
 /** Проверка, является ли боец именно заместителем командира */
 export function isDeputyCommander(fighter: { post?: string | null }): boolean {
-  const post = (fighter.post || "").toLowerCase();
-  return post.includes("заместитель командира") || post.includes("зам. командира");
+  const post = postKey(fighter?.post);
+  if (!post) return false;
+  return DEPUTY_COMMANDER_MARKERS.some((marker) => post.includes(marker));
+}
+
+/** Боец — командир роты (в том числе танковой) */
+export function isCompanyCommander(fighter: { post?: string | null }): boolean {
+  return COMPANY_COMMANDER_POSTS.includes(postKey(fighter?.post));
+}
+
+/** Боец — командир артиллерийского дивизиона */
+export function isDivisionCommander(fighter: { post?: string | null }): boolean {
+  return DIVISION_COMMANDER_POSTS.includes(postKey(fighter?.post));
+}
+
+/** Боец — командир роты или дивизиона (любой из уровней подразделения) */
+export function isUnitCommander(fighter: { post?: string | null }): boolean {
+  return isCompanyCommander(fighter) || isDivisionCommander(fighter);
+}
+
+/**
+ * Боец — высший командный состав корпуса (иммунитет от предупреждений).
+ *
+ * Сюда НЕ попадают командиры боевых машин, отделений, расчётов и экипажей: они
+ * выполняют общую норму часов и получают стандартные кнопки предупреждений.
+ */
+export function isCommanderFighter(fighter: { name?: string | null; post?: string | null }): boolean {
+  return isCorpsCommander(fighter) || isDeputyCommander(fighter) || isUnitCommander(fighter);
+}
+
+/** Бейдж командного состава для панели «Контроль»; null — обычный боец */
+export function commanderBadgeLabel(fighter: { name?: string | null; post?: string | null }): string | null {
+  if (isCorpsCommander(fighter)) return "★ КОМАНДИР КОРПУСА";
+  if (isDeputyCommander(fighter)) return "★ ЗАМ. КОМАНДИРА";
+  if (isCompanyCommander(fighter)) return "★ КОМ. РОТЫ";
+  if (isDivisionCommander(fighter)) return "★ КОМ. ДИВИЗИОНА";
+  return null;
 }

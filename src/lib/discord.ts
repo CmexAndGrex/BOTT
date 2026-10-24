@@ -23,15 +23,105 @@ export type DiscordEmbed = {
  * custom_id разбирается ботом через parseReviewCustomId() — см. reports.ts.
  */
 export type DiscordButton = {
+  /**
+   * Тип компонента. Discord ОБЯЗАТЕЛЬНО требует `2` у кнопки: без него
+   * сервер отвечает 400 Invalid Form Body (50035) и сообщение не уходит.
+   * Поле необязательное в типе только ради совместимости с давно созданными
+   * объектами — при отправке оно проставляется автоматически.
+   */
+  type?: 2;
   custom_id: string;
   label: string;
-  /** 1 primary, 2 secondary, 3 success, 4 danger */
+  /** 1 primary, 2 secondary, 3 success, 4 danger — только ЧИСЛА, не строки */
   style: 1 | 2 | 3 | 4;
   disabled?: boolean;
 };
 
 /** Ряд кнопок (component type 1) */
 export type DiscordActionRow = { type: 1; components: DiscordButton[] };
+
+/**
+ * Числовые стили кнопок Discord.
+ *
+ * Строковые значения («SUCCESS», «DANGER») в теле запроса приводят к
+ * 400 Invalid Form Body: Discord ожидает целое число, а не имя константы.
+ */
+export const BUTTON_STYLE = {
+  PRIMARY: 1,
+  SECONDARY: 2,
+  SUCCESS: 3,
+  DANGER: 4,
+} as const;
+
+/**
+ * Санитация Embed перед отправкой.
+ *
+ * Discord отклоняет сообщение с 400, если в `fields` попадает пустое значение:
+ * `value` не может быть пустой строкой (а также null/undefined), `name` — тоже.
+ * Рапорты без подразделения и без комментария как раз давали такие поля.
+ * Заголовок и описание пустой строкой приравниваются к отсутствию текста и
+ * передаются как undefined: `""` в этих полях тоже невалидно.
+ */
+export function sanitizeEmbed(embed: DiscordEmbed): DiscordEmbed {
+  const title = String(embed.title ?? "").trim();
+  const description = String(embed.description ?? "").trim();
+  const footerText = String(embed.footer?.text ?? "").trim();
+
+  const fields = (embed.fields ?? [])
+    .filter((f) => f && String(f.name ?? "").trim().length > 0)
+    .map((f) => ({
+      name: String(f.name).trim().slice(0, 256),
+      // Пустое значение заменяем прочерком: 400 «value: This field is required»
+      value: String(f.value ?? "").trim().slice(0, 1024) || "—",
+      inline: Boolean(f.inline),
+    }));
+
+  return {
+    ...(title ? { title: title.slice(0, 256) } : {}),
+    ...(description ? { description: description.slice(0, 4096) } : {}),
+    ...(Number.isFinite(embed.color) ? { color: embed.color } : {}),
+    ...(embed.image?.url ? { image: embed.image } : {}),
+    ...(footerText ? { footer: { text: footerText.slice(0, 2048) } } : {}),
+    // Пустой массив полей Discord тоже считает ошибкой формы — просто не передаём
+    ...(fields.length ? { fields } : {}),
+    ...(embed.timestamp ? { timestamp: embed.timestamp } : {}),
+  };
+}
+
+/**
+ * Санитация компонентов сообщения.
+ *
+ * Гарантирует то, что Discord проверяет при разборе формы: каждая кнопка имеет
+ * `type: 2` и числовой `style`, а сама кнопка лежит внутри ActionRow (`type: 1`).
+ * Одиночная кнопка на верхнем уровне — тоже 400 Invalid Form Body.
+ */
+export function sanitizeComponents(
+  components: DiscordActionRow[] | undefined
+): DiscordActionRow[] | undefined {
+  if (!components?.length) return undefined;
+
+  const rows = components
+    .filter((row) => row && Array.isArray(row.components))
+    .map((row) => ({
+      type: 1 as const,
+      components: row.components
+        .filter((button) => button && String(button.custom_id ?? "").trim())
+        .map((button) => ({
+          type: 2 as const,
+          custom_id: String(button.custom_id).trim().slice(0, 100),
+          label: String(button.label ?? "").trim().slice(0, 80) || "Действие",
+          style: (
+            typeof button.style === "number" && button.style >= 1 && button.style <= 4
+              ? button.style
+              : BUTTON_STYLE.SECONDARY
+          ) as 1 | 2 | 3 | 4,
+          ...(button.disabled ? { disabled: true } : {}),
+        })),
+    }))
+    .filter((row) => row.components.length > 0);
+
+  return rows.length ? rows : undefined;
+}
 
 /** Строит ряд кнопок «Одобрить / Отклонить» для сообщения-заявки */
 export function reviewActionRow(
@@ -43,8 +133,20 @@ export function reviewActionRow(
     {
       type: 1,
       components: [
-        { custom_id: approveId, label: "✅ Одобрить", style: 3, disabled },
-        { custom_id: rejectId, label: "❌ Отклонить", style: 4, disabled },
+        {
+          type: 2,
+          custom_id: approveId,
+          label: "✅ Одобрить",
+          style: BUTTON_STYLE.SUCCESS,
+          disabled,
+        },
+        {
+          type: 2,
+          custom_id: rejectId,
+          label: "❌ Отклонить",
+          style: BUTTON_STYLE.DANGER,
+          disabled,
+        },
       ],
     },
   ];
@@ -101,13 +203,16 @@ async function sendRequest<T>(path: string, init: RequestInit): Promise<T> {
     let hint = body.slice(0, 300);
     let code: number | null = null;
     let bodyRetryAfter: unknown = null;
+    let rawError: unknown = null;
     try {
       const parsed = JSON.parse(body);
+      rawError = parsed;
       if (parsed?.message) hint = parsed.message;
       if (typeof parsed?.code === "number") code = parsed.code;
       bodyRetryAfter = parsed?.retry_after;
     } catch {
       /* тело не JSON — покажем как есть */
+      rawError = body;
     }
 
     // 429: Discord прямо говорит, сколько ждать. Отдаём значение в ошибку —
@@ -117,12 +222,22 @@ async function sendRequest<T>(path: string, init: RequestInit): Promise<T> {
         ? parseRetryAfterMs(res.headers.get("retry-after"), bodyRetryAfter)
         : null;
 
-    throw new DiscordApiError(`Discord API (${res.status}): ${hint}`, {
+    const error = new DiscordApiError(`Discord API (${res.status}): ${hint}`, {
       status: res.status,
       code,
       retryAfterMs,
       path: labelForPath(path),
+      rawError,
     });
+
+    // 400/50035 — ошибка формы запроса: Discord кладёт в тело точный путь до
+    // проблемного поля (`embeds.0.fields.2.value`). Без этого в журнале видно
+    // только «Invalid Form Body», и причину приходится угадывать.
+    if (res.status === 400) {
+      console.error("[DISCORD_400_DETAIL]", JSON.stringify(rawError, null, 2));
+    }
+
+    throw error;
   }
 
   if (res.status === 204) return null as T;
@@ -142,6 +257,37 @@ export async function getBotUser(): Promise<BotUser> {
 
 export type ChannelMessage = { id: string; channel_id: string };
 
+/**
+ * Нормализация тела сообщения перед отправкой в Discord.
+ *
+ * Единая точка, потому что и создание, и правка сообщения обязаны отправлять
+ * одинаково валидную форму: очищенные Embed-поля и кнопки с числовыми стилями
+ * внутри ActionRow. Иначе 400 Invalid Form Body возвращался бы то из рапорта,
+ * то из очереди модерации, и правку пришлось бы искать в двух местах.
+ */
+function normalizeMessagePayload(payload: {
+  content?: string;
+  embeds?: DiscordEmbed[];
+  components?: DiscordActionRow[];
+  allowed_mentions?: { parse?: string[]; roles?: string[]; users?: string[] };
+}): Record<string, unknown> {
+  const content = String(payload.content ?? "").trim();
+
+  return {
+    // Пустой content допустим только при наличии Embed/компонентов; если он
+    // пуст — просто не передаём поле, чтобы не слать "" в Discord
+    ...(content ? { content: content.slice(0, 2000) } : {}),
+    // Массив передан — значит вызывающий управляет полем явно. Пустой массив
+    // при PATCH снимает Embed/кнопки, поэтому «схлопывать» его в undefined
+    // нельзя: старые компоненты остались бы на сообщении.
+    ...(Array.isArray(payload.embeds) ? { embeds: payload.embeds.map(sanitizeEmbed) } : {}),
+    ...(Array.isArray(payload.components)
+      ? { components: sanitizeComponents(payload.components) ?? [] }
+      : {}),
+    ...(payload.allowed_mentions ? { allowed_mentions: payload.allowed_mentions } : {}),
+  };
+}
+
 export async function sendChannelMessage(
   channelId: string,
   payload: {
@@ -159,7 +305,7 @@ export async function sendChannelMessage(
   const id = assertDiscordId(channelId, "ID канала Discord");
   return discordRequest<ChannelMessage>(
     `/channels/${id}/messages`,
-    { method: "POST", body: JSON.stringify(payload) }
+    { method: "POST", body: JSON.stringify(normalizeMessagePayload(payload)) }
   );
 }
 
@@ -184,7 +330,7 @@ export async function editChannelMessage(
   const msg = assertDiscordId(messageId, "ID сообщения Discord");
   await discordRequest(`/channels/${ch}/messages/${msg}`, {
     method: "PATCH",
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalizeMessagePayload(payload)),
   });
 }
 

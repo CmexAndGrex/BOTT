@@ -23,7 +23,7 @@ import {
   validateReportPayload,
   type ServiceReportType,
 } from "@/lib/reports";
-import { publishReviewMessage, reportChannelIdFor } from "@/lib/review";
+import { publishReviewMessage, realDiscordId, reportChannelIdFor } from "@/lib/review";
 import { LoginThrottle } from "@/lib/recruits";
 import { registerThrottle } from "@/lib/throttle-registry";
 
@@ -142,7 +142,11 @@ export async function POST(req: NextRequest) {
      * Отсутствие канала — предупреждение, а не ошибка: рапорт уже в БД и виден
      * штабу в /admin/reports. Ронять создание рапорта из-за настройки нельзя.
      */
-    const channelId = await reportChannelIdFor(type);
+    const configuredChannelId = await reportChannelIdFor(type);
+    // ID канала проверяем ДО запроса: настройка могла остаться пустой или
+    // плейсхолдером («:id»), и POST по такому пути Discord отвергает с
+    // 400 Invalid Form Body. Рапорт уже в БД — молча выходим с предупреждением.
+    const channelId = realDiscordId(configuredChannelId);
     if (!channelId) {
       console.warn(
         `[reports] Рапорт #${created.id} (${type}): канал Discord не настроен — публикация только в панели модерации`
@@ -183,7 +187,7 @@ export async function POST(req: NextRequest) {
         "Рапорт": `#${created.id}`,
         "Суть": summarizeReport(type, payload),
         "IP": requestIp(req),
-        "Канал": channelId || "не настроен",
+        "Канал": channelId || configuredChannelId || "не настроен",
         "Публикация": published.ok ? "в канал Discord" : "только в панели",
       },
       kind: "system",
