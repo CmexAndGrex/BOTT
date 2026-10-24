@@ -15,7 +15,12 @@ import { desc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { members, serviceReports } from "@/db/schema";
 import { requireCabinetMember } from "@/lib/member-auth";
-import { readReportPayload, summarizeReport, type ReportPayload } from "@/lib/reports";
+import {
+  columnExamFor,
+  readReportPayload,
+  summarizeReport,
+  type ReportPayload,
+} from "@/lib/reports";
 import {
   reportStatusView,
   serviceStatus,
@@ -23,6 +28,7 @@ import {
   type DossierReportRow,
 } from "@/lib/dossier";
 import { getAvailableVehicles } from "@/lib/vehicles";
+import { examMarksFromSheets } from "@/lib/gsheets";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -114,18 +120,72 @@ export async function GET(req: NextRequest) {
       examsOf(report, payloads.get(report.id) ?? { exams: [] } as ReportPayload)
     );
 
+    /**
+     * Мерж оценок из ШДС: три листа («Танковая рота», «Артиллерийский
+     * дивизион» вместе с блоком запаса 44–78, «Запас»).
+     *
+     * Зачем: одобренные рапорты — не единственный источник. Боец, вернувшийся
+     * из запаса, имеет ПУСТУЮ основную строку и сданные нормативы в запасе;
+     * часть отметок штаб ставит прямо в таблице. Без мержа ЛК показывал
+     * «не сдано» по реально сданным нормативам.
+     *
+     * Ошибка Google не ломает досье: examMarksFromSheets возвращает [] и ЛК
+     * работает по рапортам (см. её try/catch).
+     */
+    const sheetMarks = member.unit
+      ? await examMarksFromSheets({
+          unit: member.unit,
+          names: [member.name || "", member.callsign || ""].filter(Boolean),
+        })
+      : [];
+
+    /**
+     * Ключ слияния — код СТОЛБЦА листа подразделения, а не написание из
+     * рапорта. Один норматив зовут по-разному («Уставы общие» в панели и
+     * «Уставы (общевойсковые)» в шапке), и без приведения к общему коду боец
+     * видел бы два бейджа одного норматива.
+     */
+    const canonical = (code: string) =>
+      columnExamFor(member.unit, code)?.code ?? code.trim();
+
+    // Слияние: рапорт даёт дату и оценку, лист — сам факт сдачи и оценку.
+    // Приоритет у листа по оценке: там стоит то, что реально в таблице.
+    const qualifications: Record<string, { code: string; grade: string | null; at: string | null }> =
+      {};
+    for (const item of summary.qualificationDetails) {
+      const code = canonical(item.code);
+      const existing = qualifications[code];
+      // Первая запись — самая свежая (рапорты идут по убыванию даты)
+      if (existing) continue;
+      qualifications[code] = { code, grade: item.grade, at: item.at };
+    }
+    for (const mark of sheetMarks) {
+      if (!mark.passed) continue;
+      const code = canonical(mark.code);
+      const existing = qualifications[code];
+      if (!existing) {
+        qualifications[code] = { code, grade: mark.grade, at: null };
+        continue;
+      }
+      // Оценка из таблицы главнее: она выставлена экзаменатором в ШДС
+      if (mark.grade) existing.grade = mark.grade;
+    }
+    const mergedDetails = Object.values(qualifications);
+    const mergedQualifications = mergedDetails.map((item) => item.code);
+
     const status = serviceStatus({
       status: member.status,
       active: member.active,
       vacationUntil: member.vacationUntil,
     });
 
-    // Допуск к технике: звание и подразделение из карточки, нормативы — из
-    // одобренных рапортов (они и закрашивают столбцы ШДС)
+    // Допуск к технике: звание и подразделение из карточки, нормативы —
+    // объединённые (рапорты + ШДС). Раньше брали только рапорты, и боец с
+    // оценками в таблице не получал допуск к технике.
     const vehicles = getAvailableVehicles({
       rank: member.rank,
       unit: member.unit,
-      qualifications: summary.qualifications,
+      qualifications: mergedQualifications,
     });
 
     return NextResponse.json({
@@ -163,11 +223,11 @@ export async function GET(req: NextRequest) {
         rejected: summary.rejected,
         firstAt: summary.firstAt ? summary.firstAt.toISOString() : null,
         lastAt: summary.lastAt ? summary.lastAt.toISOString() : null,
-        qualifications: summary.qualifications,
-        // Нормативы с оценкой и датой: по ним раздел «Экзамены» рисует зелёные
-        // бейджи. Даты переводятся в ISO здесь, чтобы клиент не разбирал даты
-        // повторно (та же схема, что у firstAt/lastAt выше).
-        qualificationDetails: summary.qualificationDetails.map((item) => ({
+        // Квалификации — объединённые: рапорты + ШДС (все три листа, с мержем
+        // оценок из запаса). Именно по ним раздел «Экзамены» рисует бейджи и
+        // считает допуски, поэтому источник должен быть один.
+        qualifications: mergedQualifications,
+        qualificationDetails: mergedDetails.map((item) => ({
           code: item.code,
           grade: item.grade,
           at: item.at,

@@ -107,6 +107,23 @@ function columnIndexOf(letter: string): number {
   return n - 1;
 }
 
+/**
+ * Подразделение бойца для записи в ШДС.
+ *
+ * Берётся из карточки (`division_members.unit` — он совпадает с именем листа),
+ * а при пустом значении выводится из должности: в табеле rs-red.com
+ * подразделение пишут как «ТР» / «АД» или названием дивизиона. Без этого
+ * боец с заполненной должностью и пустым unit не попадал бы в таблицу.
+ */
+function memberUnit(member: { unit?: string | null; post?: string | null }): string {
+  const unit = String(member.unit ?? "").trim();
+  if (unit) return unit;
+  const post = String(member.post ?? "");
+  if (/танк|\bтр\b/i.test(post)) return UNITS[0];
+  if (/дивизион|артиллер|\bад\b/i.test(post)) return UNITS[1];
+  return "";
+}
+
 /** Ячейка листа — минимум, нужный для поиска строки (упрощает тесты) */
 type CellSource = { getCell: (row: number, col: number) => { value?: unknown } };
 
@@ -147,7 +164,8 @@ export async function syncShdsRoster(): Promise<{
   detail: string;
   error?: string;
 }> {
-  const { getDoc, resolveLayout } = await import("@/lib/gsheets");
+  const { getDoc, resolveLayout, ensureMembersInShds, copyReserveGradesForUnit } =
+    await import("@/lib/gsheets");
 
   const doc = await getDoc();
   const allSheets = Object.values(doc.sheetsById);
@@ -156,7 +174,17 @@ export async function syncShdsRoster(): Promise<{
   let readSheets = 0;
 
   const sheetMembers = await db
-    .select({ id: members.id, name: members.name, rank: members.rank, unit: members.unit })
+    .select({
+      id: members.id,
+      name: members.name,
+      rank: members.rank,
+      unit: members.unit,
+      post: members.post,
+      callsign: members.callsign,
+      discordId: members.discordId,
+      active: members.active,
+      status: members.status,
+    })
     .from(members);
 
   for (const unit of UNITS) {
@@ -204,11 +232,71 @@ export async function syncShdsRoster(): Promise<{
     }
   }
 
+  /**
+   * 2. Автозапись отсутствующих бойцов и перенос оценок из запаса.
+   *
+   * Почему это здесь, а не в отдельной задаче: обе операции меняют ШДС, и
+   * запускать их надо ровно тогда, когда таблица уже прочитана. Порядок важен:
+   * сначала боец появляется в строке «Вакант», и только потом в его строку
+   * можно перенести оценки из запаса — иначе переносить некуда.
+   *
+   * Ошибка любого шага не отменяет синхронизацию званий: она попадает в
+   * предупреждения, а состав и звания остаются обновлёнными.
+   */
+  let added = 0;
+  let gradesCopied = 0;
+
+  try {
+    // Боец считается действующим, если не исключён и не в запасе
+    const activeMembers = sheetMembers.filter(
+      (member) => member.active !== false && member.status !== "dismissed" && member.unit
+    );
+
+    const entries = activeMembers
+      .map((member) => {
+        const unit = memberUnit(member);
+        if (!unit) return null;
+        return {
+          name: String(member.name ?? "").trim(),
+          unit,
+          rank: member.rank,
+          post: member.post,
+          aliases: member.callsign ? [member.callsign] : [],
+          discordId: member.discordId,
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry?.name));
+
+    const result = await ensureMembersInShds(entries);
+    added = result.added.length;
+    warnings.push(...result.warnings);
+
+    // Оценки из запаса — в основные строки. Перенос ПАКЕТНЫЙ, по подразделению:
+    // листы читаются один раз на всех бойцов. Вызов на каждого бойца давал бы
+    // два запроса loadCells на человека и упирался в квоту Google.
+    const units = [...new Set(entries.map((entry) => entry.unit))];
+    for (const unit of units) {
+      const copy = await copyReserveGradesForUnit({
+        unit,
+        members: entries
+          .filter((entry) => entry.unit === unit)
+          .map((entry) => [entry.name, ...entry.aliases]),
+      });
+      gradesCopied += copy.copied;
+      if (copy.error) warnings.push(`перенос оценок (${unit}): ${copy.error}`);
+    }
+  } catch (e) {
+    warnings.push(
+      `автозапись в ШДС: ${e instanceof Error ? e.message : String(e)}`
+    );
+  }
+
   // Успех — если прочитан хотя бы один лист: второй лист может отсутствовать
   // вовсе (подразделение ещё не заведено), и это не повод показывать «Ошибка».
   const ok = readSheets > 0;
   const detail =
-    `Прочитано листов: ${readSheets}, обновлено бойцов: ${updated}` +
+    `Прочитано листов: ${readSheets}, обновлено бойцов: ${updated}, ` +
+    `дописано в «Вакант»: ${added}, перенесено оценок из запаса: ${gradesCopied}` +
     (warnings.length ? `. Предупреждения: ${warnings.join("; ")}` : "");
 
   return {

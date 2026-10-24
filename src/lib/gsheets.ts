@@ -17,6 +17,7 @@ import {
   type ShdsSection,
   POSITION_SECTIONS,
   examCatalog,
+  normalizeExamCode,
 } from "@/lib/reports";
 import { isUnit, normalizePersonName } from "@/lib/recruits";
 import { readFileSync } from "node:fs";
@@ -272,6 +273,24 @@ export type UnitLayout = {
   nameCol: string;                              // колонка имени / «Вакант»
   overall: { top: number; bottom: number };     // общий диапазон поиска имени
   addRange: { top: number; bottom: number };    // «Добавление в ШДС»
+  /**
+   * Блок «Запас | долгий отпуск» НА ЭТОМ ЖЕ листе (сейчас есть у дивизиона:
+   * строки 44–78). Оценки бойца, вернувшегося из запаса, могут лежать здесь,
+   * пока его основная строка пустая — их нужно мержить при чтении ЛК.
+   */
+  reserveBlock?: { top: number; bottom: number };
+  /**
+   * Строки ниже этой границы — инфо-блоки и плашки командования, а не состав.
+   * При ПОИСКЕ БОЙЦА для мержа оценок они не рассматриваются: иначе зам
+   * корпуса Иванов И.А. (плашка в D90/D94) склеивался бы с рядовым
+   * однофамильцем из блока запаса (строка 60).
+   */
+  infoBlockTop?: number;
+  /**
+   * Дополнительные колонки ФИО, которые нужно проверять при поиске строки.
+   * Раскладку листа правят руками: у дивизиона имя встречается и в C, и в D.
+   */
+  extraNameCols?: readonly string[];
   postRanges: { match: RegExp; top: number; bottom: number }[]; // «Изменение должности»
   /**
    * Должности по блокам строк, включая те, что не назначаются рапортом бойца
@@ -297,6 +316,15 @@ export type UnitLayout = {
    * относится к служебным пометкам и копированию не подлежит.
    */
   examEndCol: string;
+  /**
+   * Правая граница ЧТЕНИЯ оценок, если она шире блока записи.
+   *
+   * Запись нельзя расширять молча: бот закрашивает столбец по заголовку, и
+   * сдвинутая граница увела бы оценку в служебную колонку. Чтение же лишних
+   * столбцов безопасно — берутся только те, чей заголовок сопоставился с
+   * каталогом нормативов, а пустые и служебные пропускаются.
+   */
+  readExamEndCol?: string;
 };
 
 const LAYOUTS: Record<"TR" | "AD", UnitLayout> = {
@@ -311,6 +339,12 @@ const LAYOUTS: Record<"TR" | "AD", UnitLayout> = {
      */
     overall: { top: 10, bottom: 100 },
     addRange: { top:  42, bottom: 56 },
+    /**
+     * Плашки командования и инфо-блоки листа роты. Ниже этой строки состав
+     * не ищется: там служебные надписи, и совпадение ФИО в них склеило бы
+     * двух разных людей.
+     */
+    infoBlockTop: 80,
     postRanges: [
       { match: /логист|снабжен/i, top: 42, bottom: 56 },
       { match: /мех.?водител/i, top: 28, bottom: 40 },
@@ -346,6 +380,26 @@ const LAYOUTS: Record<"TR" | "AD", UnitLayout> = {
      */
     overall: { top: 12, bottom: 100 },
     addRange: { top: 32, bottom: 41 },
+    /**
+     * Блок «Запас | долгий отпуск» на листе дивизиона (строки 44–78).
+     *
+     * Оценки бойца, вернувшегося из запаса (Романов А.В., Вакутагин И.И.),
+     * остаются здесь, пока основная строка пустая. Блок читается при мерже
+     * оценок и при переносе их в основную строку.
+     */
+    reserveBlock: { top: 44, bottom: 78 },
+    /**
+     * Ниже 80-й строки у дивизиона идут инфо-блоки и плашки командования
+     * (Волков Д.В. — D90, Иванов И.А. — D94, Иванов К.М. — D98). При поиске
+     * бойца для мержа оценок они исключены: иначе зам корпуса Иванов И.А.
+     * совпал бы с рядовым-однофамильцем из блока запаса (строка 60).
+     */
+    infoBlockTop: 80,
+    /**
+     * У дивизиона имя встречается и в C, и в D: колонка «Фамилии, инициалы»
+     * в шапке может быть сдвинута. Проверяются обе.
+     */
+    extraNameCols: ["D"],
     postRanges: [
       { match: /снабжен/i, top: 32, bottom: 41 },
       { match: /1\s*оов/i, top: 12, bottom: 20 },
@@ -361,6 +415,12 @@ const LAYOUTS: Record<"TR" | "AD", UnitLayout> = {
     // Блок оценок дивизиона: столбцы I–AG (25 нормативов — от КМБТ до «Берет»)
     examStartCol: "I",
     examEndCol: "AG",
+    /**
+     * Чтение — до «AI»: в шапке дивизиона встречаются столбцы правее «AG»,
+     * и без расширения границы их оценки терялись. Запись по-прежнему
+     * ограничена «AG» (examEndCol).
+     */
+    readExamEndCol: "AI",
   },
 };
 
@@ -465,6 +525,21 @@ export async function ensureColumnCount(
  */
 export function examBounds(layout: UnitLayout): { start: number; end: number } {
   return { start: colIndex(layout.examStartCol), end: colIndex(layout.examEndCol) };
+}
+
+/**
+ * Границы ЧТЕНИЯ блока оценок.
+ *
+ * Шире границ записи (examBounds), если у листа задан readExamEndCol: у
+ * дивизиона шапка уходит правее «AG». Расширять ЗАПИСЬ нельзя — бот закрасил
+ * бы служебный столбец, — а чтению лишние столбцы не вредят: берутся только
+ * заголовки, сопоставимые с каталогом нормативов.
+ */
+export function examReadBounds(layout: UnitLayout): { start: number; end: number } {
+  return {
+    start: colIndex(layout.examStartCol),
+    end: colIndex(layout.readExamEndCol ?? layout.examEndCol),
+  };
 }
 
 /**
@@ -586,7 +661,11 @@ async function loadArea(
   bottom: number
 ) {
   const from = Math.min(top, SEARCH_TOP_ROW);
-  await sheet.loadCells(`${ROW_START_COL}${from}:${layout.examEndCol}${bottom}`);
+  // Правая граница — граница ЧТЕНИЯ: у дивизиона шапка шире блока записи, и
+  // обрезка по examEndCol («AG») оставляла столбцы правее не прочитанными, а
+  // значит, и оценки в них недоступными для мержа.
+  const endCol = layout.readExamEndCol ?? layout.examEndCol;
+  await sheet.loadCells(`${ROW_START_COL}${from}:${endCol}${bottom}`);
 }
 
 /** Первая строка со значением «Вакант» в диапазоне колонки имени */
@@ -681,7 +760,10 @@ function nameColumnsFor(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayout): 
   const columns: number[] = [];
   const byHeader = headerNameColumn(sheet, layout);
   if (byHeader != null) columns.push(byHeader);
-  for (const col of [base, base - 1]) {
+  // Дополнительные колонки раскладки: у дивизиона ФИО встречается и в D —
+  // раскладку листа правят руками, и поиск только по C отвечал «не найден»
+  const extra = (layout.extraNameCols ?? []).map((col) => colIndex(col));
+  for (const col of [base, ...extra, base - 1]) {
     if (col >= 0 && !columns.includes(col)) columns.push(col);
   }
   return columns;
@@ -2134,6 +2216,764 @@ export async function syncDiscordIdToSheet(params: {
 }
 
 /* ------------------------------------------------------------------ */
+/* Оценки с листов: распознавание, чтение и мерж трёх источников       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Раскладка листа «Запас».
+ *
+ * Шапка экзаменов в строке 3 (I..AF — 24 норматива от КМБТ до «Берет»), ФИО в
+ * колонке D. Эти координаты НЕ совпадают с листами подразделений: у роты ФИО в
+ * C и оценки с H, у дивизиона ФИО в C и оценки с I. Поэтому лист «Запас»
+ * читается отдельной раскладкой, а не раскладкой подразделения.
+ */
+export const RESERVE_LAYOUT = {
+  /** Строка шапки экзаменов листа «Запас» */
+  headerRow: 3,
+  /** Первая колонка блока оценок — «I» (индекс 8) */
+  examStartCol: "I",
+  /** Последняя колонка блока оценок — «AF» (индекс 31) */
+  examEndCol: "AF",
+  /** Колонки, в которых ищется ФИО: C (снапшот), D (по шапке), E, B */
+  nameCols: [2, 3, 4, 1] as readonly number[],
+  /** Первая строка с данными */
+  firstDataRow: 4,
+  /** Граница сканирования: ниже — служебные пометки, а не состав */
+  maxScanRow: 300,
+} as const;
+
+/** Оценки, означающие сданный норматив (по ТЗ) */
+const PASSED_GRADE_TEXT = new Set([
+  "5",
+  "4",
+  "5-",
+  "4-",
+  "4+",
+  "5+",
+  "зач",
+  "зачет",
+  "зачёт",
+]);
+
+/** Подпись «Зачёт»: норматив закрыт заливкой без числовой оценки */
+export const PASS_MARK = "Зачёт";
+
+/**
+ * Командование Корпуса: в личном кабинете все нормативы показываются сданными.
+ *
+ * Список задан ФИО, а не должностью: плашки командования стоят на листе ниже
+ * таблицы состава (у дивизиона — строки 90/94/98), и «по должности» отличить
+ * зама корпуса от рядового однофамильца в блоке запаса нельзя.
+ */
+export const COMMAND_CORPS_NAMES = ["Волков Д. В.", "Иванов И. А.", "Иванов К. М."] as const;
+
+/** Совпадает ли набор имён бойца с командованием Корпуса */
+export function isCommandCorps(names: readonly string[]): boolean {
+  const exact = new Set(COMMAND_CORPS_NAMES.map((n) => normalizePersonName(n)));
+  const loose = new Set(COMMAND_CORPS_NAMES.map((n) => looseNameKey(normalizePersonName(n))));
+  for (const name of names) {
+    const key = normalizePersonName(name);
+    if (!key) continue;
+    if (exact.has(key) || loose.has(looseNameKey(key))) return true;
+  }
+  return false;
+}
+
+/** Сданный норматив: код норматива каталога, оценка и признак «сдан» */
+export type ExamMark = {
+  /** Код норматива каталога (reports.ts) — по нему идёт мерж названий */
+  code: string;
+  /** Оценка как она записана в листе; null — только заливка или командование */
+  grade: string | null;
+  /** Норматив сдан */
+  passed: boolean;
+};
+
+/**
+ * Синяя заливка ячейки.
+ *
+ * Нужна ровно для одного столбца: на листе «Запас» «КБМ Испыт.» отмечают синим
+ * (зелёного там нет), и без этой проверки норматив считался бы несданным.
+ */
+function isExamBlue(color: CellColor | undefined | null): boolean {
+  if (!color) return false;
+  const { red = 0, green = 0, blue = 0 } = color;
+  return blue > 0.6 && blue > red * 1.3 && blue > green * 1.3;
+}
+
+/**
+ * Разбор ячейки норматива: текст оценки и/или заливка.
+ *
+ * Порядок важен: текст главнее заливки — «3» в зелёной ячейке остаётся
+ * неудовлетворительной оценкой, а не «Зачётом».
+ */
+export function parseExamMark(params: {
+  value: unknown;
+  color?: CellColor | null;
+  /** Название столбца: для «КБМ Испыт.» зачёт может быть синим */
+  title?: string;
+}): { grade: string | null; passed: boolean } {
+  const text = String(params.value ?? "")
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const key = text.toLowerCase();
+  const isKmbtColumn = /кбм\s*испыт/i.test(String(params.title ?? ""));
+
+  if (text) {
+    if (PASSED_GRADE_TEXT.has(key)) {
+      // «зач» в ячейке — это зачёт, а не оценка: числовой оценки нет
+      const grade = /^\d/.test(text) ? text : PASS_MARK;
+      return { grade, passed: true };
+    }
+    // Числовая оценка ниже 4 (например «3») — норматив не сдан
+    if (/^\d[+-]?$/.test(text)) return { grade: text, passed: false };
+    // Текст без оценки: зачёт, если ячейка закрашена
+    if (isExamGreen(params.color) || (isKmbtColumn && isExamBlue(params.color))) {
+      return { grade: PASS_MARK, passed: true };
+    }
+    return { grade: null, passed: false };
+  }
+
+  if (isExamGreen(params.color) || (isKmbtColumn && isExamBlue(params.color))) {
+    return { grade: PASS_MARK, passed: true };
+  }
+  return { grade: null, passed: false };
+}
+
+/**
+ * Сокращения шапки листа «Запас».
+ *
+ * На этом листе нормативы названы короче, чем в каталоге рапортов («Снаряжение
+ * техники» вместо «Снаряжение, обслуживание техники», «Езда в проходимых
+ * условиях» вместо «Езда в сложно-проходимых условиях»). Без таблицы
+ * соответствий оценка из запаса не находила свой норматив и не попадала ни в
+ * ЛК, ни в основную строку.
+ *
+ * Ключи — уже нормализованные (нижний регистр, «е» вместо «ё»).
+ */
+const RESERVE_TITLE_ALIASES: Record<string, string> = {
+  "снаряжение техники": "Снаряжение, обслуживание техники",
+  "снаряжение, обслуживание техники": "Снаряжение, обслуживание техники",
+  "снаряжение и обслуживание техники": "Снаряжение, обслуживание техники",
+  "езда в проходимых условиях": "Езда в сложно-проходимых условиях",
+  "езда в сложнопроходимых условиях": "Езда в сложно-проходимых условиях",
+  "уставы общевойсковые": "Уставы (общевойсковые)",
+  "кбм испыт": "КБМ Испыт.",
+  "кбм испытателя": "КБМ Испыт.",
+  "минометное дело экзамен": "Миномётное дело (Экзамен)",
+  "артиллерийское дело экзамен": "Артиллерийское Дело (Экзамен)",
+  "сдача на мех водителя": "Сдача на Мех. Водителя",
+  "сдача на мехводителя": "Сдача на Мех. Водителя",
+};
+
+/** Норматив каталога, которому соответствует заголовок столбца листа */
+export function resolveExamRubric(title: string): string | null {
+  const raw = normalizeExamCode(title);
+  if (!raw) return null;
+  const canonical = normalizeExamCode(canonicalExamTitle(title));
+  const keys = new Set([raw, canonical]);
+
+  // Сокращения листа «Запас» проверяются первыми: они точнее общего каталога
+  for (const key of keys) {
+    const mapped = RESERVE_TITLE_ALIASES[key];
+    if (mapped) return mapped;
+  }
+
+  const catalog = examCatalog(null).exams;
+  for (const exam of catalog) {
+    const own = [exam.code, ...(exam.aliases ?? [])].map((v) => normalizeExamCode(v));
+    if (own.some((k) => keys.has(k))) return exam.code;
+  }
+
+  // Заголовок без скобок («Снаряжение, обслуживание техники» → «(экзамен)»):
+  // сравниваем ещё и с названием без уточнения в скобках
+  for (const exam of catalog) {
+    const base = normalizeExamCode(String(exam.code).replace(/\(.*?\)/g, ""));
+    if (base && keys.has(base)) return exam.code;
+  }
+  return null;
+}
+
+/** Колонка блока оценок с её нормативом: {column, code} */
+type ExamColumn = { column: number; code: string; title: string };
+
+/** Колонки блока оценок листа по строке шапки (только известные нормативы) */
+function examColumnsFromHeader(
+  sheet: GoogleSpreadsheetWorksheet,
+  headerRow: number,
+  from: number,
+  to: number
+): ExamColumn[] {
+  const columns: ExamColumn[] = [];
+  for (let c = from; c <= to; c++) {
+    let title = "";
+    try {
+      title = String(sheet.getCell(headerRow - 1, c).value ?? "").trim();
+    } catch {
+      // Ячейка шапки вне загруженного диапазона — столбец просто не учитываем
+      continue;
+    }
+    if (!title) continue;
+    const code = resolveExamRubric(title);
+    if (!code) continue;
+    columns.push({ column: c, code, title });
+  }
+  return columns;
+}
+
+/** Нормализованный ключ ФИО для сравнения «как в листе» */
+function personKeys(name: string): { exact: string; loose: string } {
+  const exact = normalizePersonName(name);
+  return { exact, loose: looseNameKey(exact) };
+}
+
+/** Строка листа, в которой стоит искомое ФИО, и колонка, где оно найдено */
+type NamedRow = { row: number; nameCol: number };
+
+/**
+ * Поиск строк по набору имён в указанных колонках и диапазоне строк.
+ *
+ * В отличие от findNameRow диапазон задаётся вызывающим: при чтении оценок он
+ * обрезается по началу инфо-блоков (плашки командования у дивизиона — строки
+ * 90/94/98), чтобы зам корпуса Иванов И.А. не склеивался с рядовым
+ * однофамильцем из блока запаса.
+ */
+function findNamedRows(
+  sheet: GoogleSpreadsheetWorksheet,
+  columns: readonly number[],
+  names: readonly string[],
+  top: number,
+  bottom: number
+): NamedRow[] {
+  const targets = names
+    .map((n) => personKeys(n))
+    .filter((k) => k.exact && k.loose);
+  if (!targets.length) return [];
+
+  const found: NamedRow[] = [];
+  for (let row = top; row <= bottom; row++) {
+    for (const col of columns) {
+      const raw = readRowText(sheet, row, col);
+      if (!raw || isVacant(raw)) continue;
+      const key = personKeys(raw);
+      if (!key.exact) continue;
+      const hit = targets.some(
+        (t) => t.exact === key.exact || (t.loose && t.loose === key.loose)
+      );
+      if (!hit) continue;
+      if (!found.some((f) => f.row === row)) found.push({ row, nameCol: col });
+      break;
+    }
+  }
+  return found;
+}
+
+/** Слияние оценки в накопитель: реальная оценка важнее «Зачёта» */
+function mergeMark(into: Map<string, ExamMark>, mark: ExamMark): void {
+  const existing = into.get(mark.code);
+  if (!existing) {
+    into.set(mark.code, { ...mark });
+    return;
+  }
+  if (existing.grade === null && mark.grade !== null) existing.grade = mark.grade;
+  existing.passed = existing.passed || mark.passed;
+}
+
+/** Чтение всех отмеченных нормативов строки по карте колонок */
+function readRowMarks(
+  sheet: GoogleSpreadsheetWorksheet,
+  row: number,
+  columns: readonly ExamColumn[]
+): ExamMark[] {
+  const marks: ExamMark[] = [];
+  for (const column of columns) {
+    let cell: Cell;
+    try {
+      cell = sheet.getCell(row - 1, column.column);
+    } catch {
+      continue;
+    }
+    const parsed = parseExamMark({
+      value: cell.value,
+      color: cell.backgroundColor,
+      title: column.title,
+    });
+    if (!parsed.passed) continue;
+    marks.push({ code: column.code, grade: parsed.grade, passed: true });
+  }
+  return marks;
+}
+
+/** Лист «Запас» (по настройке reserve_sheet_name); null — листа нет */
+async function getReserveSheetIfExists(): Promise<GoogleSpreadsheetWorksheet | null> {
+  const doc = await getDoc();
+  const map = await getSettings();
+  const name = (map.get("reserve_sheet_name") || "Запас").trim() || "Запас";
+  const sheets = Object.values(doc.sheetsById) as GoogleSpreadsheetWorksheet[];
+  return (
+    sheets.find((s) => (s.title || "").trim().toLowerCase() === name.toLowerCase()) ?? null
+  );
+}
+
+/**
+ * Загрузка листа «Запас» целиком в нужной ширине.
+ *
+ * Ширина — до «AF» (конец блока оценок). Снапшот строки подразделения занимает
+ * и колонки правее (AH..AJ — служебные), но для чтения оценок они не нужны.
+ */
+async function loadReserveArea(sheet: GoogleSpreadsheetWorksheet): Promise<number> {
+  const bottom = Math.min(RESERVE_LAYOUT.maxScanRow, sheet.rowCount);
+  // Сетка листа «Запас» может быть уже блока оценок (свежесозданный лист
+  // получает 26 колонок): запрос за границу сетки падает с «Out of bounds»,
+  // поэтому правая граница ограничивается фактическим числом колонок.
+  const lastCol = Math.min(colIndex(RESERVE_LAYOUT.examEndCol), sheet.columnCount - 1);
+  await sheet.loadCells(`${ROW_START_COL}1:${colLetter(lastCol)}${bottom}`);
+  return bottom;
+}
+
+/**
+ * Отметки бойца на листе «Запас».
+ *
+ * Строка запаса может быть двух видов, и оба встречаются в одной таблице:
+ *   * ручная запись по раскладке листа (ФИО в D, оценки I..AF) — читается
+ *     шапкой листа (строка 3);
+ *   * снапшот строки подразделения (ФИО в C, оценки H..AE у роты / I..AG у
+ *     дивизиона) — читается шапкой ПОДРАЗДЕЛЕНИЯ.
+ *
+ * Вид определяется по колонке, где нашлось ФИО: если имя стоит в C (колонка
+ * имени подразделения), строка — снапшот, и колонки берутся по раскладке
+ * подразделения; если в D — по шапке листа «Запас».
+ */
+function readReserveMarks(params: {
+  reserveSheet: GoogleSpreadsheetWorksheet;
+  layout: UnitLayout;
+  unitColumns: readonly ExamColumn[];
+  names: readonly string[];
+  bottom: number;
+}): ExamMark[] {
+  const { reserveSheet, layout, unitColumns, names, bottom } = params;
+  const reserveFrom = colIndex(RESERVE_LAYOUT.examStartCol);
+  const reserveTo = colIndex(RESERVE_LAYOUT.examEndCol);
+  const reserveColumns = examColumnsFromHeader(
+    reserveSheet,
+    RESERVE_LAYOUT.headerRow,
+    reserveFrom,
+    reserveTo
+  );
+
+  const rows = findNamedRows(
+    reserveSheet,
+    RESERVE_LAYOUT.nameCols,
+    names,
+    RESERVE_LAYOUT.firstDataRow,
+    bottom
+  );
+
+  const marks: ExamMark[] = [];
+  for (const { row, nameCol } of rows) {
+    // C — колонка имени подразделения: строка является снапшотом
+    const snapshot = nameCol === colIndex(layout.nameCol);
+    const columns = snapshot ? unitColumns : reserveColumns;
+    marks.push(...readRowMarks(reserveSheet, row, columns));
+  }
+  return marks;
+}
+
+/**
+ * Все отметки бойца с трёх листов, объединённые по названию норматива.
+ *
+ * Источники и порядок приоритета:
+ *   1. основная строка на листе подразделения;
+ *   2. блок «Запас | долгий отпуск» на ТОМ ЖЕ листе (у дивизиона строки 44–78);
+ *   3. лист «Запас» (ручные записи и снапшоты).
+ *
+ * Мерж нужен для бойцов, вернувшихся из запаса: их строка на листе
+ * подразделения пустая, а сданные нормативы остались в запасе. Без мержа ЛК
+ * показывал «не сдано» по всем нормативам.
+ */
+export async function examMarksFromSheets(params: {
+  unit: string;
+  /** Кандидаты имени: ФИО, позывной. Steam/Discord в листах не ключ поиска */
+  names: readonly string[];
+  includeReserve?: boolean;
+}): Promise<ExamMark[]> {
+  const unit = params.unit.trim();
+  const names = params.names.map((n) => (n || "").trim()).filter(Boolean);
+  if (!unit || !names.length) return [];
+
+  // Командование Корпуса: все нормативы считаются сданными
+  if (isCommandCorps(names)) {
+    return examCatalog(unit).exams.map((exam) => ({
+      code: exam.code,
+      grade: PASS_MARK,
+      passed: true,
+    }));
+  }
+
+  try {
+    const sheet = await getSheet(unit);
+    const layout = resolveLayout(unit);
+    const { start: examFrom, end: examTo } = examReadBounds(layout);
+
+    // Нижняя граница чтения: инфо-блоки и плашки командования исключены
+    const readBottom = Math.min(
+      layout.overall.bottom,
+      layout.infoBlockTop ? layout.infoBlockTop - 1 : layout.overall.bottom
+    );
+    await loadArea(sheet, layout, layout.overall.top, readBottom);
+
+    const unitColumns = examColumnsFromHeader(sheet, layout.examHeaderRow, examFrom, examTo);
+    const nameColumns = [
+      ...new Set([
+        colIndex(layout.nameCol),
+        ...(layout.extraNameCols ?? []).map((c) => colIndex(c)),
+        colIndex(layout.nameCol) - 1,
+      ]),
+    ].filter((c) => c >= 0);
+
+    const rows = findNamedRows(sheet, nameColumns, names, SEARCH_TOP_ROW, readBottom);
+
+    const merged = new Map<string, ExamMark>();
+    // Основная строка важнее блока запаса: при конфликте остаётся её оценка
+    const sorted = [...rows].sort((a, b) => a.row - b.row);
+    for (const { row } of sorted) {
+      for (const mark of readRowMarks(sheet, row, unitColumns)) mergeMark(merged, mark);
+    }
+
+    if (params.includeReserve !== false) {
+      const reserveSheet = await getReserveSheetIfExists();
+      if (reserveSheet) {
+        const bottom = await loadReserveArea(reserveSheet);
+        for (const mark of readReserveMarks({
+          reserveSheet,
+          layout,
+          unitColumns,
+          names,
+          bottom,
+        })) {
+          mergeMark(merged, mark);
+        }
+      }
+    }
+
+    return [...merged.values()];
+  } catch (e) {
+    // Ошибка чтения не должна ронять кабинет: отдаём пустой список, и досье
+    // покажет нормативы из одобренных рапортов
+    console.warn("[gsheets] Не удалось прочитать оценки бойца с листов:", e);
+    return [];
+  }
+}
+
+/** Итог переноса оценок по одному бойцу */
+export type GradeCopyResult = { name: string; row: number | null; copied: number };
+
+/**
+ * Перенос найденных в запасе оценок в основные строки бойцов подразделения.
+ *
+ * Вызывается при синхронизации ШДС: оценки, которые есть только на листе
+ * «Запас» (или в блоке запаса того же листа), копируются в пустые ячейки
+ * основной строки, и таблица тоже актуализируется — не только личный кабинет.
+ *
+ * Заполняются ТОЛЬКО пустые ячейки: существующая оценка бойца не перезаписывается
+ * (пересдачу вносит экзаменатор, а не синхронизация).
+ *
+ * Пакетный режим не случаен: лист подразделения и лист «Запас» читаются ОДИН
+ * раз на всех бойцов. Иначе каждый боец давал бы два запроса loadCells, и на
+ * составе в 40 человек синхронизация упиралась бы в квоту Google (60 чтений в
+ * минуту) — перенос оценок перестал бы работать вовсе.
+ */
+export async function copyReserveGradesForUnit(params: {
+  unit: string;
+  /** Кандидаты имени каждого бойца: ФИО и позывной */
+  members: readonly (readonly string[])[];
+}): Promise<{ ok: boolean; copied: number; results: GradeCopyResult[]; error?: string }> {
+  const unit = params.unit.trim();
+  const memberNames = params.members
+    .map((names) => names.map((n) => (n || "").trim()).filter(Boolean))
+    .filter((names) => names.length > 0);
+  if (!unit || !memberNames.length) {
+    return { ok: false, copied: 0, results: [], error: "Не указаны бойцы" };
+  }
+
+  try {
+    const sheet = await getSheet(unit);
+    const layout = resolveLayout(unit);
+    const { start: examFrom, end: examTo } = examReadBounds(layout);
+    const readBottom = Math.min(
+      layout.overall.bottom,
+      layout.infoBlockTop ? layout.infoBlockTop - 1 : layout.overall.bottom
+    );
+    await loadArea(sheet, layout, layout.overall.top, readBottom);
+
+    const unitColumns = examColumnsFromHeader(sheet, layout.examHeaderRow, examFrom, examTo);
+    const nameColumns = [
+      ...new Set([
+        colIndex(layout.nameCol),
+        ...(layout.extraNameCols ?? []).map((c) => colIndex(c)),
+      ]),
+    ].filter((c) => c >= 0);
+
+    // Лист «Запас» читается один раз: дальше поиск идёт по загруженным ячейкам
+    const reserveSheet = await getReserveSheetIfExists();
+    const reserveBottom = reserveSheet ? await loadReserveArea(reserveSheet) : 0;
+
+    const results: GradeCopyResult[] = [];
+    let totalCopied = 0;
+    let dirty = false;
+
+    for (const names of memberNames) {
+      const label = names[0];
+
+      // Основная строка бойца: первая найденная в таблице участников
+      const rows = findNamedRows(sheet, nameColumns, names, layout.overall.top, readBottom);
+      const main = rows[0];
+      if (!main) {
+        results.push({ name: label, row: null, copied: 0 });
+        continue;
+      }
+
+      // Оценки, уже стоящие в основной строке — их не перезаписываем
+      const merged = new Map<string, ExamMark>();
+      for (const mark of readRowMarks(sheet, main.row, unitColumns)) mergeMark(merged, mark);
+      const before = new Set([...merged.keys()].filter((k) => merged.get(k)?.passed));
+
+      // Источники запаса: блок на том же листе + лист «Запас»
+      const reserveMarks: ExamMark[] = [];
+      const block = layout.reserveBlock;
+      if (block) {
+        const blockRows = findNamedRows(sheet, nameColumns, names, block.top, block.bottom);
+        for (const { row } of blockRows) {
+          reserveMarks.push(...readRowMarks(sheet, row, unitColumns));
+        }
+      }
+      if (reserveSheet) {
+        reserveMarks.push(
+          ...readReserveMarks({
+            reserveSheet,
+            layout,
+            unitColumns,
+            names,
+            bottom: reserveBottom,
+          })
+        );
+      }
+
+      const byCode = new Map(reserveMarks.map((m) => [m.code, m]));
+      let copied = 0;
+      for (const column of unitColumns) {
+        if (before.has(column.code)) continue;
+        const mark = byCode.get(column.code);
+        if (!mark?.passed) continue;
+        const cell = sheet.getCell(main.row - 1, column.column);
+        // Пустая ячейка = нет ни текста, ни заливки «сдано»
+        const empty = !String(cell.value ?? "").trim() && !isExamGreen(cell.backgroundColor);
+        if (!empty) continue;
+        cell.value = mark.grade && mark.grade !== PASS_MARK ? mark.grade : "";
+        cell.backgroundColor = { ...EXAM_GREEN };
+        copied++;
+      }
+
+      if (copied > 0) dirty = true;
+      totalCopied += copied;
+      results.push({ name: label, row: main.row, copied });
+    }
+
+    if (dirty) await sheet.saveUpdatedCells();
+    return { ok: true, copied: totalCopied, results };
+  } catch (e) {
+    console.warn("[gsheets] Не удалось перенести оценки из запаса:", e);
+    return {
+      ok: false,
+      copied: 0,
+      results: [],
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+/**
+ * Одиночный перенос оценок из запаса (обёртка над пакетной версией).
+ *
+ * Нужен там, где боец один: сценарий бота и проверка из панели. Пакетная
+ * функция читает листы один раз, поэтому одиночный вызов не делает лишних
+ * запросов к Google — это тот же код, а не копия.
+ */
+export async function copyReserveGradesToUnitRow(params: {
+  unit: string;
+  names: readonly string[];
+}): Promise<{ ok: boolean; copied: number; row: number | null; error?: string }> {
+  const batch = await copyReserveGradesForUnit({
+    unit: params.unit,
+    members: [params.names],
+  });
+  const first = batch.results[0];
+  return {
+    ok: batch.ok,
+    copied: batch.copied,
+    row: first ? first.row : null,
+    ...(batch.error ? { error: batch.error } : {}),
+  };
+}
+
+/**
+ * Блоки «Вакант» для автоматической записи отсутствующих бойцов.
+ *
+ * По ТЗ боец, которого нет на листе, вписывается в первую свободную строку
+ * «Вакант»: у роты — строки 36–41, у дивизиона — 18–22. Диапазоны заданы
+ * явно, а не через addRange: addRange — блок учебного отделения (42–56 / 32–41),
+ * и зачисление туда отсутствующего бойца из БД поставило бы его не в своё
+ * отделение.
+ */
+export const VACANT_FILL_RANGES: Record<"TR" | "AD", { top: number; bottom: number }> = {
+  TR: { top: 36, bottom: 41 },
+  AD: { top: 18, bottom: 22 },
+};
+
+/** Боец из БД, которого нужно проверить в таблице */
+export type ShdsRosterEntry = {
+  name: string;
+  unit: string;
+  rank?: string | null;
+  post?: string | null;
+  /** Позывной или ФИО — второй вариант написания имени */
+  aliases?: readonly string[];
+  steamId?: string | null;
+  discordId?: string | null;
+};
+
+/**
+ * Автозапись отсутствующих бойцов в свободные строки «Вакант».
+ *
+ * Что делает: для каждого бойца проверяет, есть ли его строка на листе
+ * подразделения; если нет — вписывает в первую «Вакант» из VACANT_FILL_RANGES
+ * (звание, ФИО, должность, Steam/Discord) и заливает имя зелёным, как «боец в
+ * строю». Уже существующие строки не трогаются, поэтому повторный запуск
+ * синхронизации ничего не дублирует.
+ */
+export async function ensureMembersInShds(
+  entries: readonly ShdsRosterEntry[]
+): Promise<{ added: string[]; skipped: string[]; warnings: string[]; rows: Record<string, number> }> {
+  const added: string[] = [];
+  const skipped: string[] = [];
+  const warnings: string[] = [];
+  const rows: Record<string, number> = {};
+
+  // Группировка по листу: область читается ОДИН раз на подразделение, а не на
+  // бойца. Иначе каждый боец давал бы свой запрос loadCells и состав упирался
+  // бы в квоту Google (60 чтений в минуту) — синхронизация падала бы целиком.
+  const byUnit = new Map<string, ShdsRosterEntry[]>();
+  for (const entry of entries) {
+    const unit = String(entry.unit ?? "").trim();
+    if (!unit) {
+      warnings.push(`${entry.name}: не назначено подразделение`);
+      continue;
+    }
+    const list = byUnit.get(unit) ?? [];
+    list.push(entry);
+    byUnit.set(unit, list);
+  }
+
+  for (const [unit, group] of byUnit) {
+    let layout: UnitLayout;
+    try {
+      layout = resolveLayout(unit);
+    } catch (e) {
+      for (const entry of group) {
+        skipped.push(entry.name);
+        warnings.push(`${entry.name}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      continue;
+    }
+
+    try {
+      const sheet = await getSheet(unit);
+      const range = VACANT_FILL_RANGES[layout.key];
+      const readBottom = Math.min(
+        layout.overall.bottom,
+        layout.infoBlockTop ? layout.infoBlockTop - 1 : layout.overall.bottom
+      );
+      await loadArea(sheet, layout, range.top, readBottom);
+
+      const nameColumn = colIndex(layout.nameCol);
+      const nameColumns = [
+        ...new Set([nameColumn, ...(layout.extraNameCols ?? []).map((c) => colIndex(c))]),
+      ].filter((c) => c >= 0);
+
+      // Занятые строки ведём в памяти: после записи значение в ячейке меняется,
+      // но перечитывать лист на каждого бойца нельзя (квота). Без этого учёта
+      // все отсутствующие бойцы встали бы в ОДНУ первую строку «Вакант».
+      const takenRows = new Set<number>();
+      let dirty = false;
+
+      for (const entry of group) {
+        const names = [entry.name, ...(entry.aliases ?? [])].filter(Boolean);
+
+        // Боец уже есть на листе (в любом блоке) — вписывать не нужно
+        const existing = findNamedRows(sheet, nameColumns, names, SEARCH_TOP_ROW, readBottom);
+        if (existing.length) {
+          skipped.push(entry.name);
+          rows[entry.name] = existing[0].row;
+          continue;
+        }
+
+        // Первая «Вакант» из диапазона ТЗ, ещё не занятая в этом проходе
+        let target: number | null = null;
+        for (let row = range.top; row <= range.bottom; row++) {
+          if (takenRows.has(row)) continue;
+          if (isVacant(cellAt(sheet, row, layout.nameCol).value)) {
+            target = row;
+            break;
+          }
+        }
+        if (!target) {
+          skipped.push(entry.name);
+          warnings.push(
+            `${entry.name}: нет свободных строк «Вакант» (${range.top}–${range.bottom} листа «${sheet.title}»)`
+          );
+          continue;
+        }
+
+        writeSoldierRow(sheet, layout, target, {
+          rank: entry.rank ?? null,
+          name: entry.name,
+          post: String(entry.post ?? "").trim() || defaultPostFor(layout, target),
+          steamId: entry.steamId ?? null,
+          discordId: entry.discordId ?? null,
+        });
+        takenRows.add(target);
+        added.push(entry.name);
+        rows[entry.name] = target;
+        dirty = true;
+      }
+
+      // Значения сохраняются один раз на лист, затем оформляются строки:
+      // applyRowFormat шлёт batchUpdate и требует уже сохранённых значений
+      if (dirty) {
+        await sheet.saveUpdatedCells();
+        for (const row of takenRows) {
+          await applyRowFormat(sheet, layout, row, {
+            templateRow: pickFormatRow(sheet, layout, range.top, range.bottom, row),
+            nameCol: layout.nameCol,
+            nameFill: NAME_GREEN,
+            examGreenColumns: [],
+          });
+        }
+      }
+    } catch (e) {
+      for (const entry of group) {
+        if (added.includes(entry.name)) continue;
+        skipped.push(entry.name);
+        warnings.push(`${entry.name}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  return { added, skipped, warnings, rows };
+}
+
+/* ------------------------------------------------------------------ */
 /* Чтение сданных нормативов бойца со листа                            */
 /* ------------------------------------------------------------------ */
 
@@ -2165,33 +3005,12 @@ export async function examsFromSheet(params: {
   if (!unit || !names.length) return [];
 
   try {
-    const sheet = await getSheet(unit);
-    const layout = resolveLayout(unit);
-    await loadArea(sheet, layout, layout.overall.top, layout.overall.bottom);
-
-    let row: number | null = null;
-    for (const name of names) {
-      row = findNameRow(sheet, layout, name);
-      if (row) break;
-    }
-    if (!row) return [];
-
-    // Шапка экзаменов: заголовки могут лежать выше общего диапазона участников,
-    // поэтому строка читается отдельно — от начала листа до конца блока оценок
-    const { start: examFrom, end: examTo } = examBounds(layout);
-    await sheet.loadCells(`${ROW_START_COL}${layout.examHeaderRow}:${layout.examEndCol}${layout.examHeaderRow}`);
-
-    const headerRow = layout.examHeaderRow;
-    const passed: string[] = [];
-    // Заголовок и закраска читаются в ОДНОМ цикле по одной и той же колонке:
-    // два прохода по разным границам (как было раньше) разъезжались на колонку
-    // у дивизиона, и «сдано» приписывалось соседнему нормативу
-    for (let c = examFrom; c <= examTo; c++) {
-      const title = String(sheet.getCell(headerRow - 1, c).value ?? "").trim();
-      if (!title) continue;
-      if (isExamGreen(sheet.getCell(row - 1, c).backgroundColor)) passed.push(title);
-    }
-    return passed;
+    // Читается по ТРЁМ источникам и мержится по названию норматива:
+    // основная строка листа, блок «Запас» на том же листе и лист «Запас».
+    // Это и есть причина, по которой боец, вернувшийся из запаса, видел свои
+    // оценки: на основной строке ячейки пустые, а нормативы лежат в запасе.
+    const marks = await examMarksFromSheets({ unit, names });
+    return marks.map((mark) => mark.code);
   } catch (e) {
     console.warn("[gsheets] Не удалось прочитать сданные нормативы с листа:", e);
     return [];

@@ -54,6 +54,11 @@ type DossierResponse = {
     firstAt: string | null;
     lastAt: string | null;
     qualifications: string[];
+    /**
+     * Нормативы с оценкой: объединены из одобренных рапортов И из ШДС
+     * (три листа, включая запас). По ним строится шкала экзаменов в кабинете.
+     */
+    qualificationDetails?: { code: string; grade: string | null; at: string | null }[];
   };
   vehicles: VehicleAccessReport;
   reports: DossierReport[];
