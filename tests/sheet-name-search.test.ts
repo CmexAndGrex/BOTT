@@ -63,13 +63,16 @@ function fakeSheet(
 const AD = resolveLayout("Артиллерийский дивизион");
 
 describe("findNameRow — колонки ФИО", () => {
-  test("боец находится в колонке C (по ТЗ)", () => {
-    const sheet = fakeSheet({ C12: "Розгов А.В." });
+  test("боец находится в колонке D (по ТЗ дивизиона)", () => {
+    // Геометрия дивизиона: A пустая, B — синяя полоса, C — звание,
+    // D — фамилия и инициалы, E — должность, F — Steam, G — Discord
+    assert.equal(AD.nameCol, "D");
+    const sheet = fakeSheet({ D12: "Розгов А.В." });
     assert.equal(findNameRow(sheet as never, AD, "Розгов А.В."), 12);
   });
 
-  test("имя в колонке B тоже находится: строку сдвинули руками", () => {
-    const sheet = fakeSheet({ B15: "Розгов А.В.", C15: "Специалист - наводчик" });
+  test("имя в колонке C тоже находится: строку сдвинули руками", () => {
+    const sheet = fakeSheet({ C15: "Розгов А.В.", D15: "Специалист - наводчик" });
     assert.equal(findNameRow(sheet as never, AD, "Розгов А.В."), 15);
   });
 
@@ -79,10 +82,16 @@ describe("findNameRow — колонки ФИО", () => {
     assert.equal(findNameRow(sheet as never, AD, "Розгов А.В."), 15);
   });
 
+  test("звание в колонке C бойцом не считается, если он есть в D", () => {
+    // C12 — звание, D12 — фамилия: поиск обязан вернуть строку по D
+    const sheet = fakeSheet({ C12: "Рядовой", D12: "Розгов А.В." });
+    assert.equal(findNameRow(sheet as never, AD, "Розгов А.В."), 12);
+  });
+
   test("слово «Фамилия» в служебной колонке A не сбивает поиск", () => {
     const sheet = fakeSheet({
       A2: "Штатно-должностной список: фамилия, звание, должность",
-      C12: "Розгов А.В.",
+      D12: "Розгов А.В.",
     });
     assert.equal(findNameRow(sheet as never, AD, "Розгов А.В."), 12);
   });

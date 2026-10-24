@@ -12,6 +12,7 @@
  * проблемы. Требования те же, что и в панели (см. password-policy.ts).
  */
 import React, { useEffect, useState } from "react";
+import { RANK_CATALOG, normalizeSteamId64, isSteamId64 } from "@/lib/rank-catalog";
 import Link from "next/link";
 import {
   ClipboardList,
@@ -47,6 +48,8 @@ type Draft = { discord: { id: string; avatarUrl: string | null } | null };
 
 export default function ApplyPage() {
   const [callsign, setCallsign] = useState("");
+  const [steamId, setSteamId] = useState("");
+  const [rank, setRank] = useState<(typeof RANK_CATALOG)[number]>("Рядовой");
   /**
    * Вид заявки: «Новобранец» (по умолчанию) или «Возврат из запаса».
    *
@@ -122,6 +125,10 @@ export default function ApplyPage() {
      * серверную (роут /api/apply отвечает 400 на пустое значение): форма
      * показывает подсказку сразу, а не после круга «отправил — ошибка».
      */
+    if (!isSteamId64(steamId)) {
+      setError("Введите корректный Steam ID64: 17 цифр, начинается с 7656119");
+      return;
+    }
     if (!unit) {
       setError("Выберите подразделение: Танковая рота или Артиллерийский дивизион");
       return;
@@ -145,6 +152,8 @@ export default function ApplyPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           callsign,
+          steamId,
+          rank,
           password,
           // Подразделение из формы: сохраняется в recruit_applications.unit и
           // определяет лист ШДС и роль Discord при зачислении
@@ -329,6 +338,16 @@ return (
         </div>
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div>
+            <label className="label mb-1.5 block">Steam ID64 <span style={{ color: "var(--red)" }}>*</span></label>
+            <input className="input input-mono w-full" value={steamId} onChange={(e) => setSteamId(normalizeSteamId64(e.target.value))} placeholder="7656119XXXXXXXXXX" inputMode="numeric" maxLength={17} required />
+          </div>
+          <div>
+            <label className="label mb-1.5 block">Звание <span style={{ color: "var(--red)" }}>*</span></label>
+            <select className="select w-full" value={rank} onChange={(e) => setRank(e.target.value as (typeof RANK_CATALOG)[number])} required>
+              {RANK_CATALOG.map((item) => <option key={item} value={item}>{item}</option>)}
+            </select>
+          </div>
           <div>
             <label className="label mb-1.5 block">Позывной (он же логин)</label>
             <input

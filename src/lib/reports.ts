@@ -13,6 +13,7 @@
  * сломанная синхронизация, поэтому каталог — единый источник и для формы,
  * и для таблицы.
  */
+import { isSteamId64, normalizeRank, normalizeSteamId64 } from "@/lib/rank-catalog";
 import {
   APPLICATION_KIND_TITLES,
   APPLICATION_KIND_RECRUIT,
@@ -747,22 +748,29 @@ const AD_MLRS_BLOCK = groupRequirements("Артиллерийский дивиз
 /**
  * Все секции ШДС: и доступные рапортом, и командирские (только для штаба).
  *
+ * Границы строк совпадают с секциями «Вакант» листа (VACANT_SECTIONS в
+ * gsheets.ts): расхождение означало бы, что вакантная строка ищется не в том
+ * блоке, где стоит должность.
+ *
  * Рота:
- *   * «Специалист Мех.водитель» — строки 28–39, требования блока
+ *   * «Специалист Мех.водитель» — строки 24–29, требования блока
  *     «Механик - Водитель» (восемь нормативов, включая КМБТ и сдачу на мехвода);
- *   * «Специалист Наводчик-Оператор» — строки 20–27, требования блока
+ *   * «Специалист Наводчик-Оператор» — строки 16–22, требования блока
  *     «Наводчик-Оператор» ПЛЮС блок мехвода: наводчик садится в машину уже
  *     мехводом, и требование предварительного статуса выражено теми же
  *     нормативами, а не отдельным полем (см. hint секции);
- *   * командирские должности — КБМ (10–19) и Командование (6–9): их назначает
- *     штаб, рапорт бойца строку в этот блок не двигает.
+ *   * командирские должности — КБМ (10–14) и Командование (6–9): их назначает
+ *     штаб, рапорт бойца строку в этот блок не двигает;
+ *   * логисты/МТО/курсанты — строки 31–47.
  *
- * Дивизион:
- *   * «Специалист миномётного расчёта» — строки 12–20 (1 ООВ), блок
- *     «Допуск на Минометы»;
- *   * «Механик-водитель САУ» — строки 22–30 (2 ООВ), блок «Мех-вод.»;
- *   * «Специалист - наводчик» — строки 22–30, блок «Допуск на САУ + Гаубицы»;
- *   * «Специалист расчёта РСЗО» — строки 22–30, блок «Допуск на РСЗО»;
+ * Дивизион (данные с колонки C, ФИО в D):
+ *   * «Специалист миномётного расчёта» — строки 13–22 (1-е отделение ООВ),
+ *     блок «Допуск на Минометы»;
+ *   * «Специалист - наводчик» — строки 18–22 (свободные строки 1-го
+ *     отделения), блок «Допуск на САУ + Гаубицы»;
+ *   * «Механик-водитель САУ» — строки 25–32 (2-е отделение), блок «Мех-вод.»;
+ *   * «Специалист расчёта РСЗО» — строки 25–32, блок «Допуск на РСЗО»;
+ *   * логисты-снабженцы — строки 34–42 (отделение снабжения);
  *   * командование дивизиона — строки 1–11, назначает штаб.
  */
 const TR_SECTIONS: readonly ShdsSection[] = [
@@ -771,9 +779,8 @@ const TR_SECTIONS: readonly ShdsSection[] = [
     unit: "Танковая рота",
     title: "Специалист Мех.водитель",
     post: "Специалист Мех.водитель",
-    // Строки 28–39 — блок мехводов (строки 40–41 отданы учебному отделению
-    // вместе с логистами)
-    rows: { top: 28, bottom: 39 },
+    // Строки 24–29 — блок мехводов по ТЗ
+    rows: { top: 24, bottom: 29 },
     required: TR_DRIVER_BLOCK,
     hint: groupHint(TR_EXAM_GROUPS.DRIVER, TR_DRIVER_BLOCK),
   },
@@ -782,8 +789,8 @@ const TR_SECTIONS: readonly ShdsSection[] = [
     unit: "Танковая рота",
     title: "Специалист Наводчик-Оператор",
     post: "Специалист Наводчик-Оператор",
-    // Строки 20–27 — блок наводчиков-операторов
-    rows: { top: 20, bottom: 27 },
+    // Строки 16–22 — блок наводчиков-операторов по ТЗ
+    rows: { top: 16, bottom: 22 },
     // Каскад: без блока мехвода ступень не открывается — наводчик садится в
     // машину тем, кто уже сдал на мехвода
     required: [...TR_DRIVER_BLOCK, ...TR_GUNNER_BLOCK],
@@ -794,8 +801,8 @@ const TR_SECTIONS: readonly ShdsSection[] = [
     unit: "Танковая рота",
     title: "Исп.Командир Боевой Машины",
     post: "Исп.Командир Боевой Машины",
-    // Командирский блок боевых машин — строки 10–19
-    rows: { top: 10, bottom: 19 },
+    // Командирский блок боевых машин — строки 10–14
+    rows: { top: 10, bottom: 14 },
     required: [],
     hint: "Командирская должность: назначает штаб",
     isCommand: true,
@@ -805,7 +812,7 @@ const TR_SECTIONS: readonly ShdsSection[] = [
     unit: "Танковая рота",
     title: "Командир Боевой Машины",
     post: "Командир Боевой Машины",
-    rows: { top: 10, bottom: 19 },
+    rows: { top: 10, bottom: 14 },
     required: [],
     hint: "Командирская должность: назначает штаб",
     isCommand: true,
@@ -829,7 +836,8 @@ const AD_SECTIONS: readonly ShdsSection[] = [
     unit: "Артиллерийский дивизион",
     title: "Специалист миномётного расчёта",
     post: "Специалист миномётного расчёта",
-    rows: { top: 12, bottom: 20 },
+    // 1-е отделение огневого взвода — строки 13–22
+    rows: { top: 13, bottom: 22 },
     required: AD_MORTAR_BLOCK,
     hint: groupHint(AD_EXAM_GROUPS.MORTAR, AD_MORTAR_BLOCK),
   },
@@ -838,7 +846,8 @@ const AD_SECTIONS: readonly ShdsSection[] = [
     unit: "Артиллерийский дивизион",
     title: "Механик-водитель САУ",
     post: "Механик-водитель САУ",
-    rows: { top: 22, bottom: 30 },
+    // 2-е отделение огневого взвода — строки 25–32
+    rows: { top: 25, bottom: 32 },
     required: AD_DRIVER_BLOCK,
     hint: groupHint(AD_EXAM_GROUPS.DRIVER, AD_DRIVER_BLOCK),
   },
@@ -847,7 +856,8 @@ const AD_SECTIONS: readonly ShdsSection[] = [
     unit: "Артиллерийский дивизион",
     title: "Специалист - наводчик",
     post: "Специалист - наводчик",
-    rows: { top: 22, bottom: 30 },
+    // Свободные строки 1-го отделения — 18–22 (строки 13–17 заняты по ТЗ)
+    rows: { top: 18, bottom: 22 },
     required: AD_SPG_BLOCK,
     hint: groupHint(AD_EXAM_GROUPS.SPG, AD_SPG_BLOCK),
   },
@@ -856,7 +866,8 @@ const AD_SECTIONS: readonly ShdsSection[] = [
     unit: "Артиллерийский дивизион",
     title: "Специалист расчёта РСЗО",
     post: "Специалист расчёта РСЗО",
-    rows: { top: 22, bottom: 30 },
+    // 2-е отделение — строки 25–32
+    rows: { top: 25, bottom: 32 },
     required: AD_MLRS_BLOCK,
     hint: groupHint(AD_EXAM_GROUPS.MLRS, AD_MLRS_BLOCK),
   },
@@ -1216,8 +1227,8 @@ function validateShdsEntry(input: Record<string, unknown>): ReportValidation<Shd
     // Подразделение = имя листа Google Таблицы
     return { ok: false, error: "Запись в ШДС: выберите подразделение" };
   }
-  const rank = clip(input.rank, 40);
-  if (!(RANKS as readonly string[]).includes(rank)) {
+  const rank = normalizeRank(input.rank);
+  if (!rank) {
     return { ok: false, error: "Запись в ШДС: выберите звание" };
   }
   const discordIdRaw = clip(input.discordId, 40);
@@ -1227,12 +1238,22 @@ function validateShdsEntry(input: Record<string, unknown>): ReportValidation<Shd
   if (discordIdRaw && !/^\d{5,25}$/.test(discordDigits)) {
     return { ok: false, error: "Запись в ШДС: Discord ID — только цифры" };
   }
+  const steamId = normalizeSteamId64(input.steamId);
+  if (input.steamId === undefined || input.steamId === null || String(input.steamId).trim() === "") {
+    return { ok: true, payload: {
+      unit, rank, steamId: "", discordId: discordDigits,
+      отделение: clip(input.отделение, 60), должность: clip(input.должность, 100),
+    } };
+  }
+  if (!isSteamId64(steamId)) {
+    return { ok: false, error: "Запись в ШДС: Steam ID64 — 17 цифр, начинается с 7656119" };
+  }
   return {
     ok: true,
     payload: {
       unit,
       rank,
-      steamId: clip(input.steamId, 64),
+      steamId,
       discordId: discordDigits,
       отделение: clip(input.отделение, 60),
       должность: clip(input.должность, 100),
@@ -1338,8 +1359,8 @@ export function readReportPayload(type: ServiceReportType, value: unknown): Repo
     case "shds_entry":
       return {
         unit: clip(raw.unit, 60),
-        rank: clip(raw.rank, 40),
-        steamId: clip(raw.steamId, 64),
+        rank: normalizeRank(raw.rank),
+        steamId: normalizeSteamId64(raw.steamId),
         discordId: clip(raw.discordId, 40).replace(/\D/g, ""),
         отделение: clip(raw.отделение, 60),
         должность: clip(raw.должность, 100),
@@ -1478,6 +1499,8 @@ const STATUS_BADGES: Record<ReviewStatus, string> = {
 export type RecruitEmbedInput = {
   id: number;
   callsign: string;
+  steamId?: string | null;
+  rank?: string | null;
   discordTag: string;
   discordId: string | null;
   age: number | null;
@@ -1572,6 +1595,8 @@ export function buildRecruitEmbed(input: RecruitEmbedInput): ReviewEmbed {
         ]
       : []),
     { name: "Discord", value: embedValue(discord), inline: false },
+    ...(input.steamId ? [{ name: "Steam ID64", value: embedValue(input.steamId), inline: true }] : []),
+    ...(input.rank ? [{ name: "Звание", value: embedValue(input.rank), inline: true }] : []),
     { name: "Опыт в Arma", value: embedValue(input.armaExperience), inline: false },
     { name: "О себе", value: embedValue(input.about), inline: false },
   ];
@@ -1701,8 +1726,8 @@ export type ReportEmbedInput = {
  * где name == callsign).
  */
 export function fighterDisplayName(name?: string | null, callsign?: string | null): string {
-  const person = String(name ?? "").trim();
-  const nick = String(callsign ?? "").trim();
+  const person = String(name ?? "").trim().replace(/\s*#\d+\s*$/, "").trim();
+  const nick = String(callsign ?? "").trim().replace(/\s*#\d+\s*$/, "").trim();
   if (!person) return nick;
   if (!nick || person === nick) return person;
   return `${person} «${nick}»`;
@@ -1720,7 +1745,7 @@ export function buildReportEmbed(input: ReportEmbedInput): ReviewEmbed {
 
   const fighter = fighterDisplayName(input.name, input.callsign);
   const mention = discordMention(input.discordId);
-  const fighterValue = mention ? `${fighter || "боец"}\n${mention}` : fighter;
+  const fighterValue = mention ? `${fighter || "боец"} (${mention})` : fighter;
 
   // Экзаменатор — отдельное поле под «Бойцом», только у рапорта на экзамен
   const examiner =
@@ -1735,6 +1760,7 @@ export function buildReportEmbed(input: ReportEmbedInput): ReviewEmbed {
       : []),
     { name: "Подразделение", value: embedValue(input.unit || "не назначено"), inline: true },
     { name: "Звание", value: embedValue(input.rank || "—"), inline: true },
+    ...(input.type === "shds_entry" ? [{ name: "Steam ID64", value: embedValue((input.payload as ShdsEntryPayload).steamId), inline: true }] : []),
     { name: "Суть рапорта", value: embedValue(summarizeReport(input.type, input.payload)), inline: false },
   ];
 

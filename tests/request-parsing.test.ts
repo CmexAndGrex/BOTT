@@ -271,11 +271,13 @@ describe("parseRequestText — защита от мусора и поддело�
 });
 
 describe("resolveLayout — раскладка ШДС по подразделениям", () => {
-  test("Танковая рота: колонка C, добавление в строки 42–56", () => {
+  test("Танковая рота: колонка C, добавление в строки 31–47", () => {
     const layout = resolveLayout("Танковая рота");
     assert.equal(layout.key, "TR");
     assert.equal(layout.nameCol, "C");
-    assert.deepEqual(layout.addRange, { top: 42, bottom: 56 });
+    // У роты данные с колонки B (A узкая): B звание, C ФИО, D должность,
+    // E Steam, F Discord. Блок добавления — секция логистов-снабженцев 31–47.
+    assert.deepEqual(layout.addRange, { top: 31, bottom: 47 });
     /**
      * Общий диапазон ПОИСКА шире блока добавления: строки, которых нет в
      * раскладке (ручная правка листа), тоже должны находиться, иначе боец с
@@ -285,26 +287,34 @@ describe("resolveLayout — раскладка ШДС по подразделе�
     assert.deepEqual(layout.overall, { top: 10, bottom: 100 });
   });
 
-  test("Артиллерийский дивизион: та же раскладка строки, добавление в строки 32–41", () => {
-    // Колонка имени у обоих листов одна («C»): раскладка строки ШДС одинакова —
-    // B звание, C фамилия, D должность, E Steam ID, F Discord ID. Пока у
-    // дивизиона стояло «D», всё, что писалось рядом с фамилией, уезжало на
-    // колонку вправо.
+  test("Артиллерийский дивизион: данные с колонки C, ФИО в D, добавление 34–42", () => {
+    // Геометрия дивизиона ОТЛИЧАЕТСЯ от роты: A пустая, в B синяя полоса,
+    // поэтому данные начинаются с C — C звание, D фамилия и инициалы,
+    // E должность, F Steam ID, G Discord ID. Колонка имени — D.
     const layout = resolveLayout("Артиллерийский дивизион");
     assert.equal(layout.key, "AD");
-    assert.equal(layout.nameCol, "C");
-    assert.deepEqual(layout.addRange, { top: 32, bottom: 41 });
+    assert.equal(layout.nameCol, "D");
+    assert.deepEqual([...(layout.extraNameCols ?? [])], ["C"]);
+    // Добавление — отделение снабжения (34–42), ниже начинается запас
+    assert.deepEqual(layout.addRange, { top: 34, bottom: 42 });
   });
 
   test("штатная должность секции подставляется по номеру строки", () => {
     const tr = resolveLayout("Танковая рота");
-    // Учебное отделение ТР (строки 42–56) и блок мехводов/наводчиков
-    assert.equal(defaultPostFor(tr, 45), "Логист-снабженец/резерв");
+    // Секции роты по ТЗ: КБМ 10–14, наводчики 16–22, мехводы 24–29,
+    // логисты/МТО/курсанты 31–47. Приписки «/резерв» в должности больше нет.
+    assert.equal(defaultPostFor(tr, 45), "Логист-снабженец");
     assert.equal(defaultPostFor(tr, 30), "Специалист Мех.водитель");
     assert.equal(defaultPostFor(tr, 22), "Специалист Наводчик-Оператор");
+    assert.equal(defaultPostFor(tr, 12), "Командир Боевой Машины");
 
     const ad = resolveLayout("Артиллерийский дивизион");
     assert.equal(defaultPostFor(ad, 35), "Логист-снабженец");
+    assert.equal(defaultPostFor(ad, 12), "Командир");
+    assert.equal(defaultPostFor(ad, 20), "Специалист - наводчик");
+    // 2-е отделение: наводчик/логист; командир 2-го отделения — строка 24
+    assert.equal(defaultPostFor(ad, 30), "Специалист - наводчик");
+    assert.equal(defaultPostFor(ad, 24), "Командир");
   });
 
   test("звание для листа: пустое и «Курсант» заменяются на «Рядовой»", () => {

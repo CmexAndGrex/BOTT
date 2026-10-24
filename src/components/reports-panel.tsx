@@ -9,6 +9,7 @@
  * src/lib/reports.ts — тот же валидатор, что и в API.
  */
 import React, { useMemo, useState } from "react";
+import { RANK_CATALOG, normalizeSteamId64, isSteamId64 } from "@/lib/rank-catalog";
 import { Send } from "lucide-react";
 import { Section, Spinner, fmtDate } from "@/components/ui";
 import {
@@ -658,6 +659,7 @@ function ShdsEntryForm({
 }) {
   const [unit, setUnit] = useState(member?.unit ?? SHDS_ENTRY_UNITS[0]);
   const [rank, setRank] = useState(member?.rank ?? SHDS_ENTRY_RANKS[0]);
+  const rankOptions = RANK_CATALOG;
   const [steamId, setSteamId] = useState("");
   const [discordId, setDiscordId] = useState(member?.discordId ?? "");
   const [otdelenie, setOtdelenie] = useState("");
@@ -672,6 +674,7 @@ function ShdsEntryForm({
     <form
       onSubmit={(e) => {
         e.preventDefault();
+        if (!isSteamId64(normalizeSteamId64(steamId))) return;
         void onSubmit(
           "shds_entry",
           { unit, rank, steamId, discordId, отделение: otdelenie, должность: post },
@@ -694,7 +697,7 @@ function ShdsEntryForm({
         <div>
           <label className="label mb-1.5 block">Звание</label>
           <select className="select w-full" value={rank} onChange={(e) => setRank(e.target.value)}>
-            {SHDS_ENTRY_RANKS.map((item) => (
+            {rankOptions.map((item) => (
               <option key={item} value={item}>
                 {item}
               </option>
@@ -705,12 +708,15 @@ function ShdsEntryForm({
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <div>
-          <label className="label mb-1.5 block">Steam ID</label>
+          <label className="label mb-1.5 block">Steam ID64 *</label>
           <input
             className="input input-mono w-full"
             value={steamId}
-            onChange={(e) => setSteamId(e.target.value)}
+            onChange={(e) => setSteamId(normalizeSteamId64(e.target.value))}
             placeholder="7656119XXXXXXXXXX"
+            inputMode="numeric"
+            maxLength={17}
+            required
           />
         </div>
         <div>

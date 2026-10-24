@@ -164,8 +164,14 @@ export async function syncShdsRoster(): Promise<{
   detail: string;
   error?: string;
 }> {
-  const { getDoc, resolveLayout, ensureMembersInShds, copyReserveGradesForUnit } =
-    await import("@/lib/gsheets");
+  const {
+    getDoc,
+    resolveLayout,
+    ensureMembersInShds,
+    copyReserveGradesForUnit,
+    repairShdsSheets,
+    SHEET_SEARCH_TOP_ROW,
+  } = await import("@/lib/gsheets");
 
   const doc = await getDoc();
   const allSheets = Object.values(doc.sheetsById);
@@ -198,19 +204,20 @@ export async function syncShdsRoster(): Promise<{
 
     try {
       const layout = resolveLayout(unit);
-      // Читаем колонку имён в общем диапазоне подразделения и колонку званий
-      // слева от неё — та же раскладка, что использует сценарий «Изменение
-      // звания» при выполнении заявок ШДС.
+      // Читаем колонку имён с ПЕРВОЙ строки листа, а не с overall.top: командир
+      // и зам подразделения стоят в самом верху (рота — строки 7–8, дивизион —
+      // 9–10), то есть ВЫШЕ overall.top. Обрезка по overall.top делала их
+      // ненаходимыми, и синхронизация считала их отсутствующими в таблице.
       const nameColumn = columnIndexOf(layout.nameCol);
       await sheet.loadCells(
-        `${layout.nameCol}${layout.overall.top}:${layout.nameCol}${layout.overall.bottom}`
+        `${layout.nameCol}${SHEET_SEARCH_TOP_ROW}:${layout.nameCol}${layout.overall.bottom}`
       );
 
       for (const fighter of sheetMembers) {
         const row = findRowByName(
           sheet,
           nameColumn,
-          layout.overall.top,
+          SHEET_SEARCH_TOP_ROW,
           layout.overall.bottom,
           fighter.name
         );
@@ -245,8 +252,41 @@ export async function syncShdsRoster(): Promise<{
    */
   let added = 0;
   let gradesCopied = 0;
+  let clearedRows = 0;
+  let steamFixed = 0;
+  let postsFixed = 0;
+  let sectionsMoved = 0;
 
   try {
+    /**
+     * 1a. Автоочистка ШДС ПЕРЕД автозаписью.
+     *
+     * Порядок принципиален: командование (Волков Д.В., Иванов И.А., Иванов К.М.)
+     * не должно ни секунды соседствовать с записями «Вакант» — если очищать
+     * после автозаписи, их строки успели бы стать «занятыми» и попасть в отчёт
+     * как действующий состав. Здесь же снимается подпись «ID: » в колонке
+     * Steam ID (у Юсупова М.А. в E42 роты): требование прямо это предписывает.
+     */
+    const repair = await repairShdsSheets();
+    clearedRows = repair.cleared.length;
+    steamFixed = repair.steamFixed.length;
+    postsFixed = repair.postsFixed.length;
+    sectionsMoved = repair.moved.length;
+    if (repair.cleared.length) {
+      warnings.push(`командование убрано из «Вакант»: ${repair.cleared.join(", ")}`);
+    }
+    if (repair.steamFixed.length) {
+      warnings.push(`снят префикс «ID:»: ${repair.steamFixed.join(", ")}`);
+    }
+    // Должности активных бойцов приведены к реальному виду (снят «/резерв»)
+    if (repair.postsFixed.length) {
+      warnings.push(`должность приведена к реальной: ${repair.postsFixed.join(", ")}`);
+    }
+    // Бойцы, перенесённые в «Вакант» своей секции
+    if (repair.moved.length) {
+      warnings.push(`перенесены в свою секцию: ${repair.moved.join(", ")}`);
+    }
+    warnings.push(...repair.warnings);
     // Боец считается действующим, если не исключён и не в запасе
     const activeMembers = sheetMembers.filter(
       (member) => member.active !== false && member.status !== "dismissed" && member.unit
@@ -296,7 +336,9 @@ export async function syncShdsRoster(): Promise<{
   const ok = readSheets > 0;
   const detail =
     `Прочитано листов: ${readSheets}, обновлено бойцов: ${updated}, ` +
-    `дописано в «Вакант»: ${added}, перенесено оценок из запаса: ${gradesCopied}` +
+    `дописано в «Вакант»: ${added}, перенесено оценок из запаса: ${gradesCopied}, ` +
+    `очищено строк командования: ${clearedRows}, исправлено Steam ID: ${steamFixed}, ` +
+    `приведено должностей: ${postsFixed}, перенесено в свою секцию: ${sectionsMoved}` +
     (warnings.length ? `. Предупреждения: ${warnings.join("; ")}` : "");
 
   return {

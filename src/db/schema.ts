@@ -48,6 +48,7 @@ export const members = pgTable("division_members", {
   handle: text("handle"),
   name: text("name").notNull(),
   rankName: text("rank_name"),
+  steamId: text("steam_id"),
   post: text("post"),
   minutes: integer("minutes").notNull().default(0),
   hours: real("hours").notNull().default(0),
@@ -321,6 +322,8 @@ export const recruitApplications = pgTable(
      * null — кандидат подразделение не выбирал (старые заявки, Google-форма).
      */
     unit: text("unit").$type<Unit>(),
+    steamId: text("steam_id"),
+    rank: text("rank"),
     /** Логин или глобальное имя в Discord (поле формы, проверяется модератором) */
     discordTag: text("discord_tag"),
     /** Snowflake ID: заполняется из cookie Discord либо модератором */

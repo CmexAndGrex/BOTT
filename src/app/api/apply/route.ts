@@ -44,6 +44,7 @@ import {
   type Unit,
 } from "@/lib/recruits";
 import { registerThrottle } from "@/lib/throttle-registry";
+import { isSteamId64, normalizeRank, normalizeSteamId64 } from "@/lib/rank-catalog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -60,6 +61,8 @@ const throttle = registerThrottle(new LoginThrottle(5, 30 * 60 * 1000));
 
 type ApplyBody = {
   callsign?: unknown;
+  steamId?: unknown;
+  rank?: unknown;
   password?: unknown;
   /** Подразделение из формы: «Танковая рота» или «Артиллерийский дивизион» */
   unit?: unknown;
@@ -155,6 +158,13 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const steamId = normalizeSteamId64(body.steamId);
+  if (!isSteamId64(steamId)) {
+    return NextResponse.json({ ok: false, error: "Steam ID64 должен содержать 17 цифр и начинаться с 7656119" }, { status: 400 });
+  }
+  const rank = normalizeRank(body.rank);
+  if (!rank) return NextResponse.json({ ok: false, error: "Выберите корректное звание" }, { status: 400 });
+
   const state = throttle.check(ip);
   if (state.locked) {
     return NextResponse.json(
@@ -203,6 +213,8 @@ export async function POST(req: NextRequest) {
     fullName,
     // Подразделение: сохраняется в заявке и определяет лист ШДС при зачислении
     unit,
+    steamId,
+    rank,
   });
 }
 
@@ -324,7 +336,7 @@ async function createRecruit(
         name: input.fullName || input.callsign,
         callsign: input.callsign,
         passwordHash,
-        rank: DEFAULT_RANK,
+        rank: input.rank,
         /**
          * Подразделение из формы ставится сразу.
          *
@@ -364,6 +376,8 @@ async function createRecruit(
  */
 type ApplicationInput = {
   callsign: string;
+  steamId: string;
+  rank: string;
   discordTag: string;
   data: { age: number; armaExperience: string; specialization: string; comment: string };
   /** Вид заявки: recruit — зачисление, reserve_return — возврат из запаса */
@@ -413,6 +427,8 @@ async function finalizeApplication(
         // Подразделение из формы: определяет лист ШДС и роль Discord при
         // одобрении (см. approveRecruitApplication / approveReserveReturn)
         unit: input.unit,
+        steamId: input.steamId,
+        rank: input.rank,
         discordTag: input.discordTag.trim().slice(0, 64) || fromCookie?.username || "",
         discordId,
         age: input.data.age,
@@ -446,6 +462,8 @@ async function finalizeApplication(
         "Вид заявки": APPLICATION_KIND_LABELS[input.kind],
         ...(input.fullName ? { "ФИО": input.fullName } : {}),
         "Подразделение": input.unit,
+        "Steam ID64": input.steamId,
+        "Звание": input.rank,
         "Возраст": String(input.data.age),
         "Специализация": input.data.specialization,
         "Discord": discordId || "не указан",

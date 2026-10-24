@@ -74,16 +74,18 @@ async function settingsFromDb(databaseUrl) {
 
 /** Те же диапазоны, что в src/lib/gsheets.ts (LAYOUTS) — только для чтения */
 const LAYOUTS = {
-  TR: { title: "Танковая рота", nameCol: 2, top: 10, bottom: 56, addTop: 42, addBottom: 56 },
+  // Рота: A узкая, данные с B — B звание, C ФИО, D должность, E Steam, F Discord
+  TR: { title: "Танковая рота", nameCol: 2, top: 10, bottom: 47, addTop: 31, addBottom: 47 },
   AD: {
     title: "Артиллерийский дивизион",
-    // Колонка имени у обоих листов одна («C», индекс 2): раскладка строки
-    // ШДС одинакова — B звание, C фамилия, D должность, E Steam, F Discord
-    nameCol: 2,
+    // Геометрия дивизиона ДРУГАЯ: A пустая, в B синяя полоса, данные с C —
+    // C звание, D фамилия и инициалы, E должность, F Steam, G Discord.
+    // Имя — в D (индекс 3). С 43-й строки начинается блок «Запас».
+    nameCol: 3,
     top: 12,
-    bottom: 41,
-    addTop: 32,
-    addBottom: 41,
+    bottom: 42,
+    addTop: 34,
+    addBottom: 42,
   },
 };
 

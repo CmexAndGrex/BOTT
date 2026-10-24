@@ -1,4 +1,5 @@
 import { db } from "@/db";
+import { RANK_CATALOG } from "@/lib/rank-catalog";
 import { settings } from "@/db/schema";
 import {
   DEFAULT_SHEET_ART,
@@ -173,6 +174,7 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   role_tank_id: "",
   role_art_id: "",
   role_recruit_rank_id: "",
+  ...Object.fromEntries(RANK_CATALOG.map((rank) => [`rank_role_${rank}`, ""])),
   /**
    * Названия листов ШДС, в которые пишется зачисленный боец. Пусто — имя
    * подразделения («Танковая рота» / «Артиллерийский дивизион»): так листы

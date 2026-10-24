@@ -19,6 +19,8 @@
  * что переименование листа «переставит» столбцы.
  */
 import { UserPlus } from "lucide-react";
+import { RANK_CATALOG } from "@/lib/rank-catalog";
+import { RANK_ROLE_IDS } from "@/lib/roles";
 import { Section } from "@/components/ui";
 import { Field, FieldGrid } from "@/components/settings/fields";
 import type { SetSetting, SettingsState } from "@/components/settings/tabs";
@@ -40,7 +42,7 @@ export default function EnlistmentTab({ settings, set }: EnlistmentTabProps) {
     settings.role_corps_id,
     settings.role_tank_id,
     settings.role_art_id,
-    settings.role_recruit_rank_id,
+    ...RANK_CATALOG.map((rank) => settings[`rank_role_${rank}`] || RANK_ROLE_IDS[rank] || ""),
   ].filter((v) => (v || "").trim()).length;
 
   return (
@@ -51,7 +53,7 @@ export default function EnlistmentTab({ settings, set }: EnlistmentTabProps) {
         action={
           <span className="chip">
             <UserPlus size={12} />
-            задано ролей: {filled} / 4
+            задано ролей: {filled} / {3 + RANK_CATALOG.length}
           </span>
         }
       >
@@ -71,17 +73,17 @@ export default function EnlistmentTab({ settings, set }: EnlistmentTabProps) {
                 onChange={(e) => digits("role_corps_id")(e.target.value)}
               />
             </Field>
-            <Field
-              label="ID роли начального звания («Рядовой» / «Курсант»)"
-              hint="Звание, которое получает боец при зачислении. Пусто — берётся роль «Рядовой»."
-            >
-              <input
-                className="input input-mono"
-                placeholder="пусто — роль «Рядовой»"
-                value={settings.role_recruit_rank_id}
-                onChange={(e) => digits("role_recruit_rank_id")(e.target.value)}
-              />
-            </Field>
+            <div className="md:col-span-2">
+              <div className="label mb-2">Роли званий Discord (Звание = ID роли)</div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {RANK_CATALOG.map((rank) => {
+                  const key = `rank_role_${rank}`;
+                  return <Field key={rank} label={rank} hint={ROLE_ID_HINT}>
+                    <input className="input input-mono" placeholder={RANK_ROLE_IDS[rank] || "пусто — поиск по названию"} value={settings[key] || ""} onChange={(e) => digits(key)(e.target.value)} />
+                  </Field>;
+                })}
+              </div>
+            </div>
             <Field
               label="ID роли «Танковая рота»"
               hint="Выдаётся кандидатам, выбравшим Танковую роту в форме. Здесь же используется автоопределением подразделения."

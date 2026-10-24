@@ -46,7 +46,7 @@ import {
 import { memberUnitFromRoles } from "../src/lib/review.ts";
 import { TEMP_PASSWORD_LENGTH, TEMP_PASSWORD_PREFIX, generateTempPassword } from "../src/lib/temp-password.ts";
 import { checkPasswordPolicy } from "../src/lib/password-policy.ts";
-import { matchExamColumns } from "../src/lib/gsheets.ts";
+import { findVacantSection, matchExamColumns, resolveLayout } from "../src/lib/gsheets.ts";
 import type {
   ExamPayload,
   PositionTransferPayload,
@@ -323,20 +323,39 @@ describe("Секции ШДС: перевод по должности", () => {
     const driver = findPositionSection("tr_driver");
     assert.ok(driver);
     assert.equal(driver.post, "Специалист Мех.водитель");
-    // Секция мехводов: строки 28–39
-    assert.deepEqual(driver.rows, { top: 28, bottom: 39 });
+    // Секция мехводов: строки 24–29 (секции «Вакант» листа)
+    assert.deepEqual(driver.rows, { top: 24, bottom: 29 });
 
     const gunner = findPositionSection("tr_gunner");
     assert.ok(gunner);
     assert.equal(gunner.post, "Специалист Наводчик-Оператор");
-    // Секция наводчиков-операторов: строки 20–27
-    assert.deepEqual(gunner.rows, { top: 20, bottom: 27 });
+    // Секция наводчиков-операторов: строки 16–22
+    assert.deepEqual(gunner.rows, { top: 16, bottom: 22 });
 
-    // Дивизион: миномётный расчёт — 1 ООВ, остальные специальности — 2 ООВ
-    assert.deepEqual(findPositionSection("ad_mortar")?.rows, { top: 12, bottom: 20 });
-    assert.deepEqual(findPositionSection("ad_driver")?.rows, { top: 22, bottom: 30 });
-    assert.deepEqual(findPositionSection("ad_gunner")?.rows, { top: 22, bottom: 30 });
-    assert.deepEqual(findPositionSection("ad_mlrs")?.rows, { top: 22, bottom: 30 });
+    // Дивизион: миномётный расчёт и наводчик — 1-е отделение ООВ,
+    // мехвод и РСЗО — 2-е отделение
+    assert.deepEqual(findPositionSection("ad_mortar")?.rows, { top: 13, bottom: 22 });
+    assert.deepEqual(findPositionSection("ad_gunner")?.rows, { top: 18, bottom: 22 });
+    assert.deepEqual(findPositionSection("ad_driver")?.rows, { top: 25, bottom: 32 });
+    assert.deepEqual(findPositionSection("ad_mlrs")?.rows, { top: 25, bottom: 32 });
+  });
+
+  test("диапазоны секций рапорта совпадают с секциями «Вакант» листов", () => {
+    // Расхождение означало бы, что вакантная строка ищется не в том блоке,
+    // где стоит должность — боец уехал бы в чужое отделение.
+    for (const section of POSITION_SECTIONS) {
+      if (section.isCommand) continue;
+      const layout = resolveLayout(section.unit);
+      // Должность либо найдена в раскладке листа, либо её блок совпадает
+      const found = findVacantSection(layout, section.post);
+      if (found) {
+        assert.ok(
+          section.rows.top >= found.rows.top && section.rows.bottom <= found.rows.bottom,
+          `секция ${section.key} (${section.rows.top}–${section.rows.bottom}) ` +
+            `выходит за блок листа «${found.title}» (${found.rows.top}–${found.rows.bottom})`
+        );
+      }
+    }
   });
 
   test("требования ступени роты: весь блок мехвода, затем блок наводчика", () => {
@@ -622,10 +641,13 @@ describe("Проверка payload: отпуск и перевод в резер
 
 describe("Проверка payload: запись в ШДС", () => {
   test("подразделение и звание берутся только из справочников", () => {
+    // Steam ID — только SteamID64 (17 цифр, начинается с 7656119): формат
+    // STEAM_0:1:… в ШДС больше не принимается, и старый пример теста
+    // отклонялся валидатором ещё до проверки справочников.
     const result = validateReportPayload("shds_entry", {
       unit: "Танковая рота",
       rank: "Рядовой",
-      steamId: "STEAM_0:1:12345",
+      steamId: "76561198000000001",
       discordId: "1085141850966458519",
       отделение: "1-е отделение",
       должность: "Наводчик",

@@ -368,7 +368,9 @@ export async function grantEnlistmentRoles(
     // настройках, лишний запрос к Discord не делается
     const configuredCorps = realDiscordId(map.get(ENLISTMENT_ROLE_SETTINGS.corps));
     const configuredUnit = unit ? realDiscordId(unitRoleId(unit, map)) : "";
-    const configuredRank = realDiscordId(map.get(ENLISTMENT_ROLE_SETTINGS.rank));
+    const configuredRank =
+      realDiscordId(map.get(`rank_role_${rank}`)) ||
+      realDiscordId(map.get(ENLISTMENT_ROLE_SETTINGS.rank));
     const needsLookup =
       !configuredCorps || (unit && !configuredUnit) || !configuredRank;
     const roles = needsLookup ? await getGuildRoles(guildId) : [];
@@ -865,7 +867,8 @@ export async function approveRecruitApplication(
            * висит ролью на сервере.
            */
           ...(chosenUnit && isUnassignedUnit(lookup.member.unit) ? { unit: chosenUnit } : {}),
-          ...(isEnlistmentRank(lookup.member.rank) ? { rank: RECRUIT_RANK } : {}),
+          rank: application.rank || lookup.member.rank || RECRUIT_RANK,
+          steamId: application.steamId || lookup.member.steamId,
           applicationData: {
             ...(lookup.member.applicationData ?? {}),
             reviewedBy: reviewer,
@@ -1046,9 +1049,10 @@ export async function approveRecruitApplication(
             // заявке, когда Discord ID нет. Позывной остаётся логином.
             name: application.fullName || callsign,
             callsign,
+            steamId: application.steamId,
             passwordHash,
             // Звание бойца в строю: «Рядовой» (курсант — статус кандидата)
-            rank: RECRUIT_RANK,
+            rank: application.rank || RECRUIT_RANK,
             /**
              * Подразделение — из заявки.
              *
@@ -1133,7 +1137,7 @@ export async function approveRecruitApplication(
      */
     const [enlisted] = await db.select().from(members).where(eq(members.id, memberId));
     const enlistmentUnit: Unit | null = isUnit(enlisted?.unit) ? enlisted.unit : null;
-    const enlistmentRank = (enlisted?.rank || RECRUIT_RANK).trim() || RECRUIT_RANK;
+    const enlistmentRank = (enlisted?.rank || application.rank || RECRUIT_RANK).trim() || RECRUIT_RANK;
 
     const rolesOutcome = await grantEnlistmentRoles(
       realDiscordId(application.discordId) || realDiscordId(enlisted?.discordId) || null,
@@ -2021,6 +2025,8 @@ export async function publishRecruitApplication(
     buildRecruitEmbed({
       id: application.id,
       callsign: application.callsign,
+      steamId: application.steamId,
+      rank: application.rank,
       discordTag: application.discordTag || "",
       discordId: application.discordId,
       age: application.age,
@@ -2269,6 +2275,8 @@ export async function refreshRecruitMessage(
     const embed = buildRecruitEmbed({
       id: application.id,
       callsign: application.callsign,
+      steamId: application.steamId,
+      rank: application.rank,
       discordTag: application.discordTag || "",
       discordId: application.discordId,
       age: application.age,
