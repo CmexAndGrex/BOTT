@@ -23,12 +23,19 @@
  * синхронизации, панель показывает предупреждение вместо ложного успеха.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq, ne, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { logs, members, recruitApplications } from "@/db/schema";
 import { requireRosterEditor } from "@/lib/member-auth";
 import { isCrossSiteRequest, isUnsafeMethod } from "@/lib/csrf";
-import { MEMBER_STATUS, normalizeMemberStatus } from "@/lib/recruits";
+import {
+  MEMBER_STATUS,
+  isUnit,
+  isUnassignedUnit,
+  normalizeMemberStatus,
+  type Unit,
+} from "@/lib/recruits";
+import { decideDiscordConflict, needsUnitLookup } from "@/lib/discord-conflict";
 import { validateRosterDiscordId } from "@/lib/validation";
 
 export const runtime = "nodejs";
@@ -38,8 +45,15 @@ export const maxDuration = 60;
 
 type Params = { params: Promise<{ id: string }> };
 
-/** Статус синхронизации с листом ШДС */
-type SheetStatus = { ok: boolean; message?: string; error?: string };
+/**
+ * Статус синхронизации с листом ШДС.
+ *
+ * `skipped` — запись сознательно пропущена (подразделение не назначено, лист
+ * неизвестен). Это не сбой Google: ID уже сохранён в базе, и повторять запрос
+ * бессмысленно, пока штаб не назначит подразделение. Панель показывает по
+ * такому статусу отдельное предупреждение, а не «ошибку таблицы».
+ */
+type SheetStatus = { ok: boolean; message?: string; error?: string; skipped?: boolean };
 
 /**
  * Подпись автора правки для журнала.
@@ -63,10 +77,16 @@ async function syncSheet(
   member: { unit: string | null; callsign: string | null; name: string },
   discordId: string
 ): Promise<SheetStatus> {
-  if (!member.unit) {
+  // «не назначено» — та же пустота, что и null: лист по такой пометке не найти.
+  // Это не ошибка записи: ID уже лежит в базе, а лист появится, когда штаб
+  // назначит подразделение. Раньше здесь возвращался ok:false с «ошибкой
+  // Google», и панель выглядела так, будто сохранение провалилось целиком.
+  if (!member.unit || isUnassignedUnit(member.unit)) {
     return {
       ok: false,
-      error: "У бойца не назначено подразделение — лист ШДС не определён",
+      skipped: true,
+      error:
+        "У бойца не назначено подразделение — запись в лист ШДС пропущена (ID сохранён только в базе панели)",
     };
   }
   try {
@@ -80,6 +100,51 @@ async function syncSheet(
     });
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Подразделение бойца для записи в ШДС.
+ *
+ * Если в карточке пусто (или служебная пометка «не назначено»), пробуем вывести
+ * подразделение по ролям участника Discord — ровно так же, как это делает форма
+ * рапорта (resolveMemberUnitFromDiscord). Без этого сохранение Discord ID
+ * упиралось в «лист ШДС не определён», хотя боец уже носил роль подразделения.
+ *
+ * Найденное значение сразу пишется в карточку: иначе следующий PATCH снова
+ * начинал бы с пустого поля. Сбой Discord или записи в БД не мешает привязке —
+ * функция возвращает то, что удалось узнать, и роут сохранит ID в базе.
+ */
+async function resolveSheetUnit(member: {
+  id: number;
+  unit: string | null;
+  discordId: string | null;
+}): Promise<Unit | null> {
+  if (isUnit(member.unit)) return member.unit;
+  if (!needsUnitLookup(member.unit)) return null;
+
+  try {
+    const [{ resolveMemberUnitFromDiscord }, { getSettings }] = await Promise.all([
+      import("@/lib/review"),
+      import("@/lib/settings"),
+    ]);
+    const detected = await resolveMemberUnitFromDiscord(
+      { unit: member.unit, discordId: member.discordId },
+      await getSettings()
+    );
+    if (!detected) return null;
+    try {
+      await db
+        .update(members)
+        .set({ unit: detected, updatedAt: new Date() })
+        .where(eq(members.id, member.id));
+    } catch (e) {
+      console.warn("[roster/discord-id] Не удалось сохранить подразделение бойца:", e);
+    }
+    return detected;
+  } catch (e) {
+    console.warn("[roster/discord-id] Не удалось определить подразделение по ролям Discord:", e);
+    return null;
   }
 }
 
@@ -122,20 +187,45 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const [member] = await db.select().from(members).where(eq(members.id, memberId));
   if (!member) return NextResponse.json({ ok: false, error: "Боец не найден" }, { status: 404 });
 
-  // Дубликат Discord ID запрещён: одна снежинка — один боец, иначе бот
-  // упоминал бы двух человек по одному ID, а сверка ролей путалась. Пустое
-  // значение (осознанная очистка привязки) конфликта не создаёт, а своя же
-  // запись под проверку не попадает — сравниваем по memberId.
+  /**
+   * Конфликт Discord ID: одна снежинка — один боец.
+   *
+   * Правило снятия конфликта вынесено в lib/discord-conflict.ts:
+   *   - если ID держит ВЫБЫВШАЯ карточка (старый ник после переименования,
+   *     исключённый, отклонённая заявка) — снимаем ID с неё и привязываем
+   *     действующему бойцу без ошибки. Раньше здесь возвращался 409, и штаб не
+   *     мог привязать Discord человеку, пока вручную не найдёт дубль;
+   *   - если ID держит ДРУГОЙ ДЕЙСТВУЮЩИЙ боец — отвечаем 409 с его именем,
+   *     чтобы было видно, кого именно нужно развязать.
+   *
+   * Пустое значение (осознанная очистка привязки) конфликта не создаёт.
+   */
+  const released: { id: number; name: string }[] = [];
   if (discordId) {
-    const [taken] = await db
-      .select({ id: members.id })
+    const occupants = await db
+      .select({
+        id: members.id,
+        name: members.name,
+        active: members.active,
+        status: members.status,
+      })
       .from(members)
-      .where(and(eq(members.discordId, discordId), ne(members.id, memberId)));
-    if (taken) {
+      .where(eq(members.discordId, discordId));
+
+    const decision = decideDiscordConflict(occupants, memberId);
+    if (decision.kind === "blocked") {
       return NextResponse.json(
-        { ok: false, error: "Этот Discord ID уже привязан к другому бойцу" },
+        { ok: false, error: decision.message, conflictMemberId: decision.occupant.id },
         { status: 409 }
       );
+    }
+    if (decision.kind === "release") {
+      const ids = decision.release.map((occupant) => occupant.id);
+      await db
+        .update(members)
+        .set({ discordId: null, updatedAt: new Date() })
+        .where(inArray(members.id, ids));
+      released.push(...decision.release.map((occupant) => ({ id: occupant.id, name: occupant.name })));
     }
   }
 
@@ -167,6 +257,22 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     .returning();
   if (!updated) return NextResponse.json({ ok: false, error: "Боец не найден" }, { status: 404 });
 
+  /**
+   * Подразделение для ШДС: если оно не назначено, пробуем вывести его по ролям
+   * Discord. Без этого запись в таблицу падала бы на «лист не определён», хотя
+   * привязка ID уже состоялась в базе. Если определить не удалось — ШДС
+   * пропускается, а ID остаётся в базе (это не ошибка привязки).
+   */
+  let sheetUnit = updated.unit;
+  if (discordId && needsUnitLookup(updated.unit)) {
+    const detected = await resolveSheetUnit({
+      id: updated.id,
+      unit: updated.unit,
+      discordId: updated.discordId,
+    });
+    if (detected) sheetUnit = detected;
+  }
+
   if (autoActivated) {
     try {
       await db
@@ -185,14 +291,22 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     }
   }
 
-  const sheets = await syncSheet(updated, discordId ?? "");
+  // Пустая строка очищает ячейку в листе; null приводим к "" тем же вызовом
+  const sheets = await syncSheet({ ...updated, unit: sheetUnit }, discordId ?? "");
+  /** Запись в ШДС пропущена (нет подразделения) — это не ошибка правки */
+  const sheetSkipped = sheets.skipped === true;
 
   // Журнал пишется всегда: даже при сбое Google правка в базе уже состоялась,
   // и штаб должен видеть это в истории, а не узнавать по факту расхождения
   const sheetNote = sheets.ok
     ? ""
-    : ` · ШДС: ${sheets.error || "не обновлена"}`;
+    : sheetSkipped
+      ? " · ШДС пропущена: подразделение не назначено"
+      : ` · ШДС: ${sheets.error || "не обновлена"}`;
   const statusNote = autoActivated ? " · статус: pending → active" : "";
+  const releaseNote = released.length
+    ? ` · Discord ID снят с выбывших: ${released.map((r) => r.name).join(", ")}`
+    : "";
 
   await db.insert(logs).values({
     category: "edit",
@@ -207,26 +321,45 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       "Позывной": member.callsign ?? "—",
       "Discord ID": discordId ?? "не указан",
       "Было": before ?? "не указан",
-      "Лист ШДС": member.unit ?? "не назначено",
-      "Итог": sheets.ok ? sheets.message ?? "обновлено" : sheets.error ?? "ошибка",
+      "Лист ШДС": sheetUnit ?? "не назначено",
+      ...(released.length
+        ? { "Снят у выбывших": released.map((r) => `${r.name} (#${r.id})`).join(", ") }
+        : {}),
+      "Итог": sheets.ok
+        ? sheets.message ?? "обновлено"
+        : sheetSkipped
+          ? "пропущено (подразделение не назначено)"
+          : sheets.error ?? "ошибка",
     },
     kind: "system",
     title: "Правка Discord ID",
-    detail: `Discord ID бойца ${member.name}: ${before ?? "пусто"} → ${discordId ?? "пусто"}${statusNote}${sheetNote}`,
-    ok: sheets.ok,
-    error: sheets.ok ? null : sheets.error ?? null,
+    detail: `Discord ID бойца ${member.name}: ${before ?? "пусто"} → ${discordId ?? "пусто"}${statusNote}${releaseNote}${sheetNote}`,
+    // Пропуск записи в ШДС — не сбой: правка в базе состоялась и корректна
+    ok: sheets.ok || sheetSkipped,
+    error: sheets.ok || sheetSkipped ? null : sheets.error ?? null,
   });
+
+  /**
+   * Предупреждение для панели: правка в базе есть, но таблица отстала.
+   * Отдельная формулировка для неназначенного подразделения — это не сбой
+   * Google, а отсутствие листа: запись в ШДС пропущена, ID в базе сохранён.
+   */
+  const warningText = sheets.ok
+    ? null
+    : sheetSkipped
+      ? "ID сохранён в панели. Подразделение не назначено — запись в Google Таблицу пропущена: назначьте подразделение бойцу, затем сохраните ID повторно"
+      : `ID сохранён в панели, но Google Таблица не обновлена: ${sheets.error ?? "ошибка"}`;
 
   return NextResponse.json({
     ok: true,
-    member: updated,
+    member: { ...updated, unit: sheetUnit },
     sheets,
     // Панель показывает, что доступ в кабинет открылся вместе с привязкой
     autoActivated,
     status: updated.status,
+    // Кого пришлось развязать, чтобы освободить снежинку (выбывшие дубли)
+    released: released.map((r) => r.name),
     // Предупреждение для панели: правка сохранена, но таблица отстала
-    warning: sheets.ok
-      ? null
-      : `ID сохранён в панели, но Google Таблица не обновлена: ${sheets.error ?? "ошибка"}`,
+    warning: warningText,
   });
 }

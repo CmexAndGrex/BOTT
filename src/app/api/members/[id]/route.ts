@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq, ne, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { members, logs, recruitApplications } from "@/db/schema";
 import { requireRosterEditor } from "@/lib/member-auth";
 import { MEMBER_STATUS, normalizeMemberStatus } from "@/lib/recruits";
+import { decideDiscordConflict } from "@/lib/discord-conflict";
 import { applyVacationRole, type VacationRoleOutcome } from "@/lib/vacation-roles";
 
 export const runtime = "nodejs";
@@ -102,29 +103,57 @@ export async function PATCH(req: NextRequest, { params }: Params) {
    * панели, продолжал бы видеть «рапорт на рассмотрении» при входе.
    */
   let autoActivated = false;
+  /** Кого пришлось развязать, чтобы освободить снежинку у выбывших записей */
+  const released: { id: number; name: string }[] = [];
 
   if (body.discordId !== undefined) {
     const v = body.discordId;
     const cleanedDiscord = v === null || String(v).trim() === "" ? null : String(v).replace(/[^\d]/g, "");
     if (cleanedDiscord !== oldMember.discordId) {
-      // Дубликат Discord ID запрещён: один Discord — один боец, иначе бот
-      // упоминал бы двух человек по одной снежинке, а сверка ролей путалась.
-      // Свою же запись (повторная установка того же ID) проверка не ловит.
+      /**
+       * Конфликт Discord ID разбирает то же правило, что и в
+       * /api/admin/roster/[id]/discord-id (lib/discord-conflict.ts):
+       *   - снежинку держит выбывшая запись — снимаем у неё ID и привязываем
+       *     текущему бойцу без ошибки (сценарий «боец сменил ник, старая
+       *     карточка осталась в табеле выбывшей»);
+       *   - снежинку держит другой действующий боец — отвечаем 409 с его именем.
+       * Своя же запись (повторная установка того же ID) конфликтом не считается.
+       */
       if (cleanedDiscord) {
-        const [taken] = await db
-          .select({ id: members.id })
+        const occupants = await db
+          .select({
+            id: members.id,
+            name: members.name,
+            active: members.active,
+            status: members.status,
+          })
           .from(members)
-          .where(and(eq(members.discordId, cleanedDiscord), ne(members.id, memberId)));
-        if (taken) {
+          .where(eq(members.discordId, cleanedDiscord));
+
+        const decision = decideDiscordConflict(occupants, memberId);
+        if (decision.kind === "blocked") {
           return NextResponse.json(
-            { ok: false, error: "Этот Discord ID уже привязан к другому бойцу" },
+            { ok: false, error: decision.message, conflictMemberId: decision.occupant.id },
             { status: 409 }
+          );
+        }
+        if (decision.kind === "release") {
+          const ids = decision.release.map((occupant) => occupant.id);
+          await db
+            .update(members)
+            .set({ discordId: null, updatedAt: new Date() })
+            .where(inArray(members.id, ids));
+          released.push(
+            ...decision.release.map((occupant) => ({ id: occupant.id, name: occupant.name }))
           );
         }
       }
       set.discordId = cleanedDiscord;
       changesDescription.push(`Discord ID на "${cleanedDiscord || "пусто"}"`);
       detailsObj["Discord ID"] = cleanedDiscord || "не указан";
+      if (released.length > 0) {
+        detailsObj["Снят у выбывших"] = released.map((r) => `${r.name} (#${r.id})`).join(", ");
+      }
 
       // `dismissed` не трогаем: исключение не отменяется привязкой Discord
       if (cleanedDiscord && normalizeMemberStatus(oldMember.status) === MEMBER_STATUS.PENDING) {
@@ -210,6 +239,8 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     ok: true,
     member: rows[0],
     autoActivated,
+    // Кого освободили, чтобы снежинка перешла действующему бойцу
+    released: released.map((r) => r.name),
     // Итог по роли Discord: панель показывает предупреждение, если роль не
     // изменилась (нет прав у бота, роль выше роли бота, нет Discord ID).
     // Молчать об этом нельзя — штаб думает, что отпуск оформлен полностью.

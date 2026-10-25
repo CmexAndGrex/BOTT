@@ -21,6 +21,7 @@ import {
 import { Avatar, Section, Spinner, fmtDate } from "@/components/ui";
 import { DiscordIdCell, type DiscordIdSaveResult } from "@/components/discord-id-cell";
 import { MemberDeleteButton, type MemberDeleteResult } from "@/components/member-delete-button";
+import { isRosterActive as isMemberInRoster } from "@/lib/recruits";
 
 /**
  * Строка табеля.
@@ -247,8 +248,17 @@ export default function MembersPage() {
       }
       // Строка берётся из ответа сервера: там и нормализованное значение, и updatedAt
       setMembers((prev) => (prev ?? []).map((m) => (m.id === id ? data.member : m)));
-      if (data.warning) setNotice({ ok: true, text: data.warning });
-      else setNotice({ ok: true, text: data.sheets?.message || "Discord ID сохранён" });
+      /**
+       * Снежинку могли освободить от выбывшей карточки (дубль после смены
+       * ника). Об этом нужно сказать вслух: в табеле у старой записи ID
+       * исчез, и без пояснения это выглядело бы случайной потерей данных.
+       */
+      const released = Array.isArray(data.released) ? (data.released as string[]) : [];
+      const releasedNote = released.length
+        ? ` Прежняя привязка снята у выбывших: ${released.join(", ")}.`
+        : "";
+      const base = data.warning || data.sheets?.message || "Discord ID сохранён";
+      setNotice({ ok: true, text: `${base}${releasedNote}` });
       return { ok: true, warning: data.warning ?? null };
     } catch {
       setMembers(previous);
@@ -272,8 +282,12 @@ export default function MembersPage() {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return (members ?? []).filter((m) => {
-      if (!showInactive && !m.active) return false;
-      if (onlyDebtors && !(m.active && !m.vacation && Math.floor(m.hours) < norm)) return false;
+      // Действующий боец — по общему правилу (isRosterActive): отпуск остаётся
+      // в составе, а исключённый/выбывший скрывается, даже если флаг active
+      // забыли снять. То же правило применяет «Учёт онлайна» (/api/control),
+      // поэтому число бойцов в двух разделах совпадает.
+      if (!showInactive && !isMemberInRoster(m)) return false;
+      if (onlyDebtors && !(isMemberInRoster(m) && !m.vacation && Math.floor(m.hours) < norm)) return false;
       if (!q) return true;
       // Discord ID участвует в поиске только у штаба: иначе по перебору цифр
       // можно было бы узнать, привязан ли конкретный человек к Discord
@@ -283,7 +297,7 @@ export default function MembersPage() {
   }, [members, query, showInactive, onlyDebtors, norm, canSeePrivate]);
 
   const all = members ?? [];
-  const active = all.filter((m) => m.active);
+  const active = all.filter((m) => isMemberInRoster(m));
   const onVacation = active.filter((m) => m.vacation).length;
   /** Сколько бойцов без Discord — рабочая сводка штаба, бойцам не показывается */
   const withoutDiscord = active.filter((m) => !m.discordId).length;
