@@ -5,34 +5,30 @@ import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, CheckCircle2, UserMinus, XCircle } from "lucide-react";
 import { Avatar, Section, Spinner } from "@/components/ui";
 import { isCommanderFighter, commanderBadgeLabel } from "@/lib/validation";
+import { formatWeekRange } from "@/lib/week-utils";
 
-type Stat = { id: number; hours: number; vacation: boolean; createdAt: string };
-type Fighter = { id: number; name: string; rankName: string | null; post?: string | null; hours: number; vacation: boolean; discordId: string | null; warnings: number; active: boolean; stats: Stat[] };
+type WeekStat = { hours: number; vacation: boolean } | null;
+type Fighter = {
+  id: number;
+  name: string;
+  rankName: string | null;
+  post?: string | null;
+  hours: number;
+  vacation: boolean;
+  discordId: string | null;
+  warnings: number;
+  active: boolean;
+  weekStats: Record<string, WeekStat>;
+  weekKeys: { week3: string; week2: string; week1: string; week0: string };
+};
 type Notice = { ok: boolean; text: string } | null;
-
-// Функция для получения дат недели (0 = текущая, 1 = прошлая, 2 = позапрошлая и т.д.)
-function getWeekRange(offsetWeeks: number) {
-  const now = new Date();
-  now.setHours(0, 0, 0, 0); 
-  
-  const day = now.getDay();
-  // Находим понедельник (если сегодня воскресенье, то отнимаем 6 дней)
-  const diffToMonday = now.getDate() - day + (day === 0 ? -6 : 1);
-  
-  const startOfWeek = new Date(now);
-  startOfWeek.setDate(diffToMonday - (offsetWeeks * 7));
-  
-  const endOfWeek = new Date(startOfWeek);
-  endOfWeek.setDate(startOfWeek.getDate() + 6);
-
-  const fmt = (d: Date) => d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
-  return `${fmt(startOfWeek)} — ${fmt(endOfWeek)}`;
-}
 
 export default function ControlPage() {
   const [fighters, setFighters] = useState<Fighter[] | null>(null);
   const [norm, setNorm] = useState(10);
   const [notice, setNotice] = useState<Notice>(null);
+  const [weekKeys, setWeekKeys] = useState<Fighter["weekKeys"] | null>(null);
+  const [xlsxSeeding, setXlsxSeeding] = useState(false);
   /** Права из /api/me: считаются общим правилом (resolvePanelRights) */
   const [isCommander, setIsCommander] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -44,8 +40,13 @@ export default function ControlPage() {
       fetch("/api/stats", { cache: "no-store" }).then((r) => r.json()),
       fetch("/api/me", { cache: "no-store" }).then((r) => r.json()),
     ]);
-    setFighters(c.data ?? []);
+    const fightersData = c.data ?? [];
+    setFighters(fightersData);
     setNorm(s.norm ?? 10);
+    // Берём week keys из первого бойца (у всех они одинаковые)
+    if (fightersData.length > 0) {
+      setWeekKeys(fightersData[0].weekKeys);
+    }
     /**
      * Права берём из флагов /api/me, а не из «role»: роль сессии панели у
      * командира подразделения может быть не выставлена вовсе, и тогда он
@@ -64,6 +65,15 @@ export default function ControlPage() {
     const t = setTimeout(() => setNotice(null), 6000);
     return () => clearTimeout(t);
   }, [notice]);
+
+  // Функция загрузки Excel-отчёта
+  const handleXlsxUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setNotice({ ok: false, text: "⚠️ Функция импорта Excel пока в разработке. Используйте API /api/seed-official-reports." });
+    e.target.value = ""; // Сбрасываем input для повторной загрузки
+  };
 
   // Функция для выдачи предупреждения и пинга в Discord (type 0 — снятие всех)
   const issueWarning = async (id: number, type: 0 | 1 | 2) => {
@@ -135,6 +145,30 @@ export default function ControlPage() {
             Сводка активности. Выдавайте предупреждения, бот автоматически пинганет должников в Discord.
           </p>
         </div>
+        <div className="flex gap-2">
+          <label
+            className="btn"
+            style={{
+              padding: "0.5rem 0.9rem",
+              fontSize: "0.8rem",
+              cursor: xlsxSeeding ? "not-allowed" : "pointer",
+              opacity: xlsxSeeding ? 0.6 : 1,
+              background: "rgba(52,211,153,0.12)",
+              borderColor: "rgba(52,211,153,0.4)",
+              color: "var(--green)",
+            }}
+            title="Загрузить Excel-отчёт rs-red.com и обновить историю за эту неделю"
+          >
+            📥 Загрузить отчёт .xlsx
+            <input
+              type="file"
+              accept=".xlsx"
+              className="hidden"
+              disabled={xlsxSeeding}
+              onChange={handleXlsxUpload}
+            />
+          </label>
+        </div>
       </header>
 
       <AnimatePresence>
@@ -148,7 +182,7 @@ export default function ControlPage() {
 
       <Section title="Журнал активности">
         <div className="overflow-x-auto px-2 pb-2 pt-2">
-          {!sortedFighters ? (
+          {!sortedFighters || !weekKeys ? (
             <div className="flex flex-col gap-2 p-4">{[0, 1, 2].map((i) => (<div key={i} className="skeleton" style={{ height: 46 }} />))}</div>
           ) : sortedFighters.length === 0 ? (
             <div className="p-10 text-center text-sm" style={{ color: "var(--muted)" }}>Нет активных бойцов</div>
@@ -157,21 +191,20 @@ export default function ControlPage() {
               <thead>
                 <tr>
                   <th>Боец</th>
-                  <th style={{ textAlign: "center" }}>{getWeekRange(3)}</th>
-                  <th style={{ textAlign: "center" }}>{getWeekRange(2)}</th>
-                  <th style={{ textAlign: "center" }}>{getWeekRange(1)}</th>
-                  <th style={{ textAlign: "center", background: "rgba(255,255,255,0.03)" }}>ТЕКУЩАЯ ({getWeekRange(0)})</th>
+                  <th style={{ textAlign: "center" }}>{formatWeekRange(weekKeys.week3)}</th>
+                  <th style={{ textAlign: "center" }}>{formatWeekRange(weekKeys.week2)}</th>
+                  <th style={{ textAlign: "center" }}>{formatWeekRange(weekKeys.week1)}</th>
+                  <th style={{ textAlign: "center", background: "rgba(255,255,255,0.03)" }}>ТЕКУЩАЯ ({formatWeekRange(weekKeys.week0)})</th>
                   <th style={{ textAlign: "center" }}>Статус</th>
                   <th style={{ textAlign: "right" }}>Управление</th>
                 </tr>
               </thead>
               <tbody>
                 {sortedFighters.map((f) => {
-                  // Подготавливаем историю. f.stats может содержать до 4 записей (0 - самая новая история)
-                  // Если история пуста, ставим null
-                  const w1 = f.stats.length >= 3 ? f.stats[2] : null; // Самая старая
-                  const w2 = f.stats.length >= 2 ? f.stats[1] : null;
-                  const w3 = f.stats.length >= 1 ? f.stats[0] : null; // Прошлая неделя
+                  // Привязка строго по week_start (ключ даты), а НЕ позиционно!
+                  const w3 = f.weekStats[weekKeys.week3];
+                  const w2 = f.weekStats[weekKeys.week2];
+                  const w1 = f.weekStats[weekKeys.week1];
 
                   return (
                     <tr key={f.id}>
@@ -186,14 +219,14 @@ export default function ControlPage() {
                         </div>
                       </td>
 
-                      {/* ИСТОРИЧЕСКИЕ НЕДЕЛИ (1, 2, 3) */}
-                      {[w1, w2, w3].map((stat, idx) => (
+                      {/* ИСТОРИЧЕСКИЕ НЕДЕЛИ (3, 2, 1 недели назад) — строго по дате */}
+                      {[w3, w2, w1].map((stat, idx) => (
                         <td key={idx} style={{ textAlign: "center" }}>
                           {stat ? renderCell(stat.vacation, stat.hours) : <span style={{ color: "var(--dim)" }}>—</span>}
                         </td>
                       ))}
 
-                      {/* НЕДЕЛЯ 4 (ТЕКУЩАЯ ЖИВАЯ СТАТИСТИКА) */}
+                      {/* НЕДЕЛЯ 0 (ТЕКУЩАЯ ЖИВАЯ СТАТИСТИКА) */}
                       <td style={{ textAlign: "center", background: "rgba(255,255,255,0.02)" }}>
                         {renderCell(f.vacation, f.hours)}
                       </td>
@@ -241,17 +274,17 @@ export default function ControlPage() {
                           </span>
                         ) : (
                           <div className="flex justify-end gap-2">
-                            <button 
-                              className="btn" 
+                            <button
+                              className="btn"
                               style={{ padding: "0.4rem 0.6rem", fontSize: "0.75rem", background: "var(--amber-soft)", color: "#fff", borderColor: "rgba(255,176,32,.5)" }}
                               disabled={busyIds.has(f.id)}
                               onClick={() => issueWarning(f.id, 1)}
                             >
                               <AlertTriangle size={13} /> 1/2 Пред
                             </button>
-                            
-                            <button 
-                              className="btn" 
+
+                            <button
+                              className="btn"
                               style={{ padding: "0.4rem 0.6rem", fontSize: "0.75rem", background: "var(--red-soft)", color: "#fff", borderColor: "rgba(190,18,60,.5)" }}
                               disabled={busyIds.has(f.id)}
                               onClick={() => issueWarning(f.id, 2)}

@@ -10,6 +10,7 @@ import {
   varchar,
   json,
   jsonb,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import type { MemberRole, MemberStatus, Unit } from "@/lib/recruits";
 import type { ServiceReportType } from "@/lib/reports";
@@ -452,9 +453,16 @@ export const weeklyStats = pgTable("weekly_stats", {
   memberId: integer("member_id")
     .notNull()
     .references(() => members.id, { onDelete: "cascade" }),
+  /** Дата начала недели (понедельник) в формате YYYY-MM-DD */
+  weekStart: text("week_start").notNull(),
   hours: real("hours").notNull().default(0),
   vacation: boolean("vacation").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
-});
+}, (table) => [
+  // Уникальность: один снимок на бойца на неделю — основной ключ идемпотентности
+  uniqueIndex("weekly_stats_member_week_unique").on(table.memberId, table.weekStart),
+  // Поиск по неделе для отчётов
+  index("weekly_stats_week_start_idx").on(table.weekStart),
+]);

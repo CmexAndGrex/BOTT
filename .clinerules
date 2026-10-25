@@ -12,10 +12,18 @@
 
 ## Правила архитектуры:
 1. Google Таблицы (ШДС):
-   - Раскладка строки: B — Звание, C — ФИО/Позывной, D — Должность, E — Steam ID, F — Discord ID.
+- Раскладка ТР: B – Звание, C – ФИО/Позывной, D – Должность, E – Steam ID, F – Discord ID.
+- Раскладка АД (сдвиг вправо): C – Звание, D – ФИО/Позывной, E – Должность, F – Steam ID, G – Discord ID.
    - Экзамены: H..AE (ТР), I..AG (АД). Обязательно сохранять границы Borders SOLID.
    - Лист «Запас»: сохраняет диапазон A..AG. Служебные метаданные строго в AH (unit), AI (roles), AJ (date).
 2. Discord:
    - Все сетевые вызовы Discord строго изолированы в `safeDiscord` / try-catch. Ошибки Discord не прерывают запись в БД и ШДС.
 3. Качество:
    - После изменения логики обязательно проверять: `npx tsc --noEmit` и `npm test`.
+   # DeepSeek Coding Rules for ATK RED
+
+1. Strict TypeScript: Never use `any` unless strictly necessary. Always ensure `npx tsc --noEmit` passes with 0 errors.
+2. Minimal Diffs: Do not rewrite entire files. Make precise, targeted edits only in the requested functions.
+3. Test Preservation: When updating logic, make sure existing unit tests in `/tests` continue to pass (`npm test`). If a test needs updating due to a contract change, update the test cleanly.
+4. Safe Database Migrations: Never drop columns with production data. Use Drizzle migrations or idempotent SQL.
+5. Verification Step: Always run `npx tsc --noEmit` and `npm test` before concluding the task.

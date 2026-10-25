@@ -1,6 +1,6 @@
-import { and, eq, isNotNull, isNull, lt } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { cronRuns, logs, members as membersTable, processedRequests, snapshots, weeklyStats } from "@/db/schema";
+import { cronRuns, logs, members as membersTable, processedRequests, settings as settingsTable, snapshots, weeklyStats } from "@/db/schema";
 import {
   REACTIONS,
   addReaction,
@@ -18,6 +18,7 @@ import {
   resolveCookie,
 } from "@/lib/settings";
 import { isCommanderFighter } from "@/lib/validation";
+import { getMondayInMSK } from "@/lib/week-utils";
 
 export type TaskResult = {
   ok: boolean;
@@ -139,6 +140,9 @@ export async function syncRoster(source = "manual"): Promise<
     let added = 0;
     let updated = 0;
 
+    // Определяем понедельник текущей недели по МСК для high-water mark
+    const currentMonday = getMondayInMSK();
+
     for (const p of roster) {
       const match =
         (p.pid && byPid.get(p.pid)) || byName.get(p.name.toLowerCase()) || null;
@@ -163,6 +167,25 @@ export async function syncRoster(source = "manual"): Promise<
           })
           .where(eq(membersTable.id, match.id));
         updated++;
+
+        // ✨ HIGH-WATER MARK: защита от обнуления rs-red.com в 00:00 воскресенья
+        // При КАЖДОЙ синхронизации сохраняем максимум часов за текущую неделю
+        await db
+          .insert(weeklyStats)
+          .values({
+            memberId: match.id,
+            weekStart: currentMonday,
+            hours: p.hours,
+            vacation: match.vacation,
+          })
+          .onConflictDoUpdate({
+            target: [weeklyStats.memberId, weeklyStats.weekStart],
+            set: {
+              // Берём МАКСИМУМ из текущего значения в БД и нового значения с rs-red
+              hours: sql`GREATEST(${weeklyStats.hours}, ${p.hours})`,
+              vacation: match.vacation,
+            },
+          });
       } else {
         const inserted = await db
           .insert(membersTable)
@@ -178,7 +201,16 @@ export async function syncRoster(source = "manual"): Promise<
             updatedAt: new Date(),
           })
           .returning({ id: membersTable.id });
-        if (inserted[0]) seenIds.add(inserted[0].id);
+        if (inserted[0]) {
+          seenIds.add(inserted[0].id);
+          // Новому бойцу тоже создаём запись high-water mark
+          await db.insert(weeklyStats).values({
+            memberId: inserted[0].id,
+            weekStart: currentMonday,
+            hours: p.hours,
+            vacation: false,
+          });
+        }
         added++;
       }
     }
@@ -472,13 +504,58 @@ export async function runWeeklyRecord(source = "schedule"): Promise<TaskResult> 
     .from(membersTable)
     .where(eq(membersTable.active, true));
 
+  // Определяем, какую неделю закрываем:
+  // - Если сейчас понедельник (или первые минуты понедельника), закрываем ПРОШЛУЮ неделю
+  // - Если воскресенье 23:55+ — закрываем ТЕКУЩУЮ неделю (она заканчивается)
+  const nowMsk = nowInTz(map.get("timezone") || "Europe/Moscow");
+  const isNewWeek = nowMsk.weekday === 1; // понедельник (1 = Mon по нашей нумерации)
+  const closingMonday = getMondayInMSK();
+  // Если мы уже на новой неделе (понедельник), закрываем прошлую
+  const weekStartToClose = isNewWeek
+    ? (() => {
+        const d = new Date(closingMonday + "T00:00:00");
+        d.setDate(d.getDate() - 7);
+        return d.toISOString().slice(0, 10);
+      })()
+    : closingMonday;
+
   let newWarningsTotal = 0;
   for (const fighter of allMembers) {
-    await db.insert(weeklyStats).values({
-      memberId: fighter.id,
-      hours: fighter.hours,
-      vacation: fighter.vacation,
-    });
+    // Берём часы из уже сохранённого high-water mark в weekly_stats для закрываемой недели.
+    // Это защищает от ситуации, когда rs-red.com обнулил часы в 00:00 воскресенья,
+    // а задача запустилась после обнуления — максимум за неделю уже сохранён.
+    const existingRecords = await db
+      .select()
+      .from(weeklyStats)
+      .where(
+        and(
+          eq(weeklyStats.memberId, fighter.id),
+          eq(weeklyStats.weekStart, weekStartToClose)
+        )
+      );
+    const existingRecord = existingRecords[0];
+
+    // Берём максимум: либо из high-water mark в БД, либо из текущих часов бойца
+    const snapshotHours = existingRecord
+      ? Math.max(existingRecord.hours, fighter.hours)
+      : fighter.hours;
+
+    // Финально записываем/обновляем weekly_stats с итоговым значением недели
+    await db
+      .insert(weeklyStats)
+      .values({
+        memberId: fighter.id,
+        weekStart: weekStartToClose,
+        hours: snapshotHours,
+        vacation: fighter.vacation,
+      })
+      .onConflictDoUpdate({
+        target: [weeklyStats.memberId, weeklyStats.weekStart],
+        set: {
+          hours: sql`GREATEST(${weeklyStats.hours}, ${snapshotHours})`,
+          vacation: fighter.vacation,
+        },
+      });
 
     let newWarnings = fighter.warnings;
     if (!fighter.vacation) {
@@ -486,7 +563,7 @@ export async function runWeeklyRecord(source = "schedule"): Promise<TaskResult> 
       // наказывается автоматическими предупреждениями за нехватку часов:
       // инкремент счётчика пропускаем. Выполнение нормы по-прежнему сбрасывает
       // ранее накопленные предупреждения.
-      if (fighter.hours < norm) {
+      if (snapshotHours < norm) {
         if (!isCommanderFighter(fighter)) {
           newWarnings = fighter.warnings + 1;
           if (newWarnings > fighter.warnings) newWarningsTotal++;
@@ -518,7 +595,7 @@ export async function runWeeklyRecord(source = "schedule"): Promise<TaskResult> 
   const r: TaskResult = {
     ok: true,
     title: "Недельный срез составлен",
-    detail: `Бойцов: ${allMembers.length}. Норма: ${stats.passed} (${stats.percent}%), 0 ч: ${stats.zeroHours}, новые предупреждения: ${newWarningsTotal}.`,
+    detail: `Бойцов: ${allMembers.length}. Норма: ${stats.passed} (${stats.percent}%), 0 ч: ${stats.zeroHours}, новые предупреждения: ${newWarningsTotal}. Неделя: ${weekStartToClose}.`,
   };
   await addLog("weekly", r.title, r.detail, true);
   return r;

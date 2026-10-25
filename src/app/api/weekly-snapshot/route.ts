@@ -6,6 +6,7 @@ import { computeStats } from "@/lib/tasks";
 import { getSettings, normHours } from "@/lib/settings";
 import { authorizeCron, getAuthUser } from "@/lib/api-auth";
 import { isCommanderFighter } from "@/lib/validation";
+import { getMondayInMSK } from "@/lib/week-utils";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,12 +27,15 @@ export async function GET(req: NextRequest) {
     const allMembers = await db.select().from(members).where(eq(members.active, true));
     let processedCount = 0;
 
+    const currentMonday = getMondayInMSK();
+
     for (const fighter of allMembers) {
       await db.insert(weeklyStats).values({
         memberId: fighter.id,
+        weekStart: currentMonday,
         hours: fighter.hours,
         vacation: fighter.vacation,
-      });
+      }).onConflictDoNothing();
 
       let newWarnings = fighter.warnings;
       if (!fighter.vacation) {
