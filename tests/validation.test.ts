@@ -16,10 +16,45 @@ import {
   normalizeUrl,
   normalizeDiscordSnowflake,
   isPanelStaffRole,
+  isAdminRole,
+  normalizePanelRole,
   canViewPrivateFields,
   roleAfterLink,
   browserOrigin,
 } from "../src/lib/validation.ts";
+
+describe("Нормализация роли администратора (isAdminRole / normalizePanelRole)", () => {
+  test("isAdminRole принимает английские и русские написания", () => {
+    assert.equal(isAdminRole("admin"), true);
+    assert.equal(isAdminRole("Администратор"), true);
+    assert.equal(isAdminRole("администратор"), true);
+    assert.equal(isAdminRole("administrator"), true);
+    // Пробелы и регистр не влияют: значение приходит текстом из БД
+    assert.equal(isAdminRole("  Администратор "), true);
+  });
+
+  test("isAdminRole отклоняет прочие роли и мусор", () => {
+    assert.equal(isAdminRole("officer"), false);
+    assert.equal(isAdminRole("Командир"), false);
+    assert.equal(isAdminRole("guest"), false);
+    assert.equal(isAdminRole(""), false);
+    assert.equal(isAdminRole(null), false);
+    assert.equal(isAdminRole(undefined), false);
+  });
+
+  test("normalizePanelRole приводит русские написания к каноническим ролям", () => {
+    assert.equal(normalizePanelRole("Администратор"), "admin");
+    assert.equal(normalizePanelRole("administrator"), "admin");
+    assert.equal(normalizePanelRole("admin"), "admin");
+    assert.equal(normalizePanelRole("Командир"), "officer");
+    assert.equal(normalizePanelRole("commander"), "officer");
+    assert.equal(normalizePanelRole("officer"), "officer");
+    // Мусор в колонке роли прав не даёт
+    assert.equal(normalizePanelRole("мусор"), null);
+    assert.equal(normalizePanelRole(null), null);
+    assert.equal(normalizePanelRole(42), null);
+  });
+});
 
 describe("L4 — nextWarningCount (инкремент вместо перезаписи)", () => {
   test("первое предупреждение 0 → 1", () => {

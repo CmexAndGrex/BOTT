@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import { jwtVerify } from "jose";
 import { getJwtSecret } from "@/lib/auth";
 import { isCrossSiteRequest, isUnsafeMethod } from "@/lib/csrf";
+import { isAdminRole, normalizePanelRole } from "@/lib/validation";
 
 const SECRET = getJwtSecret();
 
@@ -99,7 +100,15 @@ async function panelRole(token: string): Promise<string | null> {
     const { payload } = await jwtVerify(token, SECRET);
     const data = payload as { purpose?: unknown; role?: unknown };
     if (data.purpose !== undefined && data.purpose !== "panel_session") return null;
-    return typeof data.role === "string" ? data.role : null;
+    if (typeof data.role !== "string") return null;
+    /**
+     * Нормализация: в users.role встречается русское написание уровня прав
+     * («Администратор»), и оно попадает в токен при входе. Строгое сравнение
+     * с 'admin' ниже читало такого администратора как чужого — переход в
+     * /settings и /users выкидывал на /login (петля из отчёта). Приводим к
+     * каноническому значению тем же правилом, что и гварды роутов.
+     */
+    return normalizePanelRole(data.role);
   } catch {
     return null;
   }
@@ -440,14 +449,17 @@ export async function middleware(req: NextRequest) {
   const token = req.cookies.get("auth_token")?.value;
   if (!token) {
     if (isApi) return NextResponse.json({ error: "Нет доступа" }, { status: 401 });
-    return NextResponse.redirect(new URL("/login", req.url));
+    // Возврат на исходную страницу после входа (?next=): без него запрос
+    // /settings уводил на /login, а после пароля — принудительно на «/»,
+    // и запрошенный раздел приходилось искать заново.
+    return NextResponse.redirect(new URL(`/login?next=${encodeURIComponent(pathname)}`, req.url));
   }
 
   try {
     const role = await panelRole(token);
     if (!role) {
       if (isApi) return NextResponse.json({ error: "Сессия устарела" }, { status: 401 });
-      return NextResponse.redirect(new URL("/login", req.url));
+      return NextResponse.redirect(new URL(`/login?next=${encodeURIComponent(pathname)}`, req.url));
     }
 
     const isAdminArea =
@@ -460,7 +472,12 @@ export async function middleware(req: NextRequest) {
       // открывать доступ.
       pathname.startsWith("/api/admin/maintenance");
 
-    if (isAdminArea && role !== "admin") {
+    /**
+     * Проверка через isAdminRole: роль в токене может быть записана русским
+     * написанием («Администратор»), и строгое сравнение с 'admin' отказывало
+     * вошедшему по паролю администратору — петля «/settings → /login → /».
+     */
+    if (isAdminArea && !isAdminRole(role)) {
       if (isApi) {
         return NextResponse.json({ error: "Только для администратора" }, { status: 403 });
       }
@@ -470,6 +487,6 @@ export async function middleware(req: NextRequest) {
     return withCsp(NextResponse.next({ request: { headers: requestHeaders } }));
   } catch {
     if (isApi) return NextResponse.json({ error: "Сессия устарела" }, { status: 401 });
-    return NextResponse.redirect(new URL("/login", req.url));
+    return NextResponse.redirect(new URL(`/login?next=${encodeURIComponent(pathname)}`, req.url));
   }
 }

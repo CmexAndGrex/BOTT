@@ -123,6 +123,8 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
   const [username, setUsername] = useState<string | null>(null);
   const [member, setMember] = useState<{
     callsign: string;
+    /** Официальное ФИО из табеля: приоритетнее логина в карточке пользователя */
+    name?: string;
     status: string;
     statusLabel: string;
     avatarUrl?: string | null;
@@ -475,10 +477,14 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
                 </span>
               )}
               <div className="min-w-0 flex-1">
-                {/* Позывной бойца важнее логина панели; у штаба без строки бойца
-                    показываем логин, чтобы карточка не осталась безымянной */}
+                {/*
+                  Отображаемое имя: официальное ФИО из табеля (member.name)
+                  всегда важнее технического логина панели. Раньше здесь
+                  показывался «Ivanov_IA» вместо «Иванов И.А.». Позывной —
+                  запасной вариант, логин — только у штаба без строки бойца.
+                */}
                 <div className="truncate text-[12.5px] font-semibold" style={{ color: "var(--text)" }}>
-                  {member?.callsign || username || "Учётная запись"}
+                  {member?.name || member?.callsign || username || "Учётная запись"}
                 </div>
                 <div className="truncate text-[10.5px]" style={{ color: "var(--dim)" }}>
                   {member?.statusLabel || (isStaff ? "штаб панели" : "вне строя")}

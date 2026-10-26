@@ -38,6 +38,8 @@ import {
 export type DossierMember = {
   id: number;
   callsign: string;
+  /** Официальное ФИО из табеля: приоритетнее позывного в заголовке досье */
+  name?: string;
   rank: string;
   unit: string | null;
   post: string | null;
@@ -135,7 +137,20 @@ export function DossierHeader({
 
           <div className="min-w-0">
             <div className="eyebrow mb-1">личное дело // досье</div>
-            <h1 className="display text-[28px] font-black leading-tight">{member.callsign}</h1>
+            {/*
+              Заголовок — официальное ФИО из табеля, а не технический логин:
+              «Иванов И.А.», а не «Ivanov_IA». Позывной остаётся запасным
+              вариантом (у бойцов из синхронизации rs-red.com ФИО может
+              совпадать с позывным или отсутствовать).
+            */}
+            <h1 className="display text-[28px] font-black leading-tight">
+              {member.name || member.callsign}
+            </h1>
+            {member.name && member.callsign && member.name !== member.callsign && (
+              <div className="text-[11.5px]" style={{ color: "var(--dim)" }}>
+                позывной: {member.callsign}
+              </div>
+            )}
             <div className="mt-1 flex flex-wrap items-center gap-2">
               <span className="chip" style={{ fontSize: "0.72rem" }}>
                 <Badge size={12} style={{ color: "var(--red)" }} />

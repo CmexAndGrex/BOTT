@@ -181,6 +181,48 @@ describe("Возврат после входа: безопасность адр�
   });
 });
 
+describe("Middleware: русская роль в токене и админ-зона", () => {
+  test("токен с ролью «Администратор» пускает в /settings без редиректа", async () => {
+    // Регрессия: users.role хранит уровень прав текстом, и русское написание
+    // («Администратор») попадает в JWT при входе. Строгое сравнение с 'admin'
+    // выкидывало вошедшего на /login — петля из отчёта.
+    const token = await panelToken("Администратор");
+    const res = await middleware(request("/settings", { auth_token: token }));
+    assert.equal(res.headers.get("location"), null, "администратор не должен перенаправляться");
+    assert.notEqual(res.status, 307);
+  });
+
+  test("токен с ролью «Администратор» пускает в /users", async () => {
+    const token = await panelToken("Администратор");
+    const res = await middleware(request("/users", { auth_token: token }));
+    assert.equal(res.headers.get("location"), null);
+    assert.notEqual(res.status, 307);
+  });
+
+  test("токен с ролью «Командир» в /settings не пускают (редирект на «/»)", async () => {
+    const token = await panelToken("Командир");
+    const res = await middleware(request("/settings", { auth_token: token }));
+    assert.equal(res.status, 307);
+    assert.match(res.headers.get("location") || "", /\/$/);
+  });
+
+  test("гость на /settings уходит на /login с возвратом (?next=)", async () => {
+    // Без ?next= после ввода пароля администратора уводило на «/», и
+    // запрошенный раздел приходилось открывать заново.
+    const res = await middleware(request("/settings"));
+    assert.equal(res.status, 307);
+    assert.match(res.headers.get("location") || "", /\/login\?next=%2Fsettings$/);
+  });
+
+  test("истёкшая сессия на /users тоже сохраняет путь возврата", async () => {
+    // Токен — ASCII: кириллица в значении cookie-заголовка недопустима
+    // (ByteString), и undici отклоняет такой запрос ещё до middleware.
+    const res = await middleware(request("/users", { auth_token: "garbage-token" }));
+    assert.equal(res.status, 307);
+    assert.match(res.headers.get("location") || "", /\/login\?next=%2Fusers$/);
+  });
+});
+
 describe("Middleware: кабинет и путь возврата", () => {
   test("гость отправляется на вход с возвратом в кабинет, а не без него", async () => {
     // Это и есть устранение цикла: без ?next= человек после входа попадал на
@@ -290,6 +332,32 @@ describe("Интерфейс: пункт меню и экран кабинета
     const source = read("src/app/api/me/route.ts");
     assert.match(source, /cabinet/);
     assert.match(source, /"not_linked"/);
+  });
+
+  test("карточка в сайдбаре показывает ФИО бойца, а не логин панели", () => {
+    // Регрессия из отчёта: в подвале сайдбара крупным текстом писался
+    // технический логин («Ivanov_IA») вместо имени бойца («Иванов И.А.»).
+    // Приоритет: member.name (ФИО из табеля) → позывной → логин.
+    const source = read("src/components/shell.tsx");
+    assert.match(
+      source,
+      /member\?\.name \|\| member\?\.callsign \|\| username/,
+      "карточка пользователя должна ставить ФИО выше логина"
+    );
+  });
+
+  test("заголовок досье показывает официальное ФИО из табеля", () => {
+    const source = read("src/components/dossier-panel.tsx");
+    assert.match(
+      source,
+      /member\.name \|\| member\.callsign/,
+      "заголовок досье должен ставить ФИО выше позывного"
+    );
+  });
+
+  test("роут досье отдаёт ФИО бойца из табеля", () => {
+    const source = read("src/app/api/member/dossier/route.ts");
+    assert.match(source, /name: member\.name \|\| ""/);
   });
 
   test("заглушка кабинета не замыкает круг: «Войти» ведёт с возвратом", () => {

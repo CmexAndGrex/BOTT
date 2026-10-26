@@ -116,6 +116,41 @@ export function isPanelStaffRole(value: unknown): value is PanelStaffRole {
 }
 
 /**
+ * Роль администратора в любом написании.
+ *
+ * Зачем: в БД users.role исторически лежит текст, и часть записей хранит
+ * уровень прав по-русски («Администратор», «Командир») — например, после
+ * ручной правки или импорта. Строгое сравнение с 'admin' тогда читало
+ * администратора как гостя: middleware выкидывал его на /login при переходе
+ * в /settings и /users, а после повторного входа редиректил на «/».
+ *
+ * Правило одно на проект (middleware, гварды роутов, /api/me): копии в
+ * местах проверки разошлись бы, и один слой пускал бы то, что другой
+ * отклоняет.
+ */
+export function isAdminRole(role?: string | null): boolean {
+  if (!role) return false;
+  const r = role.toLowerCase().trim();
+  return r === "admin" || r === "administrator" || r === "администратор";
+}
+
+/**
+ * Нормализует роль панели к внутреннему значению.
+ *
+ * «Администратор»/«administrator» → 'admin', «Командир»/«commander» →
+ * 'officer', канонические 'admin'/'officer' проходят как есть. null —
+ * значение не является ролью панели: мусор в колонке роли не должен
+ * давать прав (то же правило, что у isPanelStaffRole).
+ */
+export function normalizePanelRole(value: unknown): PanelStaffRole | null {
+  if (typeof value !== "string") return null;
+  const r = value.toLowerCase().trim();
+  if (isAdminRole(r)) return "admin";
+  if (r === "officer" || r === "commander" || r === "командир") return "officer";
+  return null;
+}
+
+/**
  * Право видеть приватные поля состава (Discord ID).
  *
  * Правило одно для сервера и интерфейса: доступ есть у штаба панели

@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { eq, sql } from "drizzle-orm";
+import { db } from "@/db";
+import { members, users } from "@/db/schema";
 import { getAuthUser } from "@/lib/api-auth";
 import { getSessionMember } from "@/lib/member-auth";
 import { resolvePanelRights } from "@/lib/panel-rights";
@@ -30,6 +33,46 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest) {
   // Роль берём из БД (учёт текущей tokenVersion и актуальных прав), гостю — "guest"
   const user = await getAuthUser(req);
+
+  /**
+   * Автосвязка аккаунта с карточкой бойца по Discord ID.
+   *
+   * Если у вошедшего есть discord_id, но member_id пуст — находим запись в
+   * division_members по discord_id и связываем (users.member_id = id). Без
+   * этого аккаунт, чей Discord внёс администратор, оставался без связки:
+   * карточка в сайдбаре показывала технический логин вместо ФИО бойца, а
+   * /profile — заглушку «войдите в личный кабинет».
+   *
+   * Сбой записи не ломает ответ: связка — производное улучшение, а сессия
+   * уже действующая.
+   */
+  if (user?.username) {
+    try {
+      const [account] = await db
+        .select({ id: users.id, memberId: users.memberId, discordId: users.discordId })
+        .from(users)
+        .where(eq(users.username, user.username));
+      if (account && !account.memberId && account.discordId) {
+        const [linked] = await db
+          .select({ id: members.id })
+          .from(members)
+          .where(
+            sql`regexp_replace(coalesce(${members.discordId}, ''), '[^0-9]', '', 'g') = ${account.discordId}`
+          )
+          .orderBy(members.id)
+          .limit(1);
+        if (linked) {
+          await db
+            .update(users)
+            .set({ memberId: linked.id })
+            .where(eq(users.id, account.id));
+        }
+      }
+    } catch (e) {
+      console.error("[api/me] Не удалось связать аккаунт с бойцом по Discord ID:", e);
+    }
+  }
+
   const member = await getSessionMember(req);
 
   const rights = resolvePanelRights({

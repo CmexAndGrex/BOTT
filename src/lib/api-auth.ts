@@ -15,7 +15,12 @@ import { eq } from "drizzle-orm";
 import { db } from "@/db";
 import { logs, users } from "@/db/schema";
 import { getJwtSecret } from "@/lib/auth";
-import { isPanelStaffRole, normalizeDiscordSnowflake, type PanelStaffRole } from "@/lib/validation";
+import {
+  isPanelStaffRole,
+  normalizeDiscordSnowflake,
+  normalizePanelRole,
+  type PanelStaffRole,
+} from "@/lib/validation";
 
 export type AuthRole = PanelStaffRole | "guest";
 
@@ -107,8 +112,11 @@ export async function getAuthUser(req: NextRequest): Promise<AuthUser | null> {
   // Версия не совпала — токен отозван (смена пароля/принудительный выход)
   if (tokenVersion !== dbUser.tokenVersion) return null;
 
-  // Роль берём из БД: понижение прав действует немедленно
-  return { role: isPanelStaffRole(dbUser.role) ? dbUser.role : "guest", username };
+  // Роль берём из БД: понижение прав действует немедленно. Нормализация
+  // приводит русские написания («Администратор») к каноническим значениям:
+  // иначе аккаунт с такой ролью читался гостем во всех гвардах сразу.
+  const role = normalizePanelRole(dbUser.role);
+  return { role: role ?? "guest", username };
 }
 
 /* ------------------------------------------------------------------ */
@@ -122,6 +130,11 @@ export type PanelAccount = {
   /** Роль как она лежит в БД: пригодность проверяется isPanelStaffRole у входа */
   role: string;
   tokenVersion: number;
+  /**
+   * Боец состава, связанный с учётной записью (users.member_id).
+   * Необязательное поле: у администратора без строки в табеле его нет.
+   */
+  memberId?: number | null;
 };
 
 /**
@@ -138,6 +151,9 @@ export async function issuePanelToken(account: PanelAccount): Promise<string> {
     userId: account.id,
     username: account.username,
     role: account.role,
+    // Связка с бойцом: по ней сессия панели открывает личное дело без
+    // второго входа (см. member-auth.getPanelSessionMember)
+    memberId: account.memberId ?? null,
     tokenVersion: account.tokenVersion,
   })
     .setProtectedHeader({ alg: "HS256" })

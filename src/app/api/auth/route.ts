@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { users, logs } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { users, logs, members } from "@/db/schema";
+import { eq, sql } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import {
   issuePanelToken,
@@ -93,11 +93,48 @@ export async function POST(req: NextRequest) {
 
     rateLimitMap.delete(ip);
 
+    /**
+     * Автосвязка аккаунта с карточкой бойца по Discord ID.
+     *
+     * Зачем: users.member_id заполняется вручную в «Доступах» или при входе
+     * через Discord, но аккаунт, у которого записан только discord_id (его
+     * внёс администратор), оставался без связки — и после входа по паролю
+     * /profile показывал заглушку «войдите в личный кабинет». Связка ищется
+     * по подтверждённому Discord ID (совпасть случайно он не может) и
+     * пишется один раз: повторный вход находит её по member_id.
+     *
+     * Сбой записи не отменяет вход: сессия уже выдана, а связка —
+     * производное улучшение.
+     */
+    let memberId = user.memberId ?? null;
+    if (!memberId && user.discordId) {
+      try {
+        const [linked] = await db
+          .select({ id: members.id })
+          .from(members)
+          .where(
+            sql`regexp_replace(coalesce(${members.discordId}, ''), '[^0-9]', '', 'g') = ${user.discordId}`
+          )
+          .orderBy(members.id)
+          .limit(1);
+        if (linked) {
+          await db
+            .update(users)
+            .set({ memberId: linked.id })
+            .where(eq(users.id, user.id));
+          memberId = linked.id;
+        }
+      } catch (e) {
+        console.error("[auth] Не удалось связать аккаунт с бойцом по Discord ID:", e);
+      }
+    }
+
     const token = await issuePanelToken({
       id: user.id,
       username: user.username,
       role: user.role,
       tokenVersion: user.tokenVersion,
+      memberId,
     });
 
     await logPanelLogin(user.username, "вход в панель по паролю", { ip });
@@ -111,7 +148,7 @@ export async function POST(req: NextRequest) {
     // личный кабинет», а клик «Войти» возвращал его на /login — цикл из отчёта.
     const member = await attachCabinetSession(response, req, {
       username: user.username,
-      memberId: user.memberId,
+      memberId,
       discordId: user.discordId,
     });
     if (member) {

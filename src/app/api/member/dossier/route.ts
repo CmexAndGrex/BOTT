@@ -193,6 +193,12 @@ export async function GET(req: NextRequest) {
       member: {
         id: member.id,
         callsign: member.callsign || member.name || "",
+        /**
+         * Официальное ФИО из табеля. Приоритет отображения — всегда оно, а не
+         * технический логин: заголовок досье показывает «Иванов И.А.», а не
+         * «Ivanov_IA» (см. DossierHeader в components/dossier-panel.tsx).
+         */
+        name: member.name || "",
         rank: member.rank || "",
         unit: member.unit,
         post: member.post,
