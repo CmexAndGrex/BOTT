@@ -18,7 +18,7 @@ import {
   resolveCookie,
 } from "@/lib/settings";
 import { isCommanderFighter } from "@/lib/validation";
-import { PROTECTED_PROFILE, isProtectedFighter } from "@/lib/protected-profiles";
+import { isProtectedFighter, protectMemberUpdate } from "@/lib/protected-profiles";
 import { getMondayInMSK } from "@/lib/week-utils";
 
 export type TaskResult = {
@@ -153,18 +153,24 @@ export async function syncRoster(source = "manual"): Promise<
         // vacationNotified, warnings) НЕ трогаем — они имеют приоритет над
         // данными сайта. Обновляем только то, что приходит с rs-red.com.
         //
-        // Защищённая карточка командования (Иванов И. А.): сайт не должен
-        // подменять должность и звание — там эти поля ведутся вручную, а на
-        // сайте могут быть устаревшими. Сайт по-прежнему обновляет онлайн.
-        const protectedCard = isProtectedFighter(match);
+        // Защищённая карточка командования (Иванов И. А.): сайт не имеет права
+        // затереть звание и должность ДЕФОЛТОМ («Рядовой», пусто, «—»). При этом
+        // осмысленное значение с сайта проходит, и повышение офицера приказом не
+        // блокируется: фильтр отсекает только пустые дефолты, а не изменения.
+        // Приоритет у того, что уже сохранено в БД (match), — см.
+        // protectMemberUpdate.
+        const guarded = protectMemberUpdate(
+          match,
+          { rankName: p.rankName, post: p.post },
+          { rank: match.rank, rankName: match.rankName, post: match.post, unit: match.unit }
+        );
         await db
           .update(membersTable)
           .set({
             pid: p.pid ?? match.pid,
             handle: p.handle ?? match.handle,
             name: p.name,
-            rankName: protectedCard ? PROTECTED_PROFILE.rank : p.rankName ?? match.rankName,
-            post: protectedCard ? PROTECTED_PROFILE.post : p.post ?? match.post,
+            ...(guarded as { rankName?: string | null; post?: string | null }),
             minutes: p.minutes,
             hours: p.hours,
             active: true,

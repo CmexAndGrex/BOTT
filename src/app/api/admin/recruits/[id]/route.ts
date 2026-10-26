@@ -18,7 +18,9 @@ import { logs, members, recruitApplications } from "@/db/schema";
 import { sendDirectMessage } from "@/lib/discord";
 import { requireStaff } from "@/lib/member-auth";
 import {
+  ASSIGNABLE_UNITS,
   DEFAULT_RANK,
+  isCommandUnit,
   isEnlistmentRank,
   isFullNameWithInitials,
   isMemberRole,
@@ -29,12 +31,11 @@ import {
   RANKS,
   readApplication,
   RECRUIT_RANK,
-  UNITS,
   type MemberStatus,
 } from "@/lib/recruits";
 import { grantEnlistmentRoles, recruitDmText, refreshRecruitMessage } from "@/lib/review";
 import { statusTrackingFields } from "@/lib/roles-monitor";
-import { PROTECTED_PROFILE, isProtectedFighter } from "@/lib/protected-profiles";
+import { isDefaultRank, isProtectedFighter } from "@/lib/protected-profiles";
 import { generateTempPassword } from "@/lib/temp-password";
 import { applyVacationRole } from "@/lib/vacation-roles";
 
@@ -51,6 +52,8 @@ type UpdateBody = {
   callsign?: unknown;
   discordId?: unknown;
   rank?: unknown;
+  /** Должность: командир корпуса меняет её приказом (например, на «КБМ») */
+  post?: unknown;
   unit?: unknown;
   role?: unknown;
   reason?: unknown;
@@ -406,12 +409,18 @@ async function mergeIntoExistingMember(
        * rs-red.com) иначе пришлось бы заполнять вручную. Присвоенное звание
        * (Ефрейтор и выше) не понижается.
        *
-       * Защищённая карточка командования (Иванов И. А.) — исключение: слияние
-       * с заявкой не имеет права понизить звание и перевести его в другое
-       * подразделение.
+       * Защищённая карточка командования (Иванов И. А.): слияние с заявкой
+       * сохраняет уже записанные звание и подразделение. Заявка добирает
+       * только то, что в карточке пусто, и никогда не затирает приказ
+       * (например, «Капитан») дефолтом.
        */
       ...(isProtectedFighter(existing)
-        ? { unit: PROTECTED_PROFILE.unit, rank: PROTECTED_PROFILE.rank }
+        ? {
+            ...(existing.unit ? {} : pending.unit ? { unit: pending.unit } : {}),
+            ...(isDefaultRank(existing.rank)
+              ? { rank: isEnlistmentRank(existing.rank) ? RECRUIT_RANK : existing.rank || DEFAULT_RANK }
+              : {}),
+          }
         : {
             ...(pending.unit && !existing.unit ? { unit: pending.unit } : {}),
             rank: isEnlistmentRank(existing.rank) ? RECRUIT_RANK : existing.rank || DEFAULT_RANK,
@@ -551,35 +560,44 @@ function buildPatch(member: MemberRow, body: UpdateBody, action: Action): PatchR
   }
 
   /**
-   * Защищённая карточка командования (Иванов И. А.): звание и подразделение
-   * правкой из панели не меняются. Приказ по заму корпуса оформляется отдельно,
-   * а случайное «сохранение» формы не должно ни понижать звание, ни переводить
-   * его в дивизион.
+   * Правка звания и подразделения — ЯВНОЕ действие администратора в панели.
+   *
+   * Защита карточек командования больше не блокирует эти поля: командир корпуса
+   * повышает офицера («Капитан», «Майор») и меняет должность (например, на
+   * «КБМ») в любой момент, и правка обязана сохраниться. Фильтр от дефолтов
+   * работает в автоматических источниках (rs-red.com, сверка ШДС, заявка), а
+   * здесь пришло осмысленное значение от человека.
    */
-  const protectedCard = isProtectedFighter({
-    discordId: (typeof values.discordId === "string" ? values.discordId : null) ?? member.discordId,
-    name: member.name,
-  });
-
   if (typeof body.rank === "string" && body.rank.trim()) {
     const rank = body.rank.trim();
     if (!(RANKS as readonly string[]).includes(rank)) {
       return { ok: false, error: `Неизвестное звание «${rank}»` };
     }
-    values.rank = protectedCard ? PROTECTED_PROFILE.rank : rank;
+    values.rank = rank;
   }
 
   if (typeof body.unit === "string") {
     const unit = body.unit.trim();
     if (!unit) {
-      values.unit = protectedCard ? PROTECTED_PROFILE.unit : null;
-    } else if (!(UNITS as readonly string[]).includes(unit)) {
+      values.unit = null;
+    } else if (!(ASSIGNABLE_UNITS as readonly string[]).includes(unit)) {
       // Подразделение = имя листа Google Таблицы: произвольное значение
-      // привело бы к ошибке «лист не найден» при синхронизации
+      // привело бы к ошибке «лист не найден» при синхронизации. Исключение —
+      // «Командование корпуса»: оно ведётся отдельным листом и в UNITS не
+      // входит, но назначать его администратору нужно.
       return { ok: false, error: `Неизвестное подразделение «${unit}»` };
     } else {
-      values.unit = protectedCard ? PROTECTED_PROFILE.unit : unit;
+      values.unit = unit;
     }
+  }
+
+  /**
+   * Должность — явная правка штаба (приказ). Никаких «защитных» подстановок:
+   * если командир корпуса назначил офицеру «КБМ», это должно сохраниться.
+   */
+  if (typeof body.post === "string") {
+    const post = body.post.trim();
+    values.post = post || null;
   }
 
   if (typeof body.role === "string" && body.role.trim()) {
@@ -706,6 +724,21 @@ async function addToShdsSheet(
     return { ok: false, error: "Не назначено подразделение — некуда записывать бойца" };
   }
 
+  /**
+   * «Командование корпуса» ведётся отдельным листом «Командование АТК», а не
+   * листами подразделений. resolveLayout такой лист не знает, и попытка
+   * записать офицера в «Танковую роту»/«Артиллерийский дивизион» упала бы с
+   * «неизвестное подразделение». Лист командования панель только читает
+   * (звание и должность оттуда применяются сверкой), поэтому запись
+   * пропускается без ошибки.
+   */
+  if (isCommandUnit(member.unit)) {
+    return {
+      ok: true,
+      message: "Служба в командовании корпуса: запись идёт на лист «Командование АТК», он ведётся вручную",
+    };
+  }
+
   try {
     // Импорт динамический: модуль таблицы читает настройки и «паспорт»
     // сервисного аккаунта, незачем нагружать этим каждое решение по рапорту
@@ -728,12 +761,15 @@ async function addToShdsSheet(
        */
       userName: member.name.includes(" ") ? member.name : member.callsign || member.name,
       /**
-       * Защищённая карточка командования: в ШДС уходит его постоянное звание.
-       * Приведение «Курсант → Рядовой» здесь как раз и затирало «Ст. Лейтенант»
-       * при повторной записи строки.
+       * В ШДС уходит звание из карточки — то, которое присвоено приказом.
+       * Приведение «Курсант → Рядовой» здесь уместно только для новобранца:
+       * у защищённой карточки командования звание уже осмысленное («Капитан»,
+       * «Ст. Лейтенант»), повторная запись строки не должна его менять.
        */
       rank: isProtectedFighter(member)
-        ? PROTECTED_PROFILE.rank
+        ? isDefaultRank(member.rank)
+          ? RECRUIT_RANK
+          : member.rank
         : isEnlistmentRank(member.rank)
           ? RECRUIT_RANK
           : member.rank || DEFAULT_RANK,

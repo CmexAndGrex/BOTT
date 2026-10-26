@@ -1,29 +1,43 @@
 # Language and Communication Rules
 - All explanations, summaries, status updates, and reports MUST be written in Russian.
-- All code comments and commit messages must be in Russian or standard English.
-- Under NO circumstances use Chinese characters or Chinese language in output or reasoning.
+- All code comments and git commit messages must be in Russian or standard English.
+- Under NO circumstances use Chinese characters or Chinese language in output, comments, or reasoning.
 - Keep terminal commands and code identifiers in standard English/code syntax.
-# ATK RED Project Guidelines
 
-## Стек
-- Next.js (App Router), TypeScript (strict), Tailwind CSS.
-- PostgreSQL (`app_db`), Drizzle ORM.
-- Google Sheets API, Discord REST API.
+# ATK RED Project Guidelines & Stack
+- Framework: Next.js (App Router), TypeScript (strict mode), Tailwind CSS.
+- Database: PostgreSQL (`app_db`), Drizzle ORM (schema in `src/db/schema.ts`, migrations in `drizzle/` or `scripts/migrations/`).
+- Integrations: Google Sheets API (GoogleSpreadsheet / JWT), Discord REST API.
+- Test runner: native `node:test` runner via `tests/setup.mjs` (NEVER assume Vitest or Jest exist unless explicitly present in `package.json`).
 
-## Правила архитектуры:
+# Architecture & Data Rules
 1. Google Таблицы (ШДС):
-- Раскладка ТР: B – Звание, C – ФИО/Позывной, D – Должность, E – Steam ID, F – Discord ID.
-- Раскладка АД (сдвиг вправо): C – Звание, D – ФИО/Позывной, E – Должность, F – Steam ID, G – Discord ID.
-   - Экзамены: H..AE (ТР), I..AG (АД). Обязательно сохранять границы Borders SOLID.
+   - Раскладка ТР («Танковая рота»): B – Звание, C – ФИО/Позывной, D – Должность, E – Steam ID, F – Discord ID.
+   - Раскладка АД («Артиллерийский дивизион»): сдвиг вправо на 1 столбец (A пустая, B синий разделитель): C – Звание, D – ФИО/Позывной, E – Должность, F – Steam ID, G – Discord ID.
+   - Экзамены: H..AE (ТР), I..AG (АД). Обязательно сохранять границы ячеек (borders solid).
    - Лист «Запас»: сохраняет диапазон A..AG. Служебные метаданные строго в AH (unit), AI (roles), AJ (date).
-2. Discord:
-   - Все сетевые вызовы Discord строго изолированы в `safeDiscord` / try-catch. Ошибки Discord не прерывают запись в БД и ШДС.
-3. Качество:
-   - После изменения логики обязательно проверять: `npx tsc --noEmit` и `npm test`.
-   # DeepSeek Coding Rules for ATK RED
+   - Лист «Командование АТК»: закреплён за комсоставом корпуса (Волков Д.В., Иванов И.А., Иванов К.М.). НИКОГДА не вносить их в строки «Вакант» на листах ТР и АД!
+   - Командиры подразделений закреплены на верхних строках: ТР строки 7–8, АД строки 9–10. Не дублировать их в «Вакант».
+   - Активный состав АД: строки строго до 42 включительно (строка 43+ — блок «Запас | долгий отпуск»).
+   - Сохранение оформления: при записи бойцов менять ТОЛЬКО цвет фона (`userEnteredFormat.backgroundColor`). Запрещено перезаписывать `textFormat` и использовать `applyStdFormat` / `PASTE_FORMAT`, чтобы не сбивать оригинальный шрифт таблицы.
+   - Steam ID: строго чистые 17 цифр (`/^7656119\d{10}$/`). Очищать любые префиксы вида `ID: `.
 
-1. Strict TypeScript: Never use `any` unless strictly necessary. Always ensure `npx tsc --noEmit` passes with 0 errors.
-2. Minimal Diffs: Do not rewrite entire files. Make precise, targeted edits only in the requested functions.
-3. Test Preservation: When updating logic, make sure existing unit tests in `/tests` continue to pass (`npm test`). If a test needs updating due to a contract change, update the test cleanly.
-4. Safe Database Migrations: Never drop columns with production data. Use Drizzle migrations or idempotent SQL.
-5. Verification Step: Always run `npx tsc --noEmit` and `npm test` before concluding the task.
+2. Discord & Профили бойцов:
+   - Все сетевые вызовы Discord оборачивать в `safeDiscord` / try-catch. Ошибки Discord не должны прерывать запись в БД и ШДС.
+   - Аватарки: для всех тегов `<img>` и `<Image>` обязательно указывать `referrerPolicy="no-referrer"`. В `next.config.ts` должны быть разрешены хосты `cdn.discordapp.com` и `media.discordapp.net`.
+   - Профиль Иванова И.А. (`discord_id = '1394327098801389762'`): звание «Старший лейтенант», подразделение «Танковая рота», должность «Заместитель командира корпуса». Запрещено авто-сбрасывать в рядового или переносить в АД.
+
+3. Учёт онлайна (`/control` и `weekly_stats`):
+   - Жёсткая привязка колонок к дате понедельника (`week_start` в формате `YYYY-MM-DD`). Запрещён позиционный вывод из массива `stats[0..3]`. Если данных за неделю нет — выводить прочерк `—`.
+   - Защита от воскресного сброса `rs-red.com`: сохранять высшее значение недели (`GREATEST(existing, new)`), чтобы сброс часов в 00:00 понедельника не затирал историю недели.
+
+# DeepSeek Operational Guardrails (Strict Execution)
+1. Dependency Verification:
+   - Перед импортом любых внешних модулей проверяй `package.json`. Запрещено импортировать пакеты, которых нет в проекте.
+2. Minimal Targeted Diffs:
+   - Не переписывай файлы целиком. Делай точечные замены только в целевых функциях, чтобы экономить контекст и не ломать соседнюю логику.
+3. Strict Verification Loop:
+   - Перед завершением любой задачи обязательно запускай:
+     `npx tsc --noEmit`
+     `npm test`
+   - Если тесты или типизация падают, исправляй ошибки самостоятельно в рамках текущей сессии до сдачи результата.

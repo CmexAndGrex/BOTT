@@ -12,6 +12,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   avatarHashFromUrl,
   avatarInitials,
@@ -20,10 +21,11 @@ import {
 } from "../src/lib/discord-avatar.ts";
 import {
   PROTECTED_DISCORD_ID,
-  PROTECTED_PROFILE,
+  isDefaultPost,
+  isDefaultRank,
+  isDefaultUnit,
   isProtectedFighter,
   protectMemberUpdate,
-  protectedRankFor,
   resolveRankAndUnit,
 } from "../src/lib/protected-profiles.ts";
 
@@ -116,11 +118,15 @@ describe("avatarInitials: заглушка с инициалами", () => {
   });
 });
 
-describe("Защита карточки заместителя командира корпуса", () => {
-  test("постоянные данные зафиксированы", () => {
-    assert.equal(PROTECTED_PROFILE.rank, "Ст. Лейтенант");
-    assert.equal(PROTECTED_PROFILE.unit, "Танковая рота");
-    assert.equal(PROTECTED_PROFILE.post, "Заместитель командира корпуса");
+describe("Динамическая защита карточки командования корпуса", () => {
+  test("звание, подразделение и должность больше не зафиксированы константами", () => {
+    // Хардкода значений в модуле нет: единственные постоянные — Discord ID и ФИО
+    const source = readFileSync(
+      new URL("../src/lib/protected-profiles.ts", import.meta.url),
+      "utf8"
+    );
+    assert.ok(!/PROTECTED_PROFILE/.test(source), "константа PROTECTED_PROFILE удалена");
+    assert.ok(!/Ст\.\s*Лейтенант/.test(source), "звание «Ст. Лейтенант» не вшито в модуль");
   });
 
   test("распознаётся по Discord ID", () => {
@@ -139,20 +145,51 @@ describe("Защита карточки заместителя командир�
     assert.equal(isProtectedFighter({ name: "Иванов" }), false);
   });
 
-  test("правка звания, подразделения и должности откатывается к постоянным", () => {
-    const changes = protectMemberUpdate(
-      { discordId: PROTECTED_DISCORD_ID },
-      { rank: "Рядовой", unit: "Артиллерийский дивизион", post: "Стрелок", updatedAt: new Date() }
-    );
-    assert.equal(changes.rank, PROTECTED_PROFILE.rank);
-    assert.equal(changes.unit, PROTECTED_PROFILE.unit);
-    assert.equal(changes.post, PROTECTED_PROFILE.post);
+  test("дефолтные значения распознаются как «источник не знает данных»", () => {
+    assert.equal(isDefaultRank(""), true);
+    assert.equal(isDefaultRank(null), true);
+    assert.equal(isDefaultRank("Курсант"), true);
+    assert.equal(isDefaultRank("Рядовой"), true);
+    assert.equal(isDefaultRank("Капитан"), false);
+    assert.equal(isDefaultRank("Майор"), false);
+
+    assert.equal(isDefaultUnit(null), true);
+    assert.equal(isDefaultUnit("не назначено"), true);
+    assert.equal(isDefaultUnit("Танковая рота"), false);
+
+    assert.equal(isDefaultPost(""), true);
+    assert.equal(isDefaultPost("—"), true);
+    assert.equal(isDefaultPost("КБМ"), false);
   });
 
-  test("поля, которых правка не касалась, не появляются", () => {
-    const changes = protectMemberUpdate({ name: "Иванов И. А." }, { rank: "Рядовой" });
-    assert.deepEqual(Object.keys(changes), ["rank"]);
-    assert.equal(changes.rank, PROTECTED_PROFILE.rank);
+  test("дефолт из источника не затирает сохранённое звание офицера", () => {
+    const changes = protectMemberUpdate(
+      { discordId: PROTECTED_DISCORD_ID },
+      { rank: "Рядовой", unit: "не назначено", post: "" },
+      { rank: "Капитан", unit: "Командование корпуса", post: "КБМ" }
+    );
+    assert.equal(changes.rank, "Капитан");
+    assert.equal(changes.unit, "Командование корпуса");
+    assert.equal(changes.post, "КБМ");
+  });
+
+  test("явное повышение из источника проходит без откатов", () => {
+    const changes = protectMemberUpdate(
+      { discordId: PROTECTED_DISCORD_ID },
+      { rank: "Майор", post: "Начальник штаба" },
+      { rank: "Капитан", post: "КБМ" }
+    );
+    assert.equal(changes.rank, "Майор");
+    assert.equal(changes.post, "Начальник штаба");
+  });
+
+  test("сохранять нечего — поле не попадает в UPDATE вовсе", () => {
+    const changes = protectMemberUpdate(
+      { name: "Иванов И. А." },
+      { rank: "Рядовой" },
+      { rank: "Курсант" }
+    );
+    assert.deepEqual(Object.keys(changes), []);
   });
 
   test("незащищённого бойца правка не меняет", () => {
@@ -160,18 +197,14 @@ describe("Защита карточки заместителя командир�
     assert.equal(changes.rank, "Рядовой");
   });
 
-  test("protectedRankFor отдаёт звание только для защищённой карточки", () => {
-    assert.equal(protectedRankFor({ discordId: PROTECTED_DISCORD_ID }), "Ст. Лейтенант");
-    assert.equal(protectedRankFor({ name: "Петров П. П." }), null);
-  });
-
-  test("resolveRankAndUnit игнорирует источник целиком, а не частично", () => {
+  test("resolveRankAndUnit берёт сохранённые значения вместо строки «Вакант»", () => {
     assert.deepEqual(
       resolveRankAndUnit(
         { discordId: PROTECTED_DISCORD_ID },
-        { rank: "Рядовой", unit: "Артиллерийский дивизион" }
+        { rank: "Рядовой", unit: "Артиллерийский дивизион" },
+        { rank: "Капитан", unit: "Танковая рота" }
       ),
-      { rank: PROTECTED_PROFILE.rank, unit: PROTECTED_PROFILE.unit }
+      { rank: "Капитан", unit: "Танковая рота" }
     );
     assert.deepEqual(
       resolveRankAndUnit({ name: "Петров П. П." }, { rank: "Рядовой", unit: "Танковая рота" }),

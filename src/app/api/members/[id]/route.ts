@@ -3,7 +3,12 @@ import { eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { members, logs, recruitApplications } from "@/db/schema";
 import { requireRosterEditor } from "@/lib/member-auth";
-import { MEMBER_STATUS, normalizeMemberStatus } from "@/lib/recruits";
+import {
+  ASSIGNABLE_UNITS,
+  MEMBER_STATUS,
+  normalizeMemberStatus,
+  RANKS,
+} from "@/lib/recruits";
 import { decideDiscordConflict } from "@/lib/discord-conflict";
 import { applyVacationRole, type VacationRoleOutcome } from "@/lib/vacation-roles";
 
@@ -24,7 +29,15 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const memberId = parseInt(id, 10);
   if (!Number.isFinite(memberId)) return NextResponse.json({ ok: false, error: "Некорректный ID" }, { status: 400 });
 
-  let body: { vacation?: boolean; vacationUntil?: string | null; discordId?: string | null };
+  let body: {
+    vacation?: boolean;
+    vacationUntil?: string | null;
+    discordId?: string | null;
+    /** Явная правка администратора/командира: звание, подразделение, должность */
+    rank?: string | null;
+    unit?: string | null;
+    post?: string | null;
+  };
   try { body = await req.json(); }
   catch { return NextResponse.json({ ok: false, error: "Некорректный JSON" }, { status: 400 }); }
 
@@ -91,6 +104,57 @@ export async function PATCH(req: NextRequest, { params }: Params) {
           : "дату возвращения (снята)"
       );
       detailsObj["Дата возвращения"] = valid ? valid.toISOString().slice(0, 10) : "не указана";
+    }
+  }
+
+  /**
+   * Явная правка звания, подразделения и должности.
+   *
+   * Это действие администратора или командира в панели, а не автоматика:
+   * значение принимается без «защитных» подстановок. Карточки командования
+   * тоже правятся — командир корпуса повышает офицера (например, до
+   * «Капитан») и меняет должность (например, на «КБМ») в любой момент.
+   * Фильтр от пустых дефолтов работает только в фоновых источниках
+   * (rs-red.com, сверка ШДС, заявка) — см. lib/protected-profiles.ts.
+   */
+  if (body.rank !== undefined) {
+    const rank = body.rank === null ? "" : String(body.rank).trim();
+    if (rank && !(RANKS as readonly string[]).includes(rank)) {
+      return NextResponse.json(
+        { ok: false, error: `Неизвестное звание «${rank}»` },
+        { status: 400 }
+      );
+    }
+    if (rank && rank !== oldMember.rank) {
+      set.rank = rank;
+      changesDescription.push(`звание на "${rank}"`);
+      detailsObj["Звание"] = rank;
+    }
+  }
+
+  if (body.unit !== undefined) {
+    const unit = body.unit === null ? "" : String(body.unit).trim();
+    if (unit && !ASSIGNABLE_UNITS.includes(unit)) {
+      return NextResponse.json(
+        { ok: false, error: `Неизвестное подразделение «${unit}»` },
+        { status: 400 }
+      );
+    }
+    const nextUnit = unit || null;
+    if (nextUnit !== oldMember.unit) {
+      set.unit = nextUnit;
+      changesDescription.push(`подразделение на "${nextUnit || "не назначено"}"`);
+      detailsObj["Подразделение"] = nextUnit || "не назначено";
+    }
+  }
+
+  if (body.post !== undefined) {
+    const post = body.post === null ? "" : String(body.post).trim();
+    const nextPost = post || null;
+    if (nextPost !== oldMember.post) {
+      set.post = nextPost;
+      changesDescription.push(`должность на "${nextPost || "не назначена"}"`);
+      detailsObj["Должность"] = nextPost || "не назначена";
     }
   }
 

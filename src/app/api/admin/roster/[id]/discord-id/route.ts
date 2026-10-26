@@ -30,6 +30,7 @@ import { requireRosterEditor } from "@/lib/member-auth";
 import { isCrossSiteRequest, isUnsafeMethod } from "@/lib/csrf";
 import {
   MEMBER_STATUS,
+  isCommandUnit,
   isUnit,
   isUnassignedUnit,
   normalizeMemberStatus,
@@ -87,6 +88,21 @@ async function syncSheet(
       skipped: true,
       error:
         "У бойца не назначено подразделение — запись в лист ШДС пропущена (ID сохранён только в базе панели)",
+    };
+  }
+
+  /**
+   * «Командование корпуса» живёт на отдельном листе «Командование АТК»,
+   * который панель только читает. Листа подразделения с таким названием нет,
+   * и resolveLayout бросил бы «неизвестное подразделение» — это не ошибка
+   * сохранения ID, поэтому шаг пропускается.
+   */
+  if (isCommandUnit(member.unit)) {
+    return {
+      ok: true,
+      skipped: true,
+      error:
+        "Служба в командовании корпуса: Discord ID сохранён в базе, строка ведётся на листе «Командование АТК»",
     };
   }
   try {

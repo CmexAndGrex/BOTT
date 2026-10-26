@@ -24,8 +24,13 @@ import {
   type SyncStatus,
 } from "@/lib/maintenance";
 import { getSettings, resolveCookie, setSettingQuiet } from "@/lib/settings";
-import { UNITS } from "@/lib/recruits";
-import { resolveRankAndUnit } from "@/lib/protected-profiles";
+import { isCommandUnit, normalizePersonName, UNITS } from "@/lib/recruits";
+import { isDefaultPost, isDefaultRank, resolveRankAndUnit } from "@/lib/protected-profiles";
+
+/** Ключ сравнения ФИО: та же нормализация, что при поиске дубля в составе */
+function normalizeNameKey(value: unknown): string {
+  return normalizePersonName(value).replace(/[^a-zа-я0-9]/g, "");
+}
 
 declare global {
   var __atkMaintenanceStarted: boolean | undefined;
@@ -228,15 +233,28 @@ export async function syncShdsRoster(): Promise<{
         if (!rank) continue;
 
         /**
-         * Защищённые карточки командования (Иванов И. А.) сверка не правит.
-         *
-         * Строка командования в ШДС стоит в шапке листа и при ручной уборке
-         * таблицы может попасть в «Вакант» — тогда в колонке звания оказывается
-         * «Рядовой», а лист дивизиона даёт и чужое подразделение. Для зама
-         * корпуса это означало понижение звания и перевод в артиллерию на
-         * каждом цикле синхронизации.
+         * Боец закреплён за «Командованием корпуса»: его звание и должность
+         * ведёт лист «Командование АТК» (шаг 1b выше). Лист подразделения для
+         * него — не источник (там лишь плашка внизу состава), и брать оттуда
+         * звание и подразделение нельзя: офицер уехал бы в роту/дивизион.
          */
-        const resolved = resolveRankAndUnit(fighter, { rank, unit });
+        if (isCommandUnit(fighter.unit)) continue;
+
+        /**
+         * Защищённые карточки командования (Иванов И. А.) не должны терять
+         * звание и подразделение из-за строки «Вакант» на листе подразделения:
+         * там может стоять «Рядовой» и чужой лист.
+         *
+         * НО: фильтр отсекает только дефолты. Если штаб правит звание или
+         * должность офицера, изменение проходит — см. resolveRankAndUnit.
+         * Явная правка должности и звания — из панели и с листа
+         * «Командование АТК» (шаг 1b ниже).
+         */
+        const resolved = resolveRankAndUnit(
+          fighter,
+          { rank, unit },
+          { rank: fighter.rank, unit: fighter.unit, post: fighter.post }
+        );
 
         // Пишем только реальные изменения: иначе каждый проход трогал бы весь
         // состав и забивал журнал записями «обновлено 40 бойцов».
@@ -252,6 +270,59 @@ export async function syncShdsRoster(): Promise<{
     } catch (e) {
       warnings.push(`лист «${unit}»: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+
+  /**
+   * 1b. Звание и должность командования корпуса — с листа «Командование АТК».
+   *
+   * Лист читается отдельно от листов подразделений: у него своя раскладка
+   * (B — звание, C — ФИО, D — должность, E/F — Steam/Discord). Именно здесь
+   * командир корпуса ведёт звания и должности офицеров, поэтому значения
+   * колонок B и D применяются НАПРЯМУЮ — это явная правка, а не дефолт
+   * автоматики. Пустая ячейка или дефолт («Рядовой», «—») не затирает
+   * сохранённое значение: штаб мог не заполнить строку.
+   *
+   * Ошибка чтения листа не отменяет сверку подразделений: попадает в warnings.
+   */
+  let commandUpdated = 0;
+  try {
+    const { readCommandSheet } = await import("@/lib/gsheets");
+    const commandRows = await readCommandSheet({ fresh: true });
+
+    for (const row of commandRows) {
+      const nameKey = normalizeNameKey(row.name);
+      if (!nameKey) continue;
+
+      const target = sheetMembers.find(
+        (member) =>
+          normalizeNameKey(member.name) === nameKey ||
+          (row.discordId && String(member.discordId ?? "").trim() === row.discordId)
+      );
+      if (!target) continue;
+
+      const nextRank = row.rank.trim();
+      const nextPost = row.post.trim();
+
+      const set: { rank?: string; post?: string; updatedAt?: Date } = {};
+      if (nextRank && !isDefaultRank(nextRank) && nextRank !== (target.rank ?? "")) {
+        set.rank = nextRank;
+      }
+      if (nextPost && !isDefaultPost(nextPost) && nextPost !== (target.post ?? "")) {
+        set.post = nextPost;
+      }
+      if (!set.rank && !set.post) continue;
+
+      await db
+        .update(members)
+        .set({ ...set, updatedAt: new Date() })
+        .where(eq(members.id, target.id));
+      commandUpdated++;
+    }
+    readSheets++;
+  } catch (e) {
+    warnings.push(
+      `лист «Командование АТК»: ${e instanceof Error ? e.message : String(e)}`
+    );
   }
 
   /**
@@ -311,6 +382,13 @@ export async function syncShdsRoster(): Promise<{
       .map((member) => {
         const unit = memberUnit(member);
         if (!unit) return null;
+        /**
+         * Бойцы «Командования корпуса» не вписываются в листы подразделений:
+         * их строки живут на отдельном листе «Командование АТК», и запись в
+         * «Вакант» роты/дивизиона была бы дублем. Без этой проверки каждый
+         * проход давал бы предупреждение «неизвестное подразделение».
+         */
+        if (isCommandUnit(unit)) return null;
         return {
           name: String(member.name ?? "").trim(),
           unit,
@@ -351,6 +429,7 @@ export async function syncShdsRoster(): Promise<{
   const ok = readSheets > 0;
   const detail =
     `Прочитано листов: ${readSheets}, обновлено бойцов: ${updated}, ` +
+    `командование (лист АТК): ${commandUpdated}, ` +
     `дописано в «Вакант»: ${added}, перенесено оценок из запаса: ${gradesCopied}, ` +
     `очищено строк командования: ${clearedRows}, исправлено Steam ID: ${steamFixed}, ` +
     `приведено должностей: ${postsFixed}, перенесено в свою секцию: ${sectionsMoved}` +

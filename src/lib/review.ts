@@ -21,7 +21,7 @@ import {
   type DmResult,
 } from "@/lib/discord";
 import type { DiscordEmbed } from "@/lib/discord";
-import { PROTECTED_PROFILE, protectedRankFor } from "@/lib/protected-profiles";
+import { isDefaultRank, isProtectedFighter } from "@/lib/protected-profiles";
 import {
   BERET_CODE,
   buildRecruitApplicationMessage,
@@ -51,6 +51,7 @@ import { generateTempPassword } from "@/lib/temp-password";
 import {
   APPLICATION_KIND_RESERVE_RETURN,
   CORPS_ROLE_NAME,
+  isCommandUnit,
   isEnlistmentRank,
   isUnassignedUnit,
   isUnit,
@@ -443,6 +444,12 @@ async function writeMemberToShds(memberId: number, callsign: string): Promise<st
     const [member] = await db.select().from(members).where(eq(members.id, memberId));
     if (!member) return "боец для записи в ШДС не найден";
     if (!member.unit) return "подразделение не назначено — строку в ШДС заведёт штаб";
+    // Командование корпуса ведётся листом «Командование АТК», а не листами
+    // подразделений: resolveLayout такое название не знает, и «Добавление в
+    // ШДС» упало бы с ошибкой на пустом месте.
+    if (isCommandUnit(member.unit)) {
+      return "служба в командовании корпуса — строка ведётся на листе «Командование АТК»";
+    }
 
     const { applyShdsRequest, SHDS_ACTIONS } = await import("@/lib/gsheets");
     const result = await applyShdsRequest({
@@ -845,8 +852,6 @@ export async function approveRecruitApplication(
     if (isRetry) {
       memberId = lookup.member.id;
       tempPassword = generateTempPassword();
-      /** Постоянное звание защищённой карточки (null — боец не защищён) */
-      const protectedRank = protectedRankFor(lookup.member);
       /**
        * Карточка из /apply уже существует, но стоит в `pending`: без перевода
        * в active выданный пароль бесполезен — вход в кабинет закрыт до
@@ -868,15 +873,17 @@ export async function approveRecruitApplication(
            * Звание «Курсант» (значение по умолчанию при создании рапорта)
            * меняется на «Рядовой» — именно это звание записывается в ШДС и
            * висит ролью на сервере.
+           *
+           * Защищённая карточка командования (Иванов И. А.): заявка не имеет
+           * права затирать звание и подразделение дефолтами («Курсант»,
+           * «Рядовой», подразделение из формы). Уже сохранённые значения
+           * (в том числе «Капитан» и смена должности приказом) остаются как
+           * есть — заявка их не трогает вовсе.
            */
-          /**
-           * Защищённая карточка командования (Иванов И. А.): ни подразделение,
-           * ни звание заявкой не меняются. Повторное одобрение рапорта иначе
-           * переписало бы «Ст. Лейтенант» на присланное «Курсант»/«Рядовой» и
-           * перевело зама корпуса в подразделение из формы.
-           */
-          ...(protectedRank
-            ? { rank: protectedRank, unit: PROTECTED_PROFILE.unit }
+          ...(isProtectedFighter(lookup.member)
+            ? isDefaultRank(lookup.member.rank)
+              ? { rank: RECRUIT_RANK }
+              : {}
             : {
                 ...(chosenUnit && isUnassignedUnit(lookup.member.unit) ? { unit: chosenUnit } : {}),
                 rank: application.rank || lookup.member.rank || RECRUIT_RANK,
@@ -923,12 +930,11 @@ export async function approveRecruitApplication(
       if (existing) {
         memberId = existing.id;
         /**
-         * Защищённое звание: если боец — зам командира корпуса, все ветки
-         * обновления ниже обязаны сохранить его постоянные данные. Иначе
-         * одобрение любой заявки «приводит» его к «Рядовому» и подставляет
-         * подразделение из формы.
+         * Защищённая карточка командования: заявка не затирает звание и
+         * подразделение дефолтами. Сохранённое значение (в том числе
+         * повышенное приказом) остаётся; поля трогает только явная правка.
          */
-        const protectedRank = protectedRankFor(existing);
+        const protectedCard = isProtectedFighter(existing);
 
         /**
          * Логин у существующей карточки. У строк синхронизации rs-red.com
@@ -1011,12 +1017,16 @@ export async function approveRecruitApplication(
              */
             /**
              * Подразделение и звание: для защищённой карточки командования
-             * (Иванов И. А.) значения возвращаются к постоянным, заявка их не
-             * меняет. Для остальных — прежнее правило: пустое подразделение
-             * заполняется из заявки, «Курсант» приводится к «Рядовому».
+             * (Иванов И. А.) заявка поля не трогает вовсе — ни звание, ни
+             * подразделение. Значение «Курсант»/пустое доводится до «Рядового»
+             * только у обычных бойцов: у офицера это был бы сброс приказа.
+             * Присвоенное звание (например, «Капитан») сохраняется в любом
+             * случае — заявка не понижает бойца.
              */
-            ...(protectedRank
-              ? { unit: PROTECTED_PROFILE.unit, rank: protectedRank }
+            ...(protectedCard
+              ? isDefaultRank(existing.rank)
+                ? { rank: RECRUIT_RANK }
+                : {}
               : {
                   ...(chosenUnit && isUnassignedUnit(existing.unit) ? { unit: chosenUnit } : {}),
                   // Звание «Курсант»/пустое → «Рядовой»: именно его ждёт ШДС и роль

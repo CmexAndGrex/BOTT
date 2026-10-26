@@ -31,6 +31,8 @@ export async function GET(req: NextRequest) {
         discordId: members.discordId,
         avatarUrl: members.avatarUrl,
         rank: members.rank,
+        /** Должность: правится из панели, как и звание (приказ по офицеру) */
+        post: members.post,
         unit: members.unit,
         status: members.status,
         role: members.role,

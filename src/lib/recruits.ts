@@ -106,6 +106,27 @@ export const UNIT_LABELS: Record<Unit, string> = {
 };
 
 /**
+ * Подразделение «Командование корпуса».
+ *
+ * Отдельная величина, а НЕ элемент UNITS: UNITS — это листы Google Таблицы
+ * (resolveLayout в gsheets.ts знает только «танк» и «дивизион»), и добавление
+ * третьего значения туда сломало бы запись в ШДС. Командование корпуса ведётся
+ * отдельным листом «Командование АТК», поэтому значение живёт рядом, а не
+ * внутри перечня листов подразделений.
+ */
+export const COMMAND_UNIT = "Командование корпуса" as const;
+
+/** Все значения, которые администратор может назначить бойцу в панели */
+export const ASSIGNABLE_UNITS: readonly string[] = [...UNITS, COMMAND_UNIT];
+
+/** Значение подразделения — «Командование корпуса» (в любом написании АТК) */
+export function isCommandUnit(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const text = value.trim().toLowerCase();
+  return text === COMMAND_UNIT.toLowerCase() || text === "командование атк";
+}
+
+/**
  * Звание, которое получает новобранец при зачислении.
  *
  * Отличается от DEFAULT_RANK («Курсант», звание по умолчанию при создании

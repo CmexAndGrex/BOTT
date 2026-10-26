@@ -12,12 +12,12 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ClipboardCheck, ShieldAlert, ThumbsUp, ThumbsDown, RefreshCw } from "lucide-react";
 import { Section, Spinner } from "@/components/ui";
 import {
+  ASSIGNABLE_UNITS,
   MEMBER_ROLES,
   MEMBER_STATUS,
   RANKS,
   ROLE_LABELS,
   statusLabel,
-  UNITS,
   type MemberRole,
   type MemberStatus,
 } from "@/lib/recruits";
@@ -29,6 +29,8 @@ type Recruit = {
   discordId: string | null;
   avatarUrl: string | null;
   rank: string;
+  /** Должность: правится штабом — приказ по офицеру (например, «КБМ») */
+  post: string | null;
   unit: string | null;
   status: MemberStatus;
   role: MemberRole;
@@ -112,6 +114,8 @@ export default function AdminRecruitsPage() {
         callsign: valueOf(recruit, "callsign"),
         discordId: valueOf(recruit, "discordId"),
         rank: valueOf(recruit, "rank"),
+        // Должность уходит в тот же PATCH: правка звания и должности — один приказ
+        post: valueOf(recruit, "post"),
         unit: valueOf(recruit, "unit"),
         role: valueOf(recruit, "role"),
       };
@@ -326,7 +330,7 @@ return (
                 </div>
               )}
 
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-3 lg:grid-cols-6">
                 <div>
                   <label className="label mb-1.5 block">Позывной</label>
                   <input
@@ -359,6 +363,15 @@ return (
                   </select>
                 </div>
                 <div>
+                  <label className="label mb-1.5 block">Должность</label>
+                  <input
+                    className="input w-full"
+                    value={valueOf(recruit, "post")}
+                    placeholder="например, КБМ"
+                    onChange={(e) => patchDraft(recruit.id, "post", e.target.value)}
+                  />
+                </div>
+                <div>
                   <label className="label mb-1.5 block">Подразделение</label>
                   <select
                     className="select w-full"
@@ -366,7 +379,9 @@ return (
                     onChange={(e) => patchDraft(recruit.id, "unit", e.target.value)}
                   >
                     <option value="">не назначено</option>
-                    {UNITS.map((unit) => (
+                    {/* Командование корпуса — отдельный лист «Командование АТК»;
+                        администратор вправе перевести офицера в любое из трёх */}
+                    {ASSIGNABLE_UNITS.map((unit) => (
                       <option key={unit} value={unit}>
                         {unit}
                       </option>
