@@ -9,18 +9,18 @@
 
 
 /* ------------------------------------------------------------------ */
-/* Позывной (он же логин)                                              */
+/* Логин для входа на сайт (поле callsign)                             */
 /* ------------------------------------------------------------------ */
 
-/** Минимальная длина позывного */
+/** Минимальная длина логина */
 export const CALLSIGN_MIN_LENGTH = 3;
-/** Максимальная длина позывного (как и логинов панели) */
+/** Максимальная длина логина (как и логинов панели) */
 export const CALLSIGN_MAX_LENGTH = 32;
 
 /**
- * Приводит введённый позывной к каноническому виду: обрезает пробелы по краям
- * и схлопывает внутренние. Регистр НЕ трогаем — позывной виден в табеле и
- * Google Таблице так, как его написал боец («Скиф» ≠ «скиф»).
+ * Приводит введённый логин к каноническому виду: обрезает пробелы по краям
+ * и схлопывает внутренние. Регистр НЕ трогаем — логин виден в табеле так,
+ * как его написал боец («Скиф» ≠ «скиф»).
  */
 export function normalizeCallsign(value: unknown): string {
   if (typeof value !== "string") return "";
@@ -28,25 +28,26 @@ export function normalizeCallsign(value: unknown): string {
 }
 
 /**
- * Проверка позывного по формату ШДС.
+ * Проверка логина для входа на сайт.
  *
- * Допускаются буквы (кириллица/латиница), цифры, пробел, точка, дефис и
- * подчёркивание: в таблице встречаются позывные вида «Скиф», «Гром-2»,
- * «Штурман 1». Спецсимволы и эмодзи отсекаются — они ломают поиск по листу
- * и позволяют создать визуально неотличимый логин.
- * Позывной должен содержать хотя бы одну букву (не может быть только цифрами).
+ * Логин — НЕ позывной: в колонку ФИО ШДС пишется русское ФИО бойца, а логин
+ * служит только для входа в личный кабинет. Допускаются латинские буквы,
+ * цифры, точка, дефис и подчёркивание (пробел убран: логин вводится в форму
+ * входа целиком). Спецсимволы и эмодзи отсекаются — они позволяют создать
+ * визуально неотличимый логин. Логин должен содержать хотя бы одну букву
+ * (не может быть только цифрами).
  */
 export function isCallsign(value: unknown): boolean {
   const callsign = normalizeCallsign(value);
   if (callsign.length < CALLSIGN_MIN_LENGTH || callsign.length > CALLSIGN_MAX_LENGTH) {
     return false;
   }
-  // Разрешены буквы, цифры, пробелы, точка, дефис, подчёркивание
-  if (!/^[\wА-Яа-яЁё.\- ]+$/u.test(callsign)) {
+  // Разрешены латинские буквы, цифры, точка, дефис, подчёркивание
+  if (!/^[a-zA-Z0-9._-]+$/.test(callsign)) {
     return false;
   }
-  // Позывной должен содержать хотя бы одну букву
-  return /[a-zA-ZА-Яа-яЁё]/.test(callsign);
+  // Логин должен содержать хотя бы одну букву
+  return /[a-zA-Z]/.test(callsign);
 }
 
 /* ------------------------------------------------------------------ */
@@ -191,6 +192,14 @@ export const MEMBER_STATUS = {
   ACTIVE: "active",
   /** В отпуске — доступ к кабинету сохраняется */
   VACATION: "vacation",
+  /**
+   * В запасе — строка ШДС перенесена на лист «Запас», кабинет закрыт.
+   *
+   * Отдельное значение, а не «dismissed»: по нему табель и досье показывают
+   * «В резерве» (а не «выбыл»), а возврат из запаса восстанавливает статус
+   * active. При этом вход в кабинет закрыт — как при исключении.
+   */
+  RESERVE: "reserve",
   /** Рапорт отклонён / боец исключён — вход закрыт */
   DISMISSED: "dismissed",
 } as const;
@@ -208,6 +217,7 @@ export const STATUS_LABELS: Record<MemberStatus, string> = {
   pending: "На рассмотрении",
   active: "В строю",
   vacation: "Отпуск",
+  reserve: "В резерве",
   dismissed: "Отклонён",
 };
 
@@ -305,7 +315,14 @@ const VACATION_LIKE_STATUSES: ReadonlySet<string> = new Set([
   "отпуск",
 ]);
 
-/** Канонические статусы исключения */
+/** Канонические статусы запаса (вход в кабинет закрыт, но боец — не «выбыл») */
+const RESERVE_LIKE_STATUSES: ReadonlySet<string> = new Set([
+  "reserve",
+  "в запасе",
+  "запас",
+]);
+
+/** Канонические статусы исключения (вход в кабинет закрыт) */
 const DISMISSED_LIKE_STATUSES: ReadonlySet<string> = new Set([
   "dismissed",
   "excluded",
@@ -326,6 +343,12 @@ export function normalizeMemberStatus(value: unknown): MemberStatus {
   if (!token) return MEMBER_STATUS.PENDING;
   if (ACTIVE_LIKE_STATUSES.has(token)) return MEMBER_STATUS.ACTIVE;
   if (VACATION_LIKE_STATUSES.has(token)) return MEMBER_STATUS.VACATION;
+  // «reserve» — самостоятельный статус: он входит в DISMISSED_LIKE (кабинет
+  // закрыт), но канонизируется в себя, чтобы табель различал «в резерве»
+  // и «выбыл» — по этому признаку досье рисует серую пилюлю вместо красной.
+  // Проверка идёт ДО DISMISSED_LIKE: «в запасе» и «запас» тоже сводятся
+  // к reserve, а не к dismissed
+  if (RESERVE_LIKE_STATUSES.has(token)) return MEMBER_STATUS.RESERVE;
   if (DISMISSED_LIKE_STATUSES.has(token)) return MEMBER_STATUS.DISMISSED;
   return MEMBER_STATUS.PENDING;
 }
@@ -348,8 +371,10 @@ export function isRosterActive(member: {
 }): boolean {
   // Снятый флаг — выбывший, даже если статус не успели поправить
   if (member.active === false) return false;
-  // Исключённый не числится в составе, даже если флаг забыли снять
-  return normalizeMemberStatus(member.status) !== MEMBER_STATUS.DISMISSED;
+  // Исключённый и запасник не числятся в составе, даже если флаг забыли
+  // снять: строка ШДС у обоих уехала с листа подразделения
+  const status = normalizeMemberStatus(member.status);
+  return status !== MEMBER_STATUS.DISMISSED && status !== MEMBER_STATUS.RESERVE;
 }
 
 /**

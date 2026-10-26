@@ -162,14 +162,25 @@ export function statusTrackingFields(
   const was = String(previousStatus ?? "");
   const next = String(nextStatus ?? "");
 
-  if (next === "dismissed") {
-    if (was === "dismissed") return {};
+  /**
+   * Статусы выбытия: dismissed (уволен) и reserve (в запасе).
+   *
+   * Оба закрывают доступ к кабинету и запускают контроль снятия ролей
+   * Discord: запасник уходит с той же ролью подразделения на сервере, и
+   * через сутки комсоставу придёт напоминание, если её не снимут. Смена
+   * «dismissed → reserve» и обратно не перезаписывает момент: это правка
+   * формулировки выбытия, а не новое выбытие.
+   */
+  const isGone = (status: string): boolean => status === "dismissed" || status === "reserve";
+
+  if (isGone(next)) {
+    if (isGone(was)) return {};
     return { dismissedAt: now, rolesAlertSentAt: null };
   }
 
   // Возвращение в строй: и момент исключения, и признак отправленного
   // напоминания снимаются — при следующем исключении отсчёт начнётся заново.
-  if (was === "dismissed") {
+  if (isGone(was)) {
     return { dismissedAt: null, rolesAlertSentAt: null };
   }
 

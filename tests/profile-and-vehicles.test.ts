@@ -31,12 +31,15 @@ import {
   buildInfoQuery,
   buildPlayerQuery,
   DEFAULT_QUERY_PORT,
+  matchLiveName,
   matchPlayersToMembers,
+  normalizeForLiveMatch,
   normalizePlayerName,
   parseInfoResponse,
   parsePlayerResponse,
   queryServer,
   readResponseKind,
+  selfOnServer,
   stripClanTag,
   type ServerPlayer,
 } from "@/lib/a2s.ts";
@@ -863,6 +866,63 @@ describe("A2S: сопоставление игроков с табелем", () 
       { index: 0, rawName: "[ATK] Скиф", name: "Скиф", score: 0, duration: 0 },
     ];
     assert.deepEqual(matchPlayersToMembers(players, []), []);
+  });
+});
+
+describe("A2S: живое сопоставление по ФИО (normalizeForLiveMatch)", () => {
+  test("канонизация срезает звание, точки и регистр", () => {
+    assert.equal(normalizeForLiveMatch("Ряд. Волков Д.В."), "волковдв");
+    assert.equal(normalizeForLiveMatch("Ст. лейтенант Иванов И.А."), "ивановиа");
+    assert.equal(normalizeForLiveMatch("Волков Д. В."), "волковдв");
+    assert.equal(normalizeForLiveMatch("волковдв"), "волковдв");
+    assert.equal(normalizeForLiveMatch("Гв. Ряд. Простов Н.А."), "простовна");
+    assert.equal(normalizeForLiveMatch("Скиф"), "скиф");
+    assert.equal(normalizeForLiveMatch(""), "");
+  });
+
+  test("matchLiveName находит ФИО со званием и инициалами", () => {
+    assert.ok(matchLiveName("Ряд. Волков Д.В.", "Волков Д.В."));
+    assert.ok(matchLiveName("[ATK] Ст. лейтенант Иванов И.А.", "Иванов И.А."));
+    assert.ok(matchLiveName("Волков", "Волков Д.В."));
+    assert.ok(matchLiveName("Волков Д.В.", "Волков Денис Викторович"));
+    assert.ok(matchLiveName("Эпов С.А.", "Эпов Сергей Александрович"));
+  });
+
+  test("matchLiveName не путает однофамильцев с другими инициалами", () => {
+    assert.ok(!matchLiveName("Волков А.В.", "Волков Д.В."));
+    assert.ok(!matchLiveName("Иванов И.Б.", "Иванов И.А."));
+    assert.ok(!matchLiveName("Громов", "Волков Д.В."));
+    assert.ok(!matchLiveName("", "Волков Д.В."));
+    assert.ok(!matchLiveName("Волков Д.В.", ""));
+  });
+
+  test("бойцы, сидящие на сервере под ФИО, находятся в табеле", () => {
+    const roster = [
+      { id: 1, callsign: "Volkov", name: "Волков Д.В.", rank: "Полковник", division: "Командование АТК" },
+      { id: 2, callsign: "IvanovIA", name: "Иванов И.А.", rank: "Старший лейтенант", division: "Танковая рота" },
+      { id: 3, callsign: "Gripovskiy", name: "Гриповский Д.А.", rank: "Рядовой", division: "Танковая рота" },
+      { id: 4, callsign: "Скиф", name: "Скиф", rank: "Рядовой", division: "Танковая рота" },
+    ];
+    const players: ServerPlayer[] = [
+      { index: 0, rawName: "Ряд. Волков Д.В.", name: "Ряд. Волков Д.В.", score: 0, duration: 0 },
+      { index: 1, rawName: "[ATK] Ст. лейтенант Иванов И.А.", name: "Ст. лейтенант Иванов И.А.", score: 0, duration: 0 },
+      { index: 2, rawName: "Гриповский Д.А.", name: "Гриповский Д.А.", score: 0, duration: 0 },
+      { index: 3, rawName: "[ATK] Скиф", name: "Скиф", score: 0, duration: 0 },
+      { index: 4, rawName: "Чужой Игрок", name: "Чужой Игрок", score: 0, duration: 0 },
+    ];
+    const found = matchPlayersToMembers(players, roster);
+    assert.deepEqual(
+      found.map((entry) => entry.id),
+      [1, 2, 3, 4]
+    );
+  });
+
+  test("selfOnServer отвечает «в бою» и по ФИО, а не только по позывному", () => {
+    const players: ServerPlayer[] = [
+      { index: 0, rawName: "Ряд. Волков Д.В.", name: "Ряд. Волков Д.В.", score: 0, duration: 0 },
+    ];
+    assert.ok(selfOnServer(players, { id: 1, callsign: "Volkov", name: "Волков Д.В." }));
+    assert.ok(!selfOnServer(players, { id: 2, callsign: "Grom", name: "Громов П.П." }));
   });
 });
 

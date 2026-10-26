@@ -420,10 +420,155 @@ export function matchCallsign(playerName: unknown, callsign: unknown): boolean {
   return Boolean(player) && player === fighter;
 }
 
+/* ------------------------------------------------------------------ */
+/* Живое сопоставление: ник на сервере ↔ ФИО из табеля                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Армейские префиксы слотов Arma 3, которые пишут перед ником:
+ * «Ряд. Волков Д.В.», «Ст. лейтенант Иванов И.А.».
+ *
+ * Варианты перечислены от длинных к коротким: «ст. лейтенант» обязан
+ * проверяться раньше «лейтенанта», иначе срез остался бы на «ст.».
+ */
+const RANK_PREFIX = new RegExp(
+  "^(?:" +
+    [
+      "генерал\\.?",
+      "полковник\\.?",
+      "полк\\.?",
+      "подполковник\\.?",
+      "подполк\\.?",
+      "майор\\.?",
+      "капитан\\.?",
+      "ст\\.?\\s*лейтенант\\.?",
+      "лейтенант\\.?",
+      "ст\\.?\\s*прапорщик\\.?",
+      "прапорщик\\.?",
+      "старшина\\.?",
+      "ст\\.?\\s*серж\\.?",
+      "сержант\\.?",
+      "мл\\.?\\s*серж\\.?",
+      "серж\\.?",
+      "ефр\\.?",
+      "ряд\\.?",
+      "курсант\\.?",
+      "гв\\.?",
+    ].join("|") +
+    ")\\s+",
+  "i"
+);
+
+/**
+ * Канонический ключ для «живого» сопоставления ника с сервера и ФИО/позывного
+ * из БД.
+ *
+ * Срезает армейские префиксы слотов (до двух подряд: «Гв. Ряд. …»), приводит к
+ * нижнему регистру, сводит «ё» к «е» и убирает всё, кроме букв и цифр:
+ * «Ряд. Волков Д.В.», «Волков Д. В.» и «волковдв» — один и тот же ключ.
+ */
+export function normalizeForLiveMatch(raw: string): string {
+  let text = String(raw ?? "")
+    .replace(/\u00A0/g, " ")
+    .trim();
+  for (let i = 0; i < 2; i++) {
+    const next = text.replace(RANK_PREFIX, "");
+    if (next === text) break;
+    text = next.trim();
+  }
+  return text
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^a-zа-я0-9]/gi, "");
+}
+
+/**
+ * Армейские звания как отдельные «слова» — для токенизации.
+ *
+ * После разбиения по не-буквам «Ст. серж.» превращается в токены «ст» и
+ * «серж», и оба обязаны отбрасываться с начала ника, иначе фамилия
+ * сдвигалась бы на звание и нечёткое сравнение ломалось.
+ */
+const RANK_TOKENS = new Set([
+  "генерал", "ген", "полковник", "полк", "подполковник", "подполк",
+  "майор", "капитан", "лейтенант", "прапорщик", "старшина",
+  "сержант", "серж", "мл", "ст", "ефр", "ряд", "курсант", "гв",
+]);
+
+/**
+ * Ник, разбитый на «слова»: теги и украшения сняты, регистр и «ё» приведены,
+ * звание с начала отброшено.
+ *
+ * «[ATK] Ряд. Волков Д.В.» → ["волков", "д", "в"]. Токены нужны нечёткому
+ * сравнению: фамилия обязана совпасть целиком, а инициалы — по первой букве.
+ */
+export function liveTokens(raw: string): string[] {
+  const cleaned = stripEdgeTags(String(raw ?? "").replace(/\u00A0/g, " ")).trim();
+  const tokens = cleaned
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .split(/[^a-zа-я0-9]+/)
+    .filter(Boolean);
+  while (tokens.length > 1 && RANK_TOKENS.has(tokens[0])) tokens.shift();
+  return tokens;
+}
+
+/**
+ * Совместимы ли токены ника игрока с токенами ФИО бойца.
+ *
+ * Правила: фамилия (первый токен) совпадает целиком; дальше сравниваются
+ * попарно — равные токены проходят, а короткий токен (инициал) засчитывается,
+ * если совпадает первая буква («д» ~ «денисович»). Игрок, назвавшийся одной
+ * фамилией («Волков»), тоже находится: на сервере часто сидят без инициалов.
+ */
+function tokensCompatible(playerTokens: string[], memberTokens: string[]): boolean {
+  if (playerTokens.length === 0 || memberTokens.length === 0) return false;
+  if (playerTokens[0] !== memberTokens[0]) return false;
+
+  const pairs = Math.min(playerTokens.length, memberTokens.length) - 1;
+  for (let i = 1; i <= pairs; i++) {
+    const player = playerTokens[i];
+    const member = memberTokens[i];
+    if (player === member) continue;
+    if (player.length === 1 || member.length === 1) {
+      if (player[0] === member[0]) continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Сопоставление ника игрока с ФИО бойца из табеля.
+ *
+ * Сначала — точное совпадение канонических ключей (normalizeForLiveMatch),
+ * затем нечёткое по фамилии и инициалам: «Ряд. Волков Д.В.» находит бойца
+ * «Волков Денис Викторович», а «Волков А.В.» — не находит «Волкова Д.В.».
+ */
+export function matchLiveName(playerName: unknown, memberName: unknown): boolean {
+  const playerRaw = String(playerName ?? "").trim();
+  const memberRaw = String(memberName ?? "").trim();
+  if (!playerRaw || !memberRaw) return false;
+
+  const playerKey = normalizeForLiveMatch(playerRaw);
+  const memberKey = normalizeForLiveMatch(memberRaw);
+  if (!playerKey || !memberKey) return false;
+  if (playerKey === memberKey) return true;
+
+  return tokensCompatible(liveTokens(playerRaw), liveTokens(memberRaw));
+}
+
 /** Боец состава для сопоставления (минимально необходимое) */
 export type RosterEntry = {
   id: number;
   callsign: string;
+  /**
+   * ФИО из табеля («Волков Д.В.») — второй ключ сопоставления.
+   *
+   * На сервере бойцы часто сидят под ФИО со званием, а позывной в БД другой:
+   * без этого ключа Волков Д.В. «не находился» на сервере, хотя был в игре.
+   */
+  name?: string | null;
   rank: string;
   division: string | null;
 };
@@ -440,21 +585,33 @@ export function matchPlayersToMembers(
   players: readonly ServerPlayer[],
   roster: readonly RosterEntry[]
 ): RosterEntry[] {
-  const byName = new Map<string, RosterEntry>();
+  const byCallsign = new Map<string, RosterEntry>();
+  const byName: RosterEntry[] = [];
   for (const entry of roster) {
     const key = callsignKey(entry.callsign);
     // Первый в табеле важнее: дубликат позывного не должен «перебивать» запись,
     // которую уже нашли (однофамильцы с одинаковым позывным в ШДС встречаются).
-    if (key && !byName.has(key)) byName.set(key, entry);
+    if (key && !byCallsign.has(key)) byCallsign.set(key, entry);
+    // ФИО — второй ключ: бойцы на сервере часто сидят под ФИО со званием,
+    // и позывной их там не написан
+    const fullName = (entry.name ?? "").trim();
+    if (fullName && fullName !== entry.callsign) byName.push(entry);
   }
 
   const found: RosterEntry[] = [];
   const seen = new Set<number>();
 
   for (const player of players) {
-    const key = callsignKey(player.name || stripClanTag(player.rawName));
-    if (!key) continue;
-    const entry = byName.get(key);
+    const raw = player.name || stripClanTag(player.rawName);
+    if (!raw) continue;
+
+    // Сначала точное совпадение позывного, затем ФИО (точный ключ и нечёткое
+    // сравнение фамилии с инициалами)
+    const key = callsignKey(raw);
+    let entry = key ? byCallsign.get(key) : undefined;
+    if (!entry) {
+      entry = byName.find((candidate) => matchLiveName(raw, candidate.name));
+    }
     if (!entry || seen.has(entry.id)) continue;
     seen.add(entry.id);
     found.push(entry);
@@ -474,11 +631,19 @@ export function matchPlayersToMembers(
  */
 export function selfOnServer(
   players: readonly ServerPlayer[],
-  member: { id: number; callsign: string }
+  member: { id: number; callsign: string; name?: string | null }
 ): boolean {
   if (players.some((player) => matchCallsign(player.rawName, member.callsign))) return true;
+  // ФИО передаётся вместе с позывным: боец, сидящий на сервере под ФИО,
+  // тоже должен увидеть зелёный «в бою»
   const matched = matchPlayersToMembers(players, [
-    { id: member.id, callsign: member.callsign, rank: "", division: null },
+    {
+      id: member.id,
+      callsign: member.callsign,
+      name: member.name ?? null,
+      rank: "",
+      division: null,
+    },
   ]);
   return matched.length > 0;
 }
@@ -681,6 +846,8 @@ export type SelfMember = {
   id: number;
   /** Позывной из сессии: он же имя бойца в табеле и в ШДС */
   callsign: string;
+  /** ФИО из табеля: ник на сервере может быть ФИО, а не позывным */
+  name?: string | null;
 };
 
 export async function garrisonStatus(
@@ -697,10 +864,17 @@ export async function garrisonStatus(
   const result = await queryServer(options);
 
   const clanMembersOnline = matchPlayersToMembers(result.players, roster);
-  const matched = new Set(clanMembersOnline.map((entry) => callsignKey(entry.callsign)));
+  // Найденные бойцы исключаются из «неопознанных» по любому из ключей —
+  // позывному и ФИО: ник на сервере может быть записан иначе, чем в табеле
   const unknownPlayers = result.players
     .map((player) => player.name || stripClanTag(player.rawName))
-    .filter((name) => name && !matched.has(callsignKey(name)));
+    .filter(
+      (name) =>
+        name &&
+        !clanMembersOnline.some(
+          (entry) => matchCallsign(name, entry.callsign) || matchLiveName(name, entry.name)
+        )
+    );
 
   const member = options.member ?? null;
   // Сервер оффлайн — бойца на нём заведомо нет: без проверки online устаревший

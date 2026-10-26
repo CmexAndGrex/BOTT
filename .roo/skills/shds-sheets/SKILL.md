@@ -21,6 +21,8 @@ description: Use when modifying Google Sheets synchronization, SHDS parsing, col
   - ИХ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО вносить в «Вакант» на листах ТР и АД!
 
 ## 2. Правила форматирования
-- Никогда не использовать `applyStdFormat`, `PASTE_FORMAT` или перезапись шрифта.
-- Менять ТОЛЬКО цвет заливки: `userEnteredFormat.backgroundColor`.
+- Никогда не использовать `applyStdFormat` или `PASTE_FORMAT`.
+- Заливки — ТОЛЬКО цвет фона: `userEnteredFormat.backgroundColor` (fields запроса — ровно это поле).
+- Эталонный шрифт ячеек ШДС — `SHDS_TEXT_FORMAT` (Times New Roman, 12, bold, чёрный) из `src/lib/gsheets.ts`. Google сбрасывает перезаписанные ячейки в Arial 10, поэтому при записи значений бойца и экзаменов шрифт передаётся явно: `cell.textFormat = { ...SHDS_TEXT_FORMAT }`.
+- В колонку ФИО ШДС (C для ТР, D для АД) пишется СТРОГО русское ФИО из `member.name` («Фамилия И.О.», `trim()`). ЗАПРЕЩЕНО подставлять `username`, `callsign` или позывной.
 - Steam ID пишется строго в виде 17 чистых цифр. Префикс `ID:` удалять regex: `replace(/^ID:\s*/i, '')`.

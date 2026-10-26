@@ -193,7 +193,7 @@ export default function ApplyPage() {
           <h1 className="display text-xl font-bold mb-2">Рапорт отправлен</h1>
           <p className="text-sm" style={{ color: "var(--muted)" }}>
             {PENDING_NOTICE}. Как только штаб примет решение, вы сможете войти в личный кабинет
-            своим позывным: <span className="mono font-bold">{callsign}</span>
+            своим логином: <span className="mono font-bold">{callsign}</span>
           </p>
           <Link href="/login" className="btn mt-6 w-full inline-flex justify-center">
             Вернуться ко входу
@@ -214,8 +214,8 @@ return (
         </h1>
         <p className="mt-2 text-sm" style={{ color: "var(--muted)" }}>
           {kind === APPLICATION_KIND_RESERVE_RETURN
-            ? "Укажите ФИО, позывной и пароль: штаб восстановит вашу строку в подразделении, а прежние роли Discord вернутся."
-            : "Заполните анкету — штаб рассмотрит её и зачислит вас в подразделение. Позывной и пароль нужны для входа в личный кабинет."}
+            ? "Укажите ФИО, логин и пароль: штаб восстановит вашу строку в подразделении, а прежние роли Discord вернутся."
+            : "Заполните анкету — штаб рассмотрит её и зачислит вас в подразделение. Логин и пароль нужны для входа в личный кабинет."}
         </p>
       </header>
 
@@ -311,13 +311,15 @@ return (
         </div>
 
         {/**
-         * ФИО спрашивается всегда.
-         *
-         * Для возврата из запаса оно ищет строку на листе «Запас», а для
-         * новобранца — служит вторым ключом поиска бойца в составе при
-         * одобрении: без него защита от дублей опиралась бы только на Discord ID,
-         * а кандидат без Discord заводил бы вторую карточку.
-         */}
+          * ФИО спрашивается всегда.
+          *
+          * ФИО — главный идентификатор личности бойца: именно оно сохраняется
+          * в поле name (recruits и division_members) и пишется в колонку ФИО
+          * ШДС. Для возврата из запаса оно же ищет строку на листе «Запас», а
+          * для новобранца — служит вторым ключом поиска бойца в составе при
+          * одобрении: без него защита от дублей опиралась бы только на Discord ID,
+          * а кандидат без Discord заводил бы вторую карточку.
+          */}
         <div>
           <label className="label mb-1.5 block">ФИО (как в табеле)</label>
           <input
@@ -349,16 +351,19 @@ return (
             </select>
           </div>
           <div>
-            <label className="label mb-1.5 block">Позывной (он же логин)</label>
+            <label className="label mb-1.5 block">Логин для входа на сайт</label>
             <input
               className="input input-mono w-full"
               value={callsign}
               onChange={(e) => setCallsign(e.target.value)}
-              placeholder="Скиф"
+              placeholder="atk_recruit"
               minLength={3}
               maxLength={32}
               required
             />
+            <p className="mt-1.5 text-[11.5px]" style={{ color: "var(--dim)" }}>
+              Придумайте логин на латинице для входа в личный кабинет
+            </p>
           </div>
           <div>
             <label className="label mb-1.5 block">Пароль</label>

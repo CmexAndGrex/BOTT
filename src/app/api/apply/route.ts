@@ -179,7 +179,7 @@ export async function POST(req: NextRequest) {
   const callsign = normalizeCallsign(body.callsign);
   if (!isCallsign(callsign)) {
     return NextResponse.json(
-      { ok: false, error: "Позывной: 3–32 символа — буквы, цифры, пробел, точка, дефис" },
+      { ok: false, error: "Логин: 3–32 символа — латинские буквы, цифры, точка, дефис, подчёркивание" },
       { status: 400 }
     );
   }
@@ -295,7 +295,7 @@ async function createRecruit(
       return createApplicationForMember(req, ip, found, input, discordId, fromCookie);
     }
 
-    // Позывной — это логин, поэтому он должен быть свободен
+    // Логин должен быть свободен (members.callsign уникален)
     const [existing] = await db
       .select({ id: members.id })
       .from(members)
@@ -303,7 +303,7 @@ async function createRecruit(
     if (existing) {
       throttle.registerFailure(ip);
       return NextResponse.json(
-        { ok: false, error: `Позывной «${input.callsign}» уже занят — выберите другой` },
+        { ok: false, error: `Логин «${input.callsign}» уже занят — выберите другой` },
         { status: 409 }
       );
     }

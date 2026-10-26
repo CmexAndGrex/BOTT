@@ -11,18 +11,28 @@
  * ронял бы страницу кабинета.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { db } from "@/db";
 import { members } from "@/db/schema";
 import { requireActiveMember } from "@/lib/member-auth";
 import { garrisonStatus, type RosterEntry, type SelfMember } from "@/lib/a2s";
+import { MEMBER_STATUS } from "@/lib/recruits";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 /** UDP-обмен с двумя таймаутами по 3 секунды плюс запас на ответ */
 export const maxDuration = 15;
 
-/** Состав для сопоставления: позывной, звание, подразделение */
+/**
+ * Состав для сопоставления: позывной, ФИО, звание, подразделение.
+ *
+ * Единственный фильтр — действующее членство в корпусе (status = active,
+ * флаг active не снят). Фильтра по подразделению НЕТ: в списке дежурных
+ * обязаны оказаться все — Танковая рота, Артиллерийский дивизион,
+ * Командование корпуса и новобранцы без назначенного подразделения
+ * (unit IS NULL). Фильтра текущего пользователя тоже нет: командир или
+ * офицер на сервере виден в блоке присутствующих на ВЧ наравне с бойцами.
+ */
 async function loadRoster(): Promise<RosterEntry[]> {
   const rows = await db
     .select({
@@ -33,7 +43,15 @@ async function loadRoster(): Promise<RosterEntry[]> {
       unit: members.unit,
     })
     .from(members)
-    .where(eq(members.active, true));
+    .where(
+      and(
+        eq(members.active, true),
+        eq(members.status, MEMBER_STATUS.ACTIVE),
+        // «В отпуске» боец на сервере не сидит, но и не уволен — оставляем в
+        // табеле: если он всё же зашёл на ВЧ, его карточка должна найтись
+        ne(members.status, MEMBER_STATUS.DISMISSED)
+      )
+    );
 
   return rows.map((row) => ({
     id: row.id,
@@ -41,6 +59,9 @@ async function loadRoster(): Promise<RosterEntry[]> {
     // rs-red.com его может не быть: берём имя, иначе такой боец никогда не
     // «найдётся» на сервере.
     callsign: (row.callsign || row.name || "").trim(),
+    // ФИО — второй ключ сопоставления: на сервере часто сидят под ФИО со
+    // званием («Ряд. Волков Д.В.»), и позывной их там не написан
+    name: (row.name || "").trim(),
     rank: row.rank || "",
     division: row.unit,
   }));
@@ -63,7 +84,12 @@ async function loadSelfMember(id: number): Promise<SelfMember | null> {
     .where(eq(members.id, id));
 
   if (!row) return null;
-  return { id: row.id, callsign: (row.callsign || row.name || "").trim() };
+  return {
+    id: row.id,
+    callsign: (row.callsign || row.name || "").trim(),
+    // ФИО нужно для статуса «в бою»: боец может сидеть на сервере под ФИО
+    name: (row.name || "").trim(),
+  };
 }
 
 export async function GET(req: NextRequest) {
@@ -112,6 +138,8 @@ export async function GET(req: NextRequest) {
       clanMembersOnline: summary.clanMembersOnline.map((entry) => ({
         id: entry.id,
         callsign: entry.callsign,
+        // ФИО из табеля: карточка показывает официальное имя, позывной — рядом
+        name: entry.name ?? null,
         rank: entry.rank,
         division: entry.division,
       })),

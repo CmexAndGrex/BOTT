@@ -459,21 +459,28 @@ describe("Оформление: меняется только заливка, н
     return end < 0 ? code.slice(from) : code.slice(from, end + 2);
   }
 
-  test("жёстко зашитого шрифта в коде модуля нет", () => {
-    assert.equal(
-      /Times New Roman/.test(code),
-      false,
-      "в gsheets.ts снова появился зашитый шрифт — он перезапишет оформление листа"
-    );
-    assert.equal(
-      /\.textFormat\s*=/.test(code),
-      false,
-      "модуль присваивает textFormat ячейке: шрифт таблицы собьётся"
-    );
+  test("шрифт задаётся только эталонной константой SHDS_TEXT_FORMAT", () => {
+    // Эталонный шрифт ШДС (Times New Roman, 12, bold) — единственное место,
+    // где модуль задаёт textFormat: Google сбрасывает перезаписанные ячейки
+    // в Arial 10, поэтому значения бойца и экзаменов пишутся с явным шрифтом.
+    assert.match(code, /SHDS_TEXT_FORMAT/, "пропала эталонная константа шрифта ШДС");
+    // Присваивание textFormat допустимо ТОЛЬКО через копию константы
+    assert.match(code, /\.textFormat\s*=\s*\{\s*\.\.\.SHDS_TEXT_FORMAT\s*\}/);
     assert.equal(
       /applyStdFormat/.test(code),
       false,
       "вернулся хелпер принудительного формата ячеек"
+    );
+    // copyPaste PASTE_FORMAT не отправляется: упоминание в ТИПЕ SheetRequest
+    // легитимно (тип описывает форму запроса), а фактическая отправка —
+    // единственное место, где формат мог бы переноситься с чужой строки.
+    // Проверяем диспетчер runBatch: он не должен уметь отправлять copyPaste.
+    const dispatcher = functionBody("async function runBatch");
+    assert.ok(dispatcher.length > 0, "функция runBatch не найдена");
+    assert.equal(
+      /copyPaste/.test(dispatcher),
+      false,
+      "runBatch отправляет copyPaste: оформление строки снова зависит от образца"
     );
   });
 
@@ -511,10 +518,12 @@ describe("Оформление: меняется только заливка, н
     assert.match(body, /backgroundColor/);
   });
 
-  test("запись бойца не выставляет формат ячеек", () => {
+  test("запись бойца ставит эталонный шрифт ШДС и не трогает выравнивание", () => {
     const body = functionBody("function writeSoldierRow");
     assert.ok(body.length > 0, "функция writeSoldierRow не найдена");
-    assert.equal(/textFormat/.test(body), false, "writeSoldierRow меняет шрифт");
+    // Шрифт — ТОЛЬКО копией эталонной константы (Times New Roman, 12, bold)
+    assert.match(body, /\.textFormat\s*=\s*font/, "writeSoldierRow не ставит эталонный шрифт");
+    assert.match(body, /const font = \{ \.\.\.SHDS_TEXT_FORMAT \}/);
     assert.equal(
       /horizontalAlignment/.test(body),
       false,

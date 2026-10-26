@@ -17,6 +17,11 @@ import {
 import { AnimatePresence, motion } from "framer-motion";
 import { Section, Spinner, fmtDate } from "@/components/ui";
 import { resolveAvatarUrl } from "@/lib/discord-avatar";
+import {
+  MemberActionButtons,
+  type MemberActionResult,
+} from "@/components/member-action-buttons";
+import type { MemberAction } from "@/lib/member-lifecycle";
 import { ReportForm, type SessionMember } from "@/components/reports-panel";
 import { reportTypeMeta, type ServiceReportType } from "@/lib/reports";
 import {
@@ -78,11 +83,27 @@ export function DossierHeader({
   service,
   onReport,
   onLogout,
+  /**
+   * Административные действия «В запас» / «Уволить».
+   *
+   * Передаются страницей /profile только когда просматривающий — штаб (право
+   * считает /api/me): боец видит своё досье без этих кнопок, а командир,
+   * открывший чужое личное дело, получает инструменты прямо в шапке. Сами
+   * кнопки дополнительно скрываются для защищённых целей (командование
+   * корпуса) и для самого себя — правило внутри MemberActionButtons.
+   */
+  lifecycle,
 }: {
   member: DossierMember;
   service: DossierService;
   onReport: () => void;
   onLogout: () => void;
+  lifecycle?: {
+    /** ID бойца сессии просматривающего (защита от самострела) */
+    selfMemberId: number | null;
+    /** Выполнение действия: запрос и уведомление ведёт страница */
+    onAction: (id: number, action: MemberAction, reason: string) => Promise<MemberActionResult>;
+  };
 }) {
   /**
    * Аватар: сохранённый адрес Discord пересобирается под нужный размер, а если
@@ -203,6 +224,25 @@ export function DossierHeader({
               Выйти
             </button>
           </div>
+
+          {/* Штаб: «В запас» / «Уволить» с окном подтверждения. Кнопки
+              скрываются для командования корпуса и самого себя — правило
+              внутри MemberActionButtons, сервер проверяет его повторно */}
+          {lifecycle && (
+            <MemberActionButtons
+              member={{
+                id: member.id,
+                name: member.name || member.callsign,
+                rank: member.rank,
+                unit: member.unit,
+                post: member.post,
+                discordId: member.discordId,
+                status: member.status,
+              }}
+              selfMemberId={lifecycle.selfMemberId}
+              onAction={lifecycle.onAction}
+            />
+          )}
         </div>
       </div>
 
@@ -238,7 +278,14 @@ export type VchResponse = {
   map: string | null;
   /** Боец сессии найден среди игроков сервера */
   selfOnline: boolean;
-  clanMembersOnline: { id: number; callsign: string; rank: string; division: string | null }[];
+  clanMembersOnline: {
+    id: number;
+    callsign: string;
+    /** ФИО из табеля: боец на сервере мог найтись по нему, а не по позывному */
+    name: string | null;
+    rank: string;
+    division: string | null;
+  }[];
   clanOnlineCount: number;
   notice: string | null;
   error?: string;
@@ -384,7 +431,12 @@ export function GarrisonWidget({
                 <span className="dot dot-ok pulse-dot" />
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="truncate text-[13px] font-semibold">{entry.callsign}</span>
+                    {/* Заголовок карточки — официальное ФИО из табеля, а не
+                        технический позывной: боец, найденный по ФИО («Ряд.
+                        Волков Д.В.» на сервере), иначе не узнал бы себя */}
+                    <span className="truncate text-[13px] font-semibold">
+                      {entry.name || entry.callsign}
+                    </span>
                     {/* Своя строка в списке: боец сразу видит себя, а не выискивает
                         позывной глазами */}
                     {memberId === entry.id && (
@@ -394,7 +446,15 @@ export function GarrisonWidget({
                     )}
                   </div>
                   <div className="truncate text-[11px]" style={{ color: "var(--dim)" }}>
-                    {[entry.rank, entry.division].filter(Boolean).join(" · ") || "—"}
+                    {[
+                      entry.callsign && entry.name && entry.callsign !== entry.name
+                        ? `позывной: ${entry.callsign}`
+                        : null,
+                      entry.rank,
+                      entry.division,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ") || "—"}
                   </div>
                 </div>
               </div>

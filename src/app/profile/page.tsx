@@ -28,6 +28,8 @@ import {
   CheckCircle2, Eye, EyeOff, GraduationCap, KeyRound, Link2Off, MessageCircle, ShieldAlert,
 } from "lucide-react";
 import { Section, Spinner } from "@/components/ui";
+import type { MemberActionResult } from "@/components/member-action-buttons";
+import type { MemberAction } from "@/lib/member-lifecycle";
 import {
   DossierHeader,
   GarrisonWidget,
@@ -109,6 +111,34 @@ function DossierPageInner() {
    */
   const { openReport } = useReportLauncher();
 
+  /**
+   * Права просматривающего для административных действий в шапке досье.
+   *
+   * Досье открывает и сам боец, и штаб (по связке учётной записи с бойцом).
+   * Кнопки «В запас»/«Уволить» передаются в шапку только штабу: право
+   * isCommander/isAdmin считает /api/me по обеим сессиям — тот же источник,
+   * что и у табеля, поэтому интерфейс и сервер не разойдутся.
+   */
+  const [viewerRights, setViewerRights] = useState<{
+    isCommander: boolean;
+    selfMemberId: number | null;
+  }>({ isCommander: false, selfMemberId: null });
+
+  useEffect(() => {
+    fetch("/api/me", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((me) => {
+        setViewerRights({
+          isCommander: Boolean(me.isCommander || me.isAdmin),
+          selfMemberId: typeof me.member?.id === "number" ? me.member.id : null,
+        });
+      })
+      .catch(() => {
+        // Права не получены — кнопок просто не будет; досье работает дальше
+        setViewerRights({ isCommander: false, selfMemberId: null });
+      });
+  }, []);
+
   // Смена пароля
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -188,6 +218,37 @@ function DossierPageInner() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [load]);
+
+  /**
+   * Административное действие из шапки досье («В запас» / «Уволить»).
+   *
+   * Тот же роут, что и у табеля: сервер синхронизирует БД, ШДС и Discord.
+   * После успеха досье перезагружается — статус службы в пилюле меняется
+   * сразу, без ручного обновления страницы.
+   */
+  const runMemberAction = useCallback(
+    async (id: number, action: MemberAction, reason: string): Promise<MemberActionResult> => {
+      try {
+        const res = await fetch(`/api/members/${id}/action`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, reason: reason || undefined }),
+        });
+        const data = await res.json();
+        if (!data.ok) {
+          setError(data.error || "Не удалось выполнить действие");
+          return { ok: false, error: data.error };
+        }
+        setFlash(data.message || "Действие выполнено");
+        void load();
+        return { ok: true, message: data.message };
+      } catch {
+        setError("Сбой сети при выполнении действия");
+        return { ok: false, error: "Сбой сети" };
+      }
+    },
+    [load]
+  );
 
   /**
    * Открытие окна подачи рапорта из шапки личного дела.
@@ -387,6 +448,14 @@ function DossierPageInner() {
         service={dossier.service}
         onReport={handleOpenReport}
         onLogout={handleLogout}
+        lifecycle={
+          viewerRights.isCommander
+            ? {
+                selfMemberId: viewerRights.selfMemberId,
+                onAction: runMemberAction,
+              }
+            : undefined
+        }
       />
 
       {/* Сводка службы: видно, сколько рапортов ждёт решения штаба */}

@@ -36,32 +36,37 @@ import {
   normalizeReviewStatus,
 } from "../src/lib/reports.ts";
 
-describe("Позывной — нормализация и проверка формата", () => {
+describe("Логин для входа на сайт — нормализация и проверка формата", () => {
   test("пробелы по краям и внутри схлопываются", () => {
-    assert.equal(normalizeCallsign("  Скиф   Гром  "), "Скиф Гром");
+    assert.equal(normalizeCallsign("  atk   scout  "), "atk scout");
   });
 
-  test("регистр сохраняется: позывной виден в табеле как написан", () => {
-    assert.equal(normalizeCallsign("Скиф"), "Скиф");
-    assert.notEqual(normalizeCallsign("Скиф"), normalizeCallsign("скиф"));
+  test("регистр сохраняется: логин различает написание", () => {
+    assert.equal(normalizeCallsign("Scout"), "Scout");
+    assert.notEqual(normalizeCallsign("Scout"), normalizeCallsign("scout"));
   });
 
-  test("допустимы кириллица, цифры, пробел, точка и дефис", () => {
-    assert.equal(isCallsign("Скиф"), true);
-    assert.equal(isCallsign("Гром-2"), true);
-    assert.equal(isCallsign("Штурман 1"), true);
+  test("допустимы латиница, цифры, точка, дефис и подчёркивание", () => {
+    assert.equal(isCallsign("scout"), true);
+    assert.equal(isCallsign("Grom-2"), true);
+    assert.equal(isCallsign("ranger_01"), true);
     assert.equal(isCallsign("Ranger.01"), true);
   });
 
-  test("спецсимволы и эмодзи отклоняются (ломают поиск по листу)", () => {
-    assert.equal(isCallsign("Скиф<b>"), false);
-    assert.equal(isCallsign("Скиф🚀"), false);
-    assert.equal(isCallsign("Скиф;DROP"), false);
+  test("кириллица отклоняется: логин — только латиница", () => {
+    assert.equal(isCallsign("Скиф"), false);
+    assert.equal(isCallsign("Гром-2"), false);
+  });
+
+  test("спецсимволы и эмодзи отклоняются (ломают форму входа)", () => {
+    assert.equal(isCallsign("scout<b>"), false);
+    assert.equal(isCallsign("scout🚀"), false);
+    assert.equal(isCallsign("scout;DROP"), false);
   });
 
   test("длина ограничена: от 3 до 32 символов", () => {
-    assert.equal(isCallsign("Ск"), false);
-    assert.equal(isCallsign("Ски"), true);
+    assert.equal(isCallsign("sc"), false);
+    assert.equal(isCallsign("atk"), true);
     assert.equal(isCallsign("A".repeat(32)), true);
     assert.equal(isCallsign("A".repeat(33)), false);
   });
@@ -76,7 +81,7 @@ describe("Позывной — нормализация и проверка фо
 
 describe("callsignFromHandle — имя бойца с rs-red.com", () => {
   test("подходящее имя принимается", () => {
-    assert.equal(callsignFromHandle("Скиф"), "Скиф");
+    assert.equal(callsignFromHandle("scout"), "scout");
   });
 
   test("неподходящее имя отбрасывается, а не подставляется как есть", () => {

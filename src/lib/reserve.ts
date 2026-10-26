@@ -313,6 +313,42 @@ function findBottomVacantRowInPostBlock(
   return bottomRow;
 }
 
+/**
+ * Удалить строку бойца с листа «Запас» (увольнение запасника).
+ *
+ * Боец, уже числившийся в запасе, при увольнении убирается и оттуда: строка
+ * затирается целиком (снапшот A..AG и оба варианта служебных колонок —
+ * U..W старого формата и AH..AJ нового), иначе nextReserveRow считал бы её
+ * занятой, а метаданные «висели» бы правее пустой строки.
+ *
+ * Возврат: ok=false с причиной, если боец на листе запаса не найден —
+ * это не ошибка для увольнения (мог не числиться в запасе), а подсказка.
+ */
+export async function removeReserveRow(req: {
+  userName: string;
+}): Promise<ReserveResult> {
+  try {
+    const doc = await getDoc();
+    const reserveSheet = await getReserveSheet(doc);
+    await reserveSheet.loadCells();
+
+    const found = findReserveRow(reserveSheet, req.userName);
+    if (!found) {
+      return { ok: false, error: `Боец ${req.userName} не найден на листе запаса` };
+    }
+
+    await clearReserveRow(reserveSheet, found.row);
+
+    const resName = await reserveSheetName();
+    return {
+      ok: true,
+      message: `${req.userName} удалён из листа «${resName}» (строка ${found.row})`,
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 /** Перевести бойца в запас (ШДС) */
 export async function moveToReserve(req: {
   userName: string;

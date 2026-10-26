@@ -319,15 +319,16 @@ export function recruitDmText(callsign: string, password: string): string {
 /**
  * Подпись бойца для колонки «Фамилия, инициалы» в ШДС.
  *
- * Требование зачисления: в таблицу пишется ФИО, а не позывной — позывной
- * остаётся логином. У карточек синхронизации rs-red.com ФИО может быть не
- * заполнено (там лежит односложное имя), тогда откатываемся на позывной:
- * пустая ячейка имени сделала бы бойца ненаходимым на листе.
+ * Требование зачисления: в таблицу пишется СТРОГО русское ФИО из member.name
+ * («Фамилия И.О.»), а не username/callsign/позывной. Лишние пробелы
+ * обрезаются trim(). Откат на позывной оставлен только для карточек
+ * синхронизации rs-red.com, у которых ФИО не заполнено вовсе (там лежит
+ * односложное имя): пустая ячейка имени сделала бы бойца ненаходимым на листе.
  */
 function sheetNameFor(member: { name: string; callsign: string | null }): string {
   const name = (member.name || "").trim();
   const callsign = (member.callsign || "").trim();
-  // ФИО содержит пробел («Иванов И.И.»); одиночное слово — это позывной
+  // ФИО содержит пробел («Иванов И.И.»); одиночное слово — это не ФИО
   if (name && name.includes(" ")) return name;
   return callsign || name;
 }
@@ -653,10 +654,12 @@ export async function approveReserveReturn(
         : member.unit || undefined;
 
     // 1. Google Таблица: строка целиком (с отметками экзаменов) возвращается в
-    //    подразделение, лист «Запас» очищается, прежние роли читаются из колонки AI
+    //    подразделение, лист «Запас» очищается, прежние роли читаются из колонки AI.
+    //    Поиск строки в «Запасе» идёт по ФИО: строка запаса подписана ФИО,
+    //    а не логином (callsign)
     const { returnFromReserve } = await import("@/lib/reserve");
     const sheet = await returnFromReserve({
-      userName: member.callsign || member.name,
+      userName: sheetNameFor(member),
       unit: restoredUnit,
       rank: member.rank,
       discordId: realDiscordId(member.discordId),
@@ -1469,7 +1472,7 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
         // совокупности — как и в переводе по должности ниже.
         const sheetExams = await examsFromSheet({
           unit: member.unit,
-          names: [member.callsign || member.name, member.name],
+          names: [member.name, member.callsign || member.name],
         });
         for (const code of sheetExams) passedCodes.add(code);
 
@@ -1503,7 +1506,8 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
             vacationRemove: false,
             shdsAction: SHDS_ACTIONS.EXAM,
             unit: member.unit,
-            userName: member.callsign || member.name,
+            // В колонку ФИО ШДС пишется русское ФИО, а не логин/позывной
+            userName: sheetNameFor(member),
             rank: member.rank,
             steamId: "",
             discordId,
@@ -1608,7 +1612,7 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
         const { transferShdsPosition } = await import("@/lib/gsheets");
         const sheetExams = await examsFromSheet({
           unit: member.unit,
-          names: [member.callsign || member.name, member.name],
+          names: [member.name, member.callsign || member.name],
         });
         for (const code of sheetExams) passedCodes.add(code);
 
@@ -1625,7 +1629,7 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
 
         const result = await transferShdsPosition({
           unit: member.unit,
-          names: [member.callsign || member.name, member.name],
+          names: [member.name, member.callsign || member.name],
           section,
           passedExams: [...passedCodes].map((code) => ({ code })),
         });
@@ -1690,10 +1694,11 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
           parts.push("подразделение не назначено — перевод в запас не выполнен");
           break;
         }
-        // Строка целиком уезжает на лист «Запас», отметки экзаменов сохраняются
+        // Строка целиком уезжает на лист «Запас», отметки экзаменов сохраняются.
+        // Поиск строки в ШДС — по ФИО: строка листа подписана ФИО, а не логином
         const { moveToReserve } = await import("@/lib/reserve");
         const result = await moveToReserve({
-          userName: member.callsign || member.name,
+          userName: sheetNameFor(member),
           unit: member.unit,
           rank: member.rank,
           steamId: "",
@@ -1732,7 +1737,8 @@ async function applyReport(report: typeof serviceReports.$inferSelect): Promise<
           vacationRemove: false,
           shdsAction: SHDS_ACTIONS.ADD,
           unit: entry.unit,
-          userName: member.callsign || member.name,
+          // В колонку ФИО ШДС пишется русское ФИО, а не логин/позывной
+          userName: sheetNameFor(member),
           rank: entry.rank,
           steamId: entry.steamId,
           discordId: entry.discordId || discordId,

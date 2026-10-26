@@ -21,7 +21,12 @@ import {
 import { Avatar, Section, Spinner, fmtDate } from "@/components/ui";
 import { DiscordIdCell, type DiscordIdSaveResult } from "@/components/discord-id-cell";
 import { MemberDeleteButton, type MemberDeleteResult } from "@/components/member-delete-button";
+import {
+  MemberActionButtons,
+  type MemberActionResult,
+} from "@/components/member-action-buttons";
 import { isRosterActive as isMemberInRoster } from "@/lib/recruits";
+import type { MemberAction } from "@/lib/member-lifecycle";
 
 /**
  * Строка табеля.
@@ -58,6 +63,13 @@ export default function MembersPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   /** Роль бойца из кабинета: пусто, если кабинет не открыт */
   const [memberRole, setMemberRole] = useState("");
+  /**
+   * ID бойца текущей сессии (из /api/me → member.id).
+   *
+   * Нужен защите от «самострела»: кнопки «В запас»/«Уволить» не рендерятся
+   * для самого себя. Право считает сервер, клиент лишь скрывает кнопку.
+   */
+  const [selfMemberId, setSelfMemberId] = useState<number | null>(null);
   /**
    * Правка Discord ID разрешена этому пользователю.
    *
@@ -126,6 +138,7 @@ export default function MembersPage() {
     setRole(me.role || "guest");
     setIsAdmin(Boolean(me.isAdmin));
     setMemberRole(me.member?.role ?? "");
+    setSelfMemberId(typeof me.member?.id === "number" ? me.member.id : null);
     setCanEditRosterDiscordId(Boolean(me.isCommander || me.isAdmin));
     setCanViewPrivate(Boolean(me.canViewPrivate));
   }, []);
@@ -165,6 +178,47 @@ export default function MembersPage() {
       return { ok: true, message: data.message ?? null };
     } catch {
       const error = "Сбой сети при удалении профиля";
+      setNotice({ ok: false, text: error });
+      return { ok: false, error };
+    } finally {
+      setBusyIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+    }
+  };
+
+  /**
+   * Административное действие «В запас» / «Уволить».
+   *
+   * Запрос уходит в POST /api/members/[id]/action: сервер синхронизирует БД,
+   * Google Таблицу и Discord. Строка обновляется из ответа (там актуальный
+   * статус и подразделение), сводки пересчитываются сами — они выводятся из
+   * того же массива members. Ошибка Discord не отменяет действие: сервер
+   * возвращает ok=true с предупреждением, и штаб видит его в notice.
+   */
+  const runMemberAction = async (
+    id: number,
+    action: MemberAction,
+    reason: string
+  ): Promise<MemberActionResult> => {
+    setBusyIds((prev) => new Set(prev).add(id));
+    try {
+      const res = await fetch(`/api/members/${id}/action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, reason: reason || undefined }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        const error = data.error || "Не удалось выполнить действие";
+        setNotice({ ok: false, text: error });
+        return { ok: false, error };
+      }
+      if (data.member) {
+        setMembers((prev) => (prev ?? []).map((m) => (m.id === id ? data.member : m)));
+      }
+      setNotice({ ok: true, text: data.message || "Действие выполнено" });
+      return { ok: true, message: data.message };
+    } catch {
+      const error = "Сбой сети при выполнении действия";
       setNotice({ ok: false, text: error });
       return { ok: false, error };
     } finally {
@@ -421,8 +475,10 @@ export default function MembersPage() {
 
                       <td style={{ textAlign: "center" }}>
                         <div className="inline-flex items-center justify-center gap-2">
-                          {m.status === "dismissed" ? (
-                            <span className="badge badge-reserve">в резерве</span>
+                          {m.status === "reserve" || m.status === "dismissed" ? (
+                            <span className="badge badge-reserve">
+                              {m.status === "reserve" ? "в резерве" : "выбыл"}
+                            </span>
                           ) : m.vacation ? (
                             <span className="badge badge-info" title={m.vacationUntil ? `До ${fmtDate(m.vacationUntil)}` : undefined}>
                               <Palmtree size={12} className="mr-1" style={{ display: 'inline-block' }} />
@@ -449,6 +505,27 @@ export default function MembersPage() {
                             >
                               {m.vacation ? <X size={13} /> : <Palmtree size={13} />}
                             </button>
+                          )}
+                          {/* «В запас» / «Уволить»: штабу, с окном подтверждения.
+                              Командование корпуса и сам пользователь кнопок не
+                              видят — правило isProtectedLifecycleTarget скрывает
+                              их в самом компоненте */}
+                          {canEditPanel && (
+                            <MemberActionButtons
+                              member={{
+                                id: m.id,
+                                name: m.name,
+                                rank: m.rankName,
+                                unit: m.unit,
+                                post: m.post,
+                                discordId: m.discordId,
+                                status: m.status,
+                              }}
+                              selfMemberId={selfMemberId}
+                              onAction={runMemberAction}
+                              disabled={busyIds.has(m.id)}
+                              compact
+                            />
                           )}
                         </div>
                       </td>

@@ -795,6 +795,22 @@ export function examReadBounds(layout: UnitLayout): { start: number; end: number
 const NAME_GREEN = { red: 0.4157, green: 0.6588, blue: 0.3098, alpha: 1 };
 
 /**
+ * Эталонный шрифт ячеек ШДС: Times New Roman, 12, жирный, чёрный.
+ *
+ * Google Таблица при перезаписи текста сбрасывает ячейки в Arial 10, поэтому
+ * при записи данных бойца и экзаменов шрифт передаётся явно. Константа
+ * применяется ТОЛЬКО к ячейкам, в которые модуль пишет значения (строка
+ * бойца и оценки экзаменов): заливки по-прежнему идут запросами с fields
+ * "userEnteredFormat.backgroundColor" и чужое оформление не трогают.
+ */
+export const SHDS_TEXT_FORMAT = {
+  fontFamily: "Times New Roman",
+  fontSize: 12,
+  bold: true,
+  foregroundColor: { red: 0, green: 0, blue: 0 },
+} as const;
+
+/**
  * Цвет сданного экзамена и берета: ярко-зелёный #00ff00.
  * Используется для всех ячеек блока оценок (H..AE / I..AG) и столбца «Берет».
  */
@@ -1172,14 +1188,6 @@ type BorderSpec = { style: "SOLID"; color: { red: number; green: number; blue: n
 /** Запрос batchUpdate, который умеет собирать этот модуль */
 type SheetRequest =
   | {
-      copyPaste: {
-        source: GridRangeLike;
-        destination: GridRangeLike;
-        pasteType: "PASTE_FORMAT";
-        pasteOrientation: "NORMAL";
-      };
-    }
-  | {
       updateBorders: {
         range: GridRangeLike;
         top: BorderSpec;
@@ -1239,10 +1247,7 @@ async function runBatch(sheet: GoogleSpreadsheetWorksheet, requests: SheetReques
   }
 
   for (const request of requests) {
-    if ("copyPaste" in request) {
-      const { source, destination, pasteType } = request.copyPaste;
-      await sheet.copyPaste(source, destination, pasteType);
-    } else if ("updateBorders" in request) {
+    if ("updateBorders" in request) {
       const { range, ...borders } = request.updateBorders;
       await sheet.updateBorders(range, borders);
     } else {
@@ -1478,7 +1483,16 @@ async function applyRowFormat(
  * `postOverride` задаёт должность явно (очистка строки командования возвращает
  * «Логист-снабженец/резерв» независимо от блока).
  */
-async function clearRowToVacant(
+/**
+ * Очистка строки бойца до состояния «Вакант».
+ *
+ * Экспортируется (а не остаётся приватным сценарием REMOVE), потому что
+ * увольнение из панели — то же самое приведение строки: должность секции
+ * возвращается на место, оценки и заливки сбрасываются, границы
+ * восстанавливаются. Копирование строки-шаблона переносило и её значения —
+ * в колонке должности оказывалось содержимое чужой строки.
+ */
+export async function clearRowToVacant(
   sheet: GoogleSpreadsheetWorksheet,
   layout: UnitLayout,
   row: number,
@@ -1600,13 +1614,21 @@ function writeSoldierRow(
   discordCell.value = data.discordId || "";
   notesCell.value = ""; // Очистка колонки «Для пометок»
 
-  // Оформление ячеек здесь НЕ задаётся.
-  //
-  // Раньше строка выставляла «стандартный формат» (Times New Roman, жирный,
-  // 12, по центру) каждой ячейке — и шрифт таблицы сбивался: у листа своё
-  // оформление (им бывает Arial или иной размер), а присваивание textFormat
-  // перезаписывало его. Значения пишутся поверх формата строки, шрифт,
-  // выравнивание и границы остаются оригинальными.
+  /**
+   * Эталонный шрифт ШДС: Times New Roman, 12, жирный.
+   *
+   * Google Таблица при перезаписи текста сбрасывает ячейки в Arial 10 —
+   * именно это требование закрывает SHDS_TEXT_FORMAT. Шрифт ставится ТОЛЬКО
+   * на ячейки, в которые этот модуль пишет значения бойца; выравнивание и
+   * границы не трогаются, а заливки идут отдельными запросами с fields
+   * "userEnteredFormat.backgroundColor".
+   */
+  const font = { ...SHDS_TEXT_FORMAT };
+  rankCell.textFormat = font;
+  nameCell.textFormat = font;
+  postCell.textFormat = font;
+  steamCell.textFormat = font;
+  discordCell.textFormat = font;
 }
 
 /**
@@ -2271,6 +2293,8 @@ async function scenarioExam(sheet: GoogleSpreadsheetWorksheet, layout: UnitLayou
   for (const c of examCols) {
     const cell = sheet.getCell(row - 1, c);
     cell.backgroundColor = { ...EXAM_GREEN };
+    // Эталонный шрифт ШДС: перезапись текста сбрасывает ячейку в Arial 10
+    cell.textFormat = { ...SHDS_TEXT_FORMAT };
     const title = String(sheet.getCell(headerRow - 1, c).value ?? "").trim();
     // КМБТ и Берет — базовые экзамены: закрашиваются, но оценки не получают
     if (/кмбт|берет/i.test(title)) {
@@ -2354,6 +2378,7 @@ async function checkAndGrantBeret(
       if (canonical === "берет") {
         const beretCell = sheet.getCell(row - 1, c);
         beretCell.backgroundColor = { ...EXAM_GREEN };
+        beretCell.textFormat = { ...SHDS_TEXT_FORMAT };
         beretCell.value = ""; // Столбец «Берет» закрашивается без текста
         return true;
       }
@@ -3546,6 +3571,7 @@ export async function copyReserveGradesForUnit(params: {
         if (!empty) continue;
         cell.value = mark.grade && mark.grade !== PASS_MARK ? mark.grade : "";
         cell.backgroundColor = { ...EXAM_GREEN };
+        cell.textFormat = { ...SHDS_TEXT_FORMAT };
         copied++;
       }
 

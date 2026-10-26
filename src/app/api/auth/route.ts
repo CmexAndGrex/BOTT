@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { users, logs, members } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
 import bcrypt from "bcryptjs";
+import { normalizePersonName } from "@/lib/recruits";
 import {
   issuePanelToken,
   logPanelLogin,
@@ -58,10 +59,62 @@ export async function POST(req: NextRequest) {
 
     if (!username || !password) return NextResponse.json({ error: "Укажите логин и пароль" }, { status: 400 });
 
-    const [user] = await db.select().from(users).where(eq(users.username, username));
-    const isValid = user ? await bcrypt.compare(password, user.passwordHash) : false;
+    /**
+     * Поиск учётной записи по трём ключам: username, ФИО и Discord ID.
+     *
+     * Требование: в поле логина пользователь может ввести свой английский
+     * username, русское ФИО («Иванов И.А.») или discord_id. ФИО сравнивается
+     * по нормализованному ключу (normalizePersonName): «Иванов И.А.» и
+     * «Иванов И. А.» — один человек. Неоднозначность (двое с одинаковым ФИО)
+     * трактуется как «не найдено»: показать чужой кабинет хуже, чем попросить
+     * уточнить логин.
+     */
+    const login = String(username).trim();
+    const [user] = await db.select().from(users).where(eq(users.username, login));
 
-    if (!user || !isValid) {
+    /**
+     * ФИО и Discord ID: поиск по табелю, когда username не совпал.
+     *
+     * Порядок: сначала точное совпадение username (уникальный индекс), затем
+     * discord_id (тоже уникален), затем ФИО по нормализованному ключу —
+     * по нему может найтись несколько карточек, и тогда вход отклоняется
+     * (неоднозначность), а не выбирается первая попавшаяся.
+     */
+    let found = user ?? null;
+    if (!found) {
+      const discordKey = login.replace(/\D/g, "");
+      if (/^\d{5,25}$/.test(discordKey)) {
+        const [byDiscord] = await db
+          .select()
+          .from(users)
+          .where(eq(users.discordId, discordKey));
+        found = byDiscord ?? null;
+      }
+    }
+    if (!found) {
+      const nameKey = normalizePersonName(login);
+      if (nameKey) {
+        const roster = await db
+          .select({ id: members.id, name: members.name, memberId: users.memberId })
+          .from(members)
+          .leftJoin(users, eq(users.memberId, members.id));
+        const matched = roster.filter(
+          (row) => row.name && normalizePersonName(row.name) === nameKey && row.memberId
+        );
+        if (matched.length === 1) {
+          const [byName] = await db
+            .select()
+            .from(users)
+            .where(eq(users.id, matched[0].memberId!));
+          found = byName ?? null;
+        }
+      }
+    }
+
+    const account = found;
+    const accountValid = account ? await bcrypt.compare(password, account.passwordHash) : false;
+
+    if (!account || !accountValid) {
       const attempts = (record?.attempts || 0) + 1;
       const lockUntil = attempts >= MAX_ATTEMPTS ? now + LOCK_TIME_MS : 0;
       rateLimitMap.set(ip, { attempts, lockUntil, at: now });
@@ -106,14 +159,14 @@ export async function POST(req: NextRequest) {
      * Сбой записи не отменяет вход: сессия уже выдана, а связка —
      * производное улучшение.
      */
-    let memberId = user.memberId ?? null;
-    if (!memberId && user.discordId) {
+    let memberId = account.memberId ?? null;
+    if (!memberId && account.discordId) {
       try {
         const [linked] = await db
           .select({ id: members.id })
           .from(members)
           .where(
-            sql`regexp_replace(coalesce(${members.discordId}, ''), '[^0-9]', '', 'g') = ${user.discordId}`
+            sql`regexp_replace(coalesce(${members.discordId}, ''), '[^0-9]', '', 'g') = ${account.discordId}`
           )
           .orderBy(members.id)
           .limit(1);
@@ -121,7 +174,7 @@ export async function POST(req: NextRequest) {
           await db
             .update(users)
             .set({ memberId: linked.id })
-            .where(eq(users.id, user.id));
+            .where(eq(users.id, account.id));
           memberId = linked.id;
         }
       } catch (e) {
@@ -130,16 +183,16 @@ export async function POST(req: NextRequest) {
     }
 
     const token = await issuePanelToken({
-      id: user.id,
-      username: user.username,
-      role: user.role,
-      tokenVersion: user.tokenVersion,
+      id: account.id,
+      username: account.username,
+      role: account.role,
+      tokenVersion: account.tokenVersion,
       memberId,
     });
 
-    await logPanelLogin(user.username, "вход в панель по паролю", { ip });
+    await logPanelLogin(account.username, "вход в панель по паролю", { ip });
 
-    const response = NextResponse.json({ ok: true, role: user.role });
+    const response = NextResponse.json({ ok: true, role: account.role });
     setPanelCookie(response, token, req);
 
     // Стандартный вход в систему и личный кабинет открывает сразу: аккаунт
@@ -147,12 +200,12 @@ export async function POST(req: NextRequest) {
     // Без этого командир после входа видел на /profile заглушку «войдите в
     // личный кабинет», а клик «Войти» возвращал его на /login — цикл из отчёта.
     const member = await attachCabinetSession(response, req, {
-      username: user.username,
+      username: account.username,
       memberId,
-      discordId: user.discordId,
+      discordId: account.discordId,
     });
     if (member) {
-      await logPanelLogin(user.username, "кабинет открыт по сессии панели", {
+      await logPanelLogin(account.username, "кабинет открыт по сессии панели", {
         "Позывной": member.callsign,
         "IP": ip,
       });
