@@ -451,12 +451,16 @@ return (
           </label>
           <div className="flex items-center gap-3">
             {discordAvatar && (
-              // eslint-disable-next-line @next/next/no-img-element
+              // eslint-disable-next-line @next/next/no-img-element -- внешний хост Discord
               <img
                 src={discordAvatar}
                 alt="Discord"
                 width={36}
                 height={36}
+                // Discord CDN отдаёт 403 Forbidden, если пришёл чужой Referer
+                referrerPolicy="no-referrer"
+                loading="lazy"
+                decoding="async"
                 style={{ borderRadius: "50%", border: "1px solid var(--stroke-soft)" }}
               />
             )}

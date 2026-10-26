@@ -211,7 +211,7 @@ export default function ControlPage() {
                       {/* ИМЯ */}
                       <td>
                         <div className="flex items-center gap-2.5">
-                          <Avatar name={f.name} />
+                          <Avatar name={f.name} discordId={f.discordId} />
                           <div>
                             <div className="font-semibold leading-tight">{f.name}</div>
                             <div className="text-[12px]" style={{ color: "var(--dim)" }}>{f.rankName || "—"}</div>

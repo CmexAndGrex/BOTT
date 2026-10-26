@@ -6,6 +6,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import React, { useEffect, useState } from "react";
 import BackgroundSlideshow from "@/components/background";
 import { ReportLauncherProvider, useReportLauncher } from "@/components/report-launcher";
+import { resolveAvatarUrl } from "@/lib/discord-avatar";
 import {
   Activity, BookOpen, Bot, ChevronDown, Crosshair, FilePlus2, Globe, GraduationCap, IdCard, Inbox,
   LayoutDashboard, LogIn, LogOut, ScrollText, Settings2, ShieldAlert, UserRound, Users,
@@ -120,7 +121,13 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
   const [isAdmin, setIsAdmin] = useState(false);
   /** Логин учётной записи панели — нужен в карточке пользователя у штаба */
   const [username, setUsername] = useState<string | null>(null);
-  const [member, setMember] = useState<{ callsign: string; status: string; statusLabel: string } | null>(null);
+  const [member, setMember] = useState<{
+    callsign: string;
+    status: string;
+    statusLabel: string;
+    avatarUrl?: string | null;
+    discordId?: string | null;
+  } | null>(null);
   /**
    * Состояние личного кабинета из /api/me: ok | not_linked | no_access | no_session.
    *
@@ -180,6 +187,15 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
    * на сервере.
    */
   const isStaff = isCommander || isAdmin;
+
+  /**
+   * Аватар бойца для карточки в подвале сайдбара.
+   *
+   * Собирается тем же правилом, что и в досье: сохранённый адрес → хеш из него →
+   * дефолтная аватарка Discord по ID. Если ни того, ни другого нет, остаётся
+   * иконка UserRound (см. разметку ниже).
+   */
+  const memberAvatar = member ? resolveAvatarUrl(member.avatarUrl, member.discordId, 64) : null;
 
   /**
    * Меню сайдбара: две группы вместо одного длинного списка.
@@ -426,18 +442,38 @@ function ShellFrame({ children }: { children: React.ReactNode }) {
               className="flex items-center gap-2 rounded-2xl px-3 py-2.5"
               style={{ border: "1px solid var(--stroke-soft)", background: "rgba(255,255,255,0.02)" }}
             >
-              <span
-                className="flex shrink-0 items-center justify-center"
-                style={{
-                  width: 30,
-                  height: 30,
-                  borderRadius: 10,
-                  background: "var(--red-soft)",
-                  color: "var(--red)",
-                }}
-              >
-                <UserRound size={15} />
-              </span>
+              {/*
+                Аватар бойца в карточке пользователя. Если Discord ID известен,
+                Discord отдаёт либо загруженную аватарку, либо дефолтную — тогда
+                иконка UserRound не нужна. referrerPolicy="no-referrer" обязателен:
+                без него CDN отвечает 403 (см. lib/discord-avatar.ts).
+              */}
+              {memberAvatar ? (
+                // eslint-disable-next-line @next/next/no-img-element -- внешний хост Discord
+                <img
+                  src={memberAvatar}
+                  alt={member?.callsign || username || "профиль"}
+                  width={30}
+                  height={30}
+                  referrerPolicy="no-referrer"
+                  loading="lazy"
+                  decoding="async"
+                  style={{ borderRadius: 10, objectFit: "cover", flex: "none" }}
+                />
+              ) : (
+                <span
+                  className="flex shrink-0 items-center justify-center"
+                  style={{
+                    width: 30,
+                    height: 30,
+                    borderRadius: 10,
+                    background: "var(--red-soft)",
+                    color: "var(--red)",
+                  }}
+                >
+                  <UserRound size={15} />
+                </span>
+              )}
               <div className="min-w-0 flex-1">
                 {/* Позывной бойца важнее логина панели; у штаба без строки бойца
                     показываем логин, чтобы карточка не осталась безымянной */}

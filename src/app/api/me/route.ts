@@ -59,12 +59,20 @@ export async function GET(req: NextRequest) {
       ? {
           id: member.id,
           callsign: member.callsign,
+          name: member.name,
           rank: member.rank,
           post: member.post,
           status: member.status,
           statusLabel: statusLabel(member.status),
           role: member.role,
+          /**
+           * Аватар и Discord ID нужны карточке пользователя в сайдбаре: там
+           * рисуется та же аватарка, что и в досье. Раньше отдавался только
+           * avatarUrl, и при пустом значении карточка «теряла» лицо бойца,
+           * хотя дефолтную аватарку Discord можно собрать из ID.
+           */
           avatarUrl: member.avatarUrl,
+          discordId: member.discordId,
         }
       : null,
     /** Состояние кабинета: ok | not_linked | no_access | no_session */

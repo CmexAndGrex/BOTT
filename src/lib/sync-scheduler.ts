@@ -25,6 +25,7 @@ import {
 } from "@/lib/maintenance";
 import { getSettings, resolveCookie, setSettingQuiet } from "@/lib/settings";
 import { UNITS } from "@/lib/recruits";
+import { resolveRankAndUnit } from "@/lib/protected-profiles";
 
 declare global {
   var __atkMaintenanceStarted: boolean | undefined;
@@ -226,11 +227,25 @@ export async function syncShdsRoster(): Promise<{
         const rank = String(sheet.getCell(row - 1, nameColumn - 1).value ?? "").trim();
         if (!rank) continue;
 
+        /**
+         * Защищённые карточки командования (Иванов И. А.) сверка не правит.
+         *
+         * Строка командования в ШДС стоит в шапке листа и при ручной уборке
+         * таблицы может попасть в «Вакант» — тогда в колонке звания оказывается
+         * «Рядовой», а лист дивизиона даёт и чужое подразделение. Для зама
+         * корпуса это означало понижение звания и перевод в артиллерию на
+         * каждом цикле синхронизации.
+         */
+        const resolved = resolveRankAndUnit(fighter, { rank, unit });
+
         // Пишем только реальные изменения: иначе каждый проход трогал бы весь
         // состав и забивал журнал записями «обновлено 40 бойцов».
-        if (fighter.rank === rank && fighter.unit === unit) continue;
+        if (fighter.rank === resolved.rank && fighter.unit === resolved.unit) continue;
 
-        await db.update(members).set({ rank, unit }).where(eq(members.id, fighter.id));
+        await db
+          .update(members)
+          .set({ rank: resolved.rank, unit: resolved.unit })
+          .where(eq(members.id, fighter.id));
         updated++;
       }
       readSheets++;

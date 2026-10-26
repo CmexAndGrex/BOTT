@@ -291,12 +291,17 @@ return (
             <div className="flex flex-col gap-4 p-5">
               <div className="flex flex-wrap gap-5 text-[12.5px]" style={{ color: "var(--muted)" }}>
                 {recruit.avatarUrl && (
-                  // eslint-disable-next-line @next/next/no-img-element
+                  // eslint-disable-next-line @next/next/no-img-element -- внешний хост Discord
                   <img
                     src={recruit.avatarUrl}
                     alt=""
                     width={40}
                     height={40}
+                    // Discord CDN отдаёт 403 на чужой Referer — без атрибута
+                    // аватарка кандидата не грузилась вовсе
+                    referrerPolicy="no-referrer"
+                    loading="lazy"
+                    decoding="async"
                     style={{ borderRadius: "50%", border: "1px solid var(--stroke-soft)" }}
                   />
                 )}

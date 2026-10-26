@@ -191,7 +191,11 @@ export async function middleware(req: NextRequest) {
     "default-src 'self'",
     scriptSrc,
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob:",
+    // Аватарки бойцов приходят с Discord CDN. Без этих хостов браузер
+    // блокирует картинку ещё до запроса, и в досье остаётся пустой квадрат.
+    // referrerPolicy="no-referrer" на теге <img> обязателен по другой причине:
+    // Discord отдаёт 403, если видит чужой Referer (см. lib/discord-avatar.ts).
+    "img-src 'self' data: blob: https://cdn.discordapp.com https://media.discordapp.net",
     "font-src 'self' data:",
     "connect-src 'self'",
     "object-src 'none'",

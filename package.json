@@ -9,6 +9,7 @@
     "lint": "node scripts/lint-budget.mjs",
     "lint:strict": "eslint .",
     "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.tests.json",
     "test": "node --import ./tests/setup.mjs --test \"tests/**/*.test.ts\"",
     "secret:scan": "node scripts/secret-scan.mjs",
     "verify:sheet": "node scripts/verify-sheet.mjs",

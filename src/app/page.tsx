@@ -310,7 +310,7 @@ export default function DashboardPage() {
                 <tbody>
                   {debtors.slice(0, 8).map((m) => (
                     <tr key={m.id}>
-                      <td><div className="flex items-center gap-2.5"><Avatar name={m.name} /><div><div className="font-semibold leading-tight">{m.name}</div><div className="text-[11px]" style={{ color: "var(--dim)" }}>{[m.rankName, m.post].filter(Boolean).join(" · ") || "—"}</div></div></div></td>
+                      <td><div className="flex items-center gap-2.5"><Avatar name={m.name} discordId={m.discordId} /><div><div className="font-semibold leading-tight">{m.name}</div><div className="text-[11px]" style={{ color: "var(--dim)" }}>{[m.rankName, m.post].filter(Boolean).join(" · ") || "—"}</div></div></div></td>
                       <td><span className="mono font-bold" style={{ color: Math.floor(m.hours) === 0 ? "var(--red)" : "var(--amber)" }}>{m.hours.toFixed(1)} ч</span></td>
                       {canSeePrivate && (
                         <td>{m.discordId ? <span className="badge badge-green">привязан</span> : <span className="badge badge-red">нет ID</span>}</td>

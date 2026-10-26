@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { avatarInitials, resolveAvatarUrl } from "@/lib/discord-avatar";
 
 export function Section({
   title,
@@ -157,14 +158,49 @@ export function Ring({
   );
 }
 
-export function Avatar({ name }: { name: string }) {
-  const initials = name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((w) => w[0]?.toUpperCase() ?? "")
-    .join("");
-  return <div className="avatar">{initials || "?"}</div>;
+/**
+ * Аватар бойца в списках (обзор, состав, контроль).
+ *
+ * Раньше здесь всегда рисовались инициалы. Теперь, если известен Discord ID
+ * или сохранённый адрес аватарки, показывается картинка Discord, а инициалы
+ * остаются запасным вариантом (нет Discord / картинка не загрузилась).
+ *
+ * referrerPolicy="no-referrer" обязателен: Discord CDN отвечает 403 Forbidden,
+ * если в Referer пришёл чужой сайт (см. lib/discord-avatar.ts).
+ */
+export function Avatar({
+  name,
+  avatarUrl,
+  discordId,
+  size = 34,
+}: {
+  name: string;
+  avatarUrl?: string | null;
+  discordId?: string | null;
+  size?: number;
+}) {
+  const [failed, setFailed] = useState(false);
+  const src = resolveAvatarUrl(avatarUrl, discordId);
+
+  if (src && !failed) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element -- внешний хост Discord, next/image отключён
+      <img
+        src={src}
+        alt={name}
+        width={size}
+        height={size}
+        referrerPolicy="no-referrer"
+        loading="lazy"
+        decoding="async"
+        onError={() => setFailed(true)}
+        className="avatar"
+        style={{ objectFit: "cover" }}
+      />
+    );
+  }
+
+  return <div className="avatar">{avatarInitials(name)}</div>;
 }
 
 export function Spinner() {

@@ -18,6 +18,7 @@ import {
   resolveCookie,
 } from "@/lib/settings";
 import { isCommanderFighter } from "@/lib/validation";
+import { PROTECTED_PROFILE, isProtectedFighter } from "@/lib/protected-profiles";
 import { getMondayInMSK } from "@/lib/week-utils";
 
 export type TaskResult = {
@@ -151,14 +152,19 @@ export async function syncRoster(source = "manual"): Promise<
         // ВАЖНО: локальные поля панели (discordId, vacation, vacationUntil,
         // vacationNotified, warnings) НЕ трогаем — они имеют приоритет над
         // данными сайта. Обновляем только то, что приходит с rs-red.com.
+        //
+        // Защищённая карточка командования (Иванов И. А.): сайт не должен
+        // подменять должность и звание — там эти поля ведутся вручную, а на
+        // сайте могут быть устаревшими. Сайт по-прежнему обновляет онлайн.
+        const protectedCard = isProtectedFighter(match);
         await db
           .update(membersTable)
           .set({
             pid: p.pid ?? match.pid,
             handle: p.handle ?? match.handle,
             name: p.name,
-            rankName: p.rankName ?? match.rankName,
-            post: p.post ?? match.post,
+            rankName: protectedCard ? PROTECTED_PROFILE.rank : p.rankName ?? match.rankName,
+            post: protectedCard ? PROTECTED_PROFILE.post : p.post ?? match.post,
             minutes: p.minutes,
             hours: p.hours,
             active: true,
@@ -217,8 +223,15 @@ export async function syncRoster(source = "manual"): Promise<
 
     // Бойцы, исчезнувшие из состава, помечаются неактивными.
     // updatedAt фиксирует момент выхода — по нему считается «сутки без снятия ролей».
+    //
+    // Защищённые карточки командования из этого списка исключены: заместитель
+    // командира корпуса может не отображаться на сайте отдельной строкой, и
+    // автосписание делало его «выбывшим» — вместе с этим снимались роли и он
+    // пропадал из состава панели.
     if (roster.length > 0) {
-      const stale = existing.filter((e) => e.active && !seenIds.has(e.id));
+      const stale = existing.filter(
+        (e) => e.active && !seenIds.has(e.id) && !isProtectedFighter(e)
+      );
       for (const s of stale) {
         await db
           .update(membersTable)

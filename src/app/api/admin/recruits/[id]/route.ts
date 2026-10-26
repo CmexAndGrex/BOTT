@@ -34,6 +34,7 @@ import {
 } from "@/lib/recruits";
 import { grantEnlistmentRoles, recruitDmText, refreshRecruitMessage } from "@/lib/review";
 import { statusTrackingFields } from "@/lib/roles-monitor";
+import { PROTECTED_PROFILE, isProtectedFighter } from "@/lib/protected-profiles";
 import { generateTempPassword } from "@/lib/temp-password";
 import { applyVacationRole } from "@/lib/vacation-roles";
 
@@ -404,9 +405,17 @@ async function mergeIntoExistingMember(
        * листа ШДС: пустое поле унаследованной карточки (строка синхронизации
        * rs-red.com) иначе пришлось бы заполнять вручную. Присвоенное звание
        * (Ефрейтор и выше) не понижается.
+       *
+       * Защищённая карточка командования (Иванов И. А.) — исключение: слияние
+       * с заявкой не имеет права понизить звание и перевести его в другое
+       * подразделение.
        */
-      ...(pending.unit && !existing.unit ? { unit: pending.unit } : {}),
-      rank: isEnlistmentRank(existing.rank) ? RECRUIT_RANK : existing.rank || DEFAULT_RANK,
+      ...(isProtectedFighter(existing)
+        ? { unit: PROTECTED_PROFILE.unit, rank: PROTECTED_PROFILE.rank }
+        : {
+            ...(pending.unit && !existing.unit ? { unit: pending.unit } : {}),
+            rank: isEnlistmentRank(existing.rank) ? RECRUIT_RANK : existing.rank || DEFAULT_RANK,
+          }),
       ...statusTrackingFields(
         keepVacation ? MEMBER_STATUS.VACATION : MEMBER_STATUS.ACTIVE,
         existing.status
@@ -541,24 +550,35 @@ function buildPatch(member: MemberRow, body: UpdateBody, action: Action): PatchR
     }
   }
 
+  /**
+   * Защищённая карточка командования (Иванов И. А.): звание и подразделение
+   * правкой из панели не меняются. Приказ по заму корпуса оформляется отдельно,
+   * а случайное «сохранение» формы не должно ни понижать звание, ни переводить
+   * его в дивизион.
+   */
+  const protectedCard = isProtectedFighter({
+    discordId: (typeof values.discordId === "string" ? values.discordId : null) ?? member.discordId,
+    name: member.name,
+  });
+
   if (typeof body.rank === "string" && body.rank.trim()) {
     const rank = body.rank.trim();
     if (!(RANKS as readonly string[]).includes(rank)) {
       return { ok: false, error: `Неизвестное звание «${rank}»` };
     }
-    values.rank = rank;
+    values.rank = protectedCard ? PROTECTED_PROFILE.rank : rank;
   }
 
   if (typeof body.unit === "string") {
     const unit = body.unit.trim();
     if (!unit) {
-      values.unit = null;
+      values.unit = protectedCard ? PROTECTED_PROFILE.unit : null;
     } else if (!(UNITS as readonly string[]).includes(unit)) {
       // Подразделение = имя листа Google Таблицы: произвольное значение
       // привело бы к ошибке «лист не найден» при синхронизации
       return { ok: false, error: `Неизвестное подразделение «${unit}»` };
     } else {
-      values.unit = unit;
+      values.unit = protectedCard ? PROTECTED_PROFILE.unit : unit;
     }
   }
 
@@ -707,7 +727,16 @@ async function addToShdsSheet(
        * осталась пустой.
        */
       userName: member.name.includes(" ") ? member.name : member.callsign || member.name,
-      rank: isEnlistmentRank(member.rank) ? RECRUIT_RANK : member.rank || DEFAULT_RANK,
+      /**
+       * Защищённая карточка командования: в ШДС уходит его постоянное звание.
+       * Приведение «Курсант → Рядовой» здесь как раз и затирало «Ст. Лейтенант»
+       * при повторной записи строки.
+       */
+      rank: isProtectedFighter(member)
+        ? PROTECTED_PROFILE.rank
+        : isEnlistmentRank(member.rank)
+          ? RECRUIT_RANK
+          : member.rank || DEFAULT_RANK,
       steamId: "",
       discordId:
         member.discordId && member.discordId !== MANUAL_DISCORD_ID ? member.discordId : "",

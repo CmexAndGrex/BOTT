@@ -2,12 +2,16 @@
  * Засев эталонных данных из трёх официальных отчётов rs-red.com
  * (05.10—11.10, 12.10—18.10, 19.10—25.10 2026).
  *
- * Идемпотентен: выполняется один раз (флаг 'official_oct_2026_seeded_v1' в bot_settings).
- * При повторном вызове немедленно возвращает { skipped: true }.
+ * Идемпотентен: выполняется один раз (флаг 'official_oct_2026_seeded_v2' в
+ * bot_settings). При повторном вызове немедленно возвращает { skipped: true }.
  *
- * Логика матчинга имён:
- *   normalizePlayerName("Акулова Д.В..") === normalizePlayerName("Акулова Д.В.")
- *   — lowercase, ё→е, убираем точки и лишние пробелы
+ * Логика матчинга имён (жёсткая нормализация):
+ *   normalizeFighterName("Добролюбов Е.Д.") === normalizeFighterName("Добролюбов Е Д")
+ *   === normalizeFighterName("добролюбов е.д") === "добролюбовед" (без разделителей)
+ *
+ * Раньше точки лишь удалялись, а пробелы схлопывались, поэтому «Добролюбов Е.Д.»
+ * из БД и «Добролюбов Е Д» из отчёта давали разные ключи, и часы заполнялись
+ * только у тех 9 бойцов, чьи инициалы в БД были записаны с пробелами.
  */
 
 import { and, eq } from "drizzle-orm";
@@ -16,11 +20,25 @@ import { members as membersTable, weeklyStats, settings as settingsTable } from 
 import { sql } from "drizzle-orm";
 import { isCommanderFighter } from "@/lib/validation";
 
-const SEED_FLAG = "official_oct_2026_seeded_v1";
+/**
+ * Флаг идемпотентности.
+ *
+ * Версия поднята до v2: первый засев (v1) сопоставил только 9 бойцов из 37,
+ * потому что ключ имён оставлял значимыми пробелы и точки. Флаг v1 уже стоит
+ * в bot_settings у развёрнутого стенда, и без смены ключа исправленный матчинг
+ * никогда бы не выполнился. Новый ключ запускает засев заново ровно один раз.
+ */
+const SEED_FLAG = "official_oct_2026_seeded_v2";
+/** Прежний ключ — чистится при сбросе, чтобы не оставлять мусор в настройках */
+const LEGACY_SEED_FLAGS = ["official_oct_2026_seeded_v1"] as const;
 
 // Эталонные данные из официальных воскресных отчётов (лист «Танковые Войска»)
 // [05.10–11.10, 12.10–18.10, 19.10–25.10] — null означает отсутствие в составе на той неделе
-const OFFICIAL_REPORTS: Array<{
+//
+// Экспортируется для теста: он проверяет, что жёсткая нормализация ФИО не
+// склеивает двух разных бойцов в один ключ (однофамильцы «Иванов И.А.» и
+// «Иванов К.М.» должны оставаться разными).
+export const OFFICIAL_REPORTS: ReadonlyArray<{
   name: string;
   weeks: [number | null, number | null, number | null];
   warnings: number;
@@ -69,19 +87,24 @@ const OFFICIAL_REPORTS: Array<{
 const OFFICIAL_WEEK_STARTS = ["2026-10-05", "2026-10-12", "2026-10-19"] as const;
 
 /**
- * Нормализует имя бойца для матчинга:
- * - Нижний регистр
- * - Замена ё на е
- * - Удаление точек
- * - Сжатие множественных пробелов
+ * Жёсткий ключ ФИО для сопоставления отчёта и карточки бойца.
+ *
+ * В БД и в официальных отчётах одно и то же ФИО записано по-разному:
+ *   «Волков Д. В.», «Волков Д.В.», «Волков Д В», «волков д в»
+ * Мягкая нормализация (убрать точки, сжать пробелы) оставляла пробелы
+ * значимыми, поэтому совпадали только те 9 бойцов, у которых и в БД, и в
+ * отчёте инициалы были набраны одинаково — с пробелами.
+ *
+ * Здесь удаляется ВСЁ, кроме букв и цифр: точки, пробелы (включая неразрывные),
+ * дефисы, кавычки и прочие спецсимволы. «ё» приводится к «е», регистр вниз.
+ * Так «Добролюбов Е.Д.», «Добролюбов Е Д» и «добролюбов е.д» дают один ключ.
  */
-export function normalizePlayerName(name: string): string {
+export function normalizeFighterName(name: string | null | undefined): string {
+  if (!name) return "";
   return name
     .toLowerCase()
     .replace(/ё/g, "е")
-    .replace(/\./g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+    .replace(/[^а-яa-z0-9]/g, "");
 }
 
 export type SeedResult = {
@@ -110,7 +133,7 @@ export async function seedOfficialOnlineReports(): Promise<SeedResult> {
   const allMembers = await db.select().from(membersTable);
   const membersByNormalizedName = new Map<string, typeof allMembers[0]>();
   for (const m of allMembers) {
-    const key = normalizePlayerName(m.name);
+    const key = normalizeFighterName(m.name);
     if (!membersByNormalizedName.has(key)) {
       membersByNormalizedName.set(key, m);
     }
@@ -121,7 +144,7 @@ export async function seedOfficialOnlineReports(): Promise<SeedResult> {
   let updatedWarnings = 0;
 
   for (const reportEntry of OFFICIAL_REPORTS) {
-    const normalizedName = normalizePlayerName(reportEntry.name);
+    const normalizedName = normalizeFighterName(reportEntry.name);
     const member = membersByNormalizedName.get(normalizedName);
 
     if (!member) {
@@ -180,6 +203,12 @@ export async function seedOfficialOnlineReports(): Promise<SeedResult> {
     .values({ key: SEED_FLAG, value: "done" })
     .onConflictDoUpdate({ target: settingsTable.key, set: { value: "done" } });
 
+  // Снимаем устаревшие флаги версий: строка v1 в настройках больше ничего не
+  // значит и только путала бы при разборе «почему засев не выполнился».
+  for (const legacyKey of LEGACY_SEED_FLAGS) {
+    await db.delete(settingsTable).where(eq(settingsTable.key, legacyKey));
+  }
+
   return {
     totalFighters: OFFICIAL_REPORTS.length,
     matched,
@@ -189,11 +218,11 @@ export async function seedOfficialOnlineReports(): Promise<SeedResult> {
 }
 
 /**
- * Сбрасывает флаг идемпотентности, чтобы можно было запустить засев повторно.
- * Используется только для тестирования.
+ * Сбрасывает флаги идемпотентности (текущий и устаревшие), чтобы запустить
+ * засев повторно. Используется для тестирования и роутом с force=true.
  */
 export async function resetSeedFlag(): Promise<void> {
-  await db
-    .delete(settingsTable)
-    .where(eq(settingsTable.key, SEED_FLAG));
+  for (const key of [SEED_FLAG, ...LEGACY_SEED_FLAGS]) {
+    await db.delete(settingsTable).where(eq(settingsTable.key, key));
+  }
 }

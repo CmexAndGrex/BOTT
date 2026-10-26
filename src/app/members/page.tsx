@@ -390,7 +390,7 @@ export default function MembersPage() {
                   const zero = Math.floor(m.hours) === 0;
                   return (
                     <tr key={m.id} className={`${m.vacation ? "row-vacation" : ""} ${m.active ? "" : "row-inactive"}`}>
-                      <td><div className="flex items-center gap-2.5"><Avatar name={m.name} /><div><div className="font-semibold leading-tight">{m.name}{m.handle ? <span className="ml-1.5 text-[11px]" style={{ color: "var(--dim)" }}>@{m.handle}</span> : null}</div>{!m.active && (<span className="badge badge-red mt-0.5">выбыл</span>)}</div></div></td>
+                      <td><div className="flex items-center gap-2.5"><Avatar name={m.name} discordId={m.discordId} /><div><div className="font-semibold leading-tight">{m.name}{m.handle ? <span className="ml-1.5 text-[11px]" style={{ color: "var(--dim)" }}>@{m.handle}</span> : null}</div>{!m.active && (<span className="badge badge-red mt-0.5">выбыл</span>)}</div></div></td>
                       <td style={{ color: "var(--muted)" }}>{m.rankName ?? "—"}{m.post ? (<span style={{ color: "var(--dim)" }}> · {m.post}</span>) : null}</td>
                       <td>
                         <div className="flex items-center gap-2.5">

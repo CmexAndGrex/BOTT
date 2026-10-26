@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Section, Spinner, fmtDate } from "@/components/ui";
+import { resolveAvatarUrl } from "@/lib/discord-avatar";
 import { ReportForm, type SessionMember } from "@/components/reports-panel";
 import { reportTypeMeta, type ServiceReportType } from "@/lib/reports";
 import {
@@ -81,6 +82,14 @@ export function DossierHeader({
   onReport: () => void;
   onLogout: () => void;
 }) {
+  /**
+   * Аватар: сохранённый адрес Discord пересобирается под нужный размер, а если
+   * картинки нет — берётся дефолтная по Discord ID. Сбой загрузки (403/404)
+   * переводит шапку на «тактическую» заглушку, а не оставляет пустой квадрат.
+   */
+  const [avatarFailed, setAvatarFailed] = useState(false);
+  const avatarSrc = avatarFailed ? null : resolveAvatarUrl(member.avatarUrl, member.discordId, 128);
+
   const division =
     member.unit === "Танковая рота"
       ? "Танковая рота"
@@ -93,13 +102,19 @@ export function DossierHeader({
       <div className="flex flex-wrap items-start gap-5">
         {/* Аватар: без картинки — «тактическая» заглушка с инициалами позывного */}
         <div className="flex items-center gap-4">
-          {member.avatarUrl ? (
+          {avatarSrc ? (
             // eslint-disable-next-line @next/next/no-img-element -- аватар Discord с внешнего хоста
             <img
-              src={member.avatarUrl}
+              src={avatarSrc}
               alt={member.callsign}
               width={72}
               height={72}
+              // Discord CDN отвечает 403 Forbidden на чужой Referer — без этого
+              // атрибута в досье оставался пустой квадрат
+              referrerPolicy="no-referrer"
+              loading="lazy"
+              decoding="async"
+              onError={() => setAvatarFailed(true)}
               style={{ width: 72, height: 72, borderRadius: 18, objectFit: "cover", flex: "none" }}
             />
           ) : (
